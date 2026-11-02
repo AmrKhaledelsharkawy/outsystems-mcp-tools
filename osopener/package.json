@@ -1,0 +1,48 @@
+{
+  "name": "osopener",
+  "version": "0.1.0",
+  "description": "Windows-only stdio MCP server that opens a named OutSystems 11 module in the running Service Studio (process check, bring to front, UI Automation + keyboard, confirmed via servicestudio listApps).",
+  "type": "module",
+  "bin": {
+    "osopener": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "README.md"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && vitest run",
+    "lint": "eslint src tests",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
+    "eslint": "10.13.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools.git",
+    "directory": "osopener"
+  },
+  "homepage": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/tree/main/osopener#readme",
+  "bugs": {
+    "url": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/issues"
+  }
+}

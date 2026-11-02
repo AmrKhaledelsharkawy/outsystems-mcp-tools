@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.osgraph/
+*.tgz
+token.txt
+
+# F0 raw element-text captures (<graphDir>/<scope>/raw/). Reproducible from Service Studio,
+# large, and never reviewed: .osgraph/ already covers the default graphDir, this covers a relocated one.
+raw/

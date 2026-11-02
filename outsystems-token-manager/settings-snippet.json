@@ -1,0 +1,65 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__servicestudio__applyModelApiCode|mcp__servicestudio__startOmlEditSession",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ~/.claude/hooks/os-mcp-guard.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__servicestudio__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"<HOME>/.claude/hooks/os-session-token-guard.py\"",
+            "shell": "powershell",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__servicestudio__createSessionToken|mcp__servicestudio__listApps",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"<HOME>/.claude/hooks/os-session-token-guard.py\"",
+            "shell": "powershell",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__servicestudio__listApps",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"<HOME>/.claude/hooks/os-session-token-guard.py\"",
+            "shell": "powershell",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ~/.claude/hooks/os-session-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

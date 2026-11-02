@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "source": "MOD Code Review Template v1.0",
+  "layers": ["UI", "CW", "SL", "BL", "CS", "LKP"],
+  "layerSuffixPattern": "_(UI|CW|SL|BL|CS|LKP)$",
+  "unknownLayerTag": "UNKNOWN",
+  "notes": "allow[layer] lists every layer that `layer` is permitted to reference, including itself (same-layer peer modules are always allowed). Any (source, target) pair not listed is forbidden. Edges to/from an UNKNOWN-tagged module are never evaluated. All violations report at a single severity: \"violation\".",
+  "allow": {
+    "UI": ["UI", "CW", "SL"],
+    "CW": ["CW", "SL"],
+    "SL": ["SL", "BL"],
+    "BL": ["BL", "CS"],
+    "CS": ["CS"],
+    "LKP": ["LKP"]
+  }
+}

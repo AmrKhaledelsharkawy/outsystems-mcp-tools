@@ -1,0 +1,53 @@
+{
+  "name": "osgraph",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Deterministic, no-LLM dependency graph over a user-defined scope of OutSystems 11 modules open in Service Studio, exposed as an MCP server.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools.git",
+    "directory": "osgraph"
+  },
+  "keywords": [
+    "outsystems",
+    "mcp",
+    "dependency-graph",
+    "service-studio",
+    "graphify"
+  ],
+  "type": "module",
+  "bin": {
+    "osgraph": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "layer-rules.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && vitest run",
+    "lint": "eslint src tests",
+    "prepack": "npm run build",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
+    "eslint": "10.13.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5"
+  },
+  "homepage": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/tree/main/osgraph#readme",
+  "bugs": {
+    "url": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/issues"
+  }
+}

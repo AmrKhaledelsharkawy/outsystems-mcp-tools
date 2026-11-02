@@ -1,0 +1,33 @@
+# Build output — every consumer runs `npm run build` themselves.
+dist/
+node_modules/
+
+# Working material that stays local: it carries real module and app names from
+# the environment these servers were developed against. Anchored to each package
+# root on purpose — a bare `scopes/` would also swallow osgraph/src/scopes/,
+# which is source code.
+osgraph/tests/
+osgraph/scopes/
+osgraph/docs/
+osgraph/GLOSSARY.md
+osopener/tests/
+osopener/docs/
+osopener/screenshots/
+osopener/tracks/
+*.oml
+
+# Ad-hoc live probe scripts: hardcoded local paths and real module names.
+.probe/
+
+# osgraph's own CI assumed the repo root was its package root and runs the
+# excluded test suite; the root workflow replaces it.
+osgraph/.github/
+
+# Graph data and the human-approved Service Studio session token.
+.osgraph/
+token.txt
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.log
