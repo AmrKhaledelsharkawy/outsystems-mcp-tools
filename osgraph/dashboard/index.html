@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osgraph — live progress</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #e3e6eb;
+    --accent: #2f6fe4; --accent-soft: #e5eefc; --ok: #1f9d55; --ok-soft: #e3f5ea;
+    --warn: #c47f00; --warn-soft: #fff3d6; --bad: #d23b3b; --bad-soft: #fde7e7; --idle: #9aa3af;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1216; --panel: #171b21; --ink: #e8ebef; --muted: #98a2b0; --line: #262c35;
+      --accent: #5b8ff0; --accent-soft: #1a2740; --ok: #3cc277; --ok-soft: #13291d; --warn: #e3a52a;
+      --warn-soft: #2e2512; --bad: #ef6464; --bad-soft: #321818; --idle: #5d6673; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .scope { font-family: var(--mono); color: var(--muted); }
+  header select.scope { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: 13px var(--mono); max-width: 60vw; }
+  nav { display: flex; gap: 4px; margin-left: auto; }
+  nav button { border: 1px solid var(--line); background: transparent; color: var(--ink); padding: 6px 14px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .live { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+  .dot.on { background: var(--ok); animation: pulse 2s infinite; }
+  .dot.bad { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; gap: 16px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .big { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .bar { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; position: relative; }
+  .bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 6px; transition: width .6s; }
+  .bar.ok > i { background: var(--ok); }
+  .hero { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .hero .row { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  .hero .pct { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  .two { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
+  @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+  .phases { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
+  .ph { border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px; text-align: center; font-size: 11px; color: var(--muted); }
+  .ph b { display: block; font-size: 12px; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ph.done { background: var(--ok-soft); border-color: transparent; }
+  .ph.run { background: var(--accent-soft); border-color: var(--accent); }
+  .ph.skip { opacity: .45; }
+  @media (max-width: 700px) { .phases { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; position: sticky; top: 0; background: var(--panel); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.mod { font-family: var(--mono); font-size: 12px; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .chip.done { background: var(--ok-soft); color: var(--ok); }
+  .chip.running { background: var(--accent-soft); color: var(--accent); }
+  .chip.pending { background: var(--line); color: var(--muted); }
+  .chip.failed { background: var(--bad-soft); color: var(--bad); }
+  .chip.opening { background: var(--warn-soft); color: var(--warn); }
+  tr.running td { background: var(--accent-soft); }
+  .mini { width: 120px; height: 6px; background: var(--line); border-radius: 4px; position: relative; display: inline-block; vertical-align: middle; }
+  .mini i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--ok); }
+  .mini i.slow { background: var(--warn); }
+  .log { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-all; color: var(--muted); max-height: 260px; overflow: auto; margin: 0; }
+  .log .t { color: var(--accent); }
+  .banner { padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; font-weight: 600; }
+  .banner.ok { background: var(--ok-soft); color: var(--ok); }
+  .banner.bad { background: var(--bad-soft); color: var(--bad); }
+  .muted { color: var(--muted); }
+  /* graph view */
+  #graphView { display: grid; grid-template-columns: 300px minmax(0, 1fr) 340px; gap: 12px; height: calc(100vh - 110px); }
+  @media (max-width: 1100px) { #graphView { grid-template-columns: 1fr; height: auto; } #net { height: 70vh; } }
+  #net { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 400px; }
+  .side { overflow: auto; }
+  input, select { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+  .list { margin: 8px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11.5px; }
+  .list li { padding: 4px 6px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list li:hover { background: var(--accent-soft); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .seg { display: flex; gap: 4px; margin: 8px 0; }
+  .seg button { flex: 1; border: 1px solid var(--line); background: transparent; color: var(--ink); padding: 5px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+  .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn { border: 1px solid var(--accent); background: var(--accent); color: #fff; padding: 7px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 600; width: auto; }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .opt { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; flex-wrap: wrap; }
+  .opt input { width: auto; }
+  .chip.expanded { background: var(--ok-soft); color: var(--ok); }
+  .chip.leaf, .chip.listed, .chip.skipped, .chip.queued { background: var(--line); color: var(--muted); }
+  code { font-family: var(--mono); font-size: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>osgraph</h1><label class="scope" for="scopeSel">scope:</label><select id="scopeSel" class="scope" title="Which scope to watch"><option>loading…</option></select>
+  <span class="live"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
+  <nav><button id="tabRun" class="on">Rebuild progress</button><button id="tabGraph">Graph explorer</button><button id="tabDisc">Discover</button></nav>
+</header>
+
+<main id="runView">
+  <div id="banner"></div>
+  <div class="grid kpis">
+    <div class="card hero" style="grid-column: span 2">
+      <h2>Overall progress</h2>
+      <div class="row"><span class="pct" id="pct">–</span><span class="muted" id="pctNote"></span></div>
+      <div class="bar" id="mainBar"><i style="width:0"></i></div>
+      <div class="row sub"><span id="modulesLine"></span><span id="paceLine"></span></div>
+    </div>
+    <div class="card"><h2>Time remaining</h2><div class="big" id="eta">–</div><div class="sub" id="etaAt"></div></div>
+    <div class="card"><h2>Elapsed</h2><div class="big" id="elapsed">–</div><div class="sub" id="startedAt"></div></div>
+    <div class="card"><h2>Graph so far</h2><div class="big" id="nodes">–</div><div class="sub" id="edges"></div></div>
+    <div class="card"><h2>Action flows</h2><div class="big" id="flowsBig">–</div><div class="sub" id="flowsSub"></div></div>
+  </div>
+
+  <div class="grid two" style="margin-top:16px">
+    <div class="card">
+      <h2>Current module</h2>
+      <div id="curName" class="big" style="font-size:18px; font-family: var(--mono)">–</div>
+      <div class="sub" id="curSub"></div>
+      <div class="bar" style="margin-top:10px" id="curBar"><i style="width:0"></i></div>
+      <div class="phases" id="phases"></div>
+    </div>
+    <div class="card">
+      <h2>Live log</h2>
+      <pre class="log" id="log"></pre>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Modules <span class="muted" id="modCounts" style="text-transform:none; letter-spacing:0"></span></h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>#</th><th>Module</th><th>Layer</th><th>Status</th><th class="num">Nodes</th><th class="num">Edges</th><th class="num">Time</th><th class="num">Expected</th><th>vs last run</th><th>Staged at</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </div>
+  <p class="muted" style="font-size:12px">Read-only view of the run's files. Expected times come from the previous full read of each module; the ETA scales them by this run's measured pace and adds ~25 s open/close per module. Refreshes every 3 s.</p>
+</main>
+
+<main id="graphView" hidden>
+  <div class="card side">
+    <h2>Graph</h2>
+    <div class="sub" id="gWhich">loading…</div>
+    <div class="kv" id="gStats" style="margin-top:10px"></div>
+    <h2 style="margin-top:16px">Find element</h2>
+    <input id="gSearch" placeholder="name, e.g. SL_ValidateOpportunity">
+    <ul class="list" id="gResults"></ul>
+    <h2 style="margin-top:16px">Modules</h2>
+    <select id="gModule"><option value="">— overview (module level) —</option></select>
+  </div>
+  <div id="net"></div>
+  <div class="card side">
+    <h2>Selected</h2>
+    <div id="selName" class="muted">Click a node.</div>
+    <div class="kv" id="selKv" style="margin-top:8px"></div>
+    <div class="seg"><button id="dirDep" class="on">Dependents (who uses it)</button><button id="dirDeps">Dependencies</button></div>
+    <div class="seg"><button data-d="1" class="on">depth 1</button><button data-d="2">2</button><button data-d="3">3</button></div>
+    <div class="sub" id="impactCount"></div>
+    <ul class="list" id="impact"></ul>
+  </div>
+</main>
+
+
+<main id="discView" hidden>
+  <div class="grid two">
+    <div class="card">
+      <h2>New discovery</h2>
+      <label class="sub">Starter module(s) &mdash; comma or space separated</label>
+      <input id="dStarters" list="dKnown" placeholder="MOD_MyApp_Portal_UI">
+      <datalist id="dKnown"></datalist>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px">
+        <div><label class="sub">Depth</label><select id="dDepth"><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></div>
+        <div><label class="sub">Max modules</label><input id="dMax" type="number" min="1" max="500" value="150"></div>
+      </div>
+      <div class="sub" id="dDepthHelp" style="margin-top:6px"></div>
+      <label class="opt"><input id="dPrune" type="checkbox" checked> Skip LKP modules (layer rule: they reference nothing MOD) <span class="muted">&mdash; faster, but hides an LKP that breaks the rule</span></label>
+      <label class="opt"><input id="dCache" type="checkbox" checked> Reuse answers from earlier discoveries</label>
+      <label class="opt"><input id="dDry" type="checkbox"> Dry run (cache only, never touches Service Studio)</label>
+      <div style="display:flex; gap:8px; margin-top:14px; align-items:center; flex-wrap:wrap">
+        <button id="dStart" class="btn">Start discovery</button><button id="dCancel" class="btn ghost" hidden>Cancel</button>
+        <span class="sub" id="dMsg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>How it stays fast</h2>
+      <ul class="sub" style="margin:0; padding-left:18px; line-height:1.7">
+        <li>One <code>runQuery References</code> call per module &mdash; no element is read.</li>
+        <li>Cached answers cost nothing; open modules are queried before closed ones.</li>
+        <li>A module it opens is closed right after its query, so Studio stays small.</li>
+        <li>Platform / Forge modules ((System), OutSystemsUI&hellip;) are listed, never expanded.</li>
+        <li>Each module is expanded once, at its shallowest depth.</li>
+      </ul>
+      <p class="sub">Needs Service Studio free: it will not start while a rebuild is reading. Starting is only allowed from this PC; other devices can watch.</p>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px" id="dRun" hidden>
+    <h2>Discovery <span class="muted" id="dId" style="text-transform:none; letter-spacing:0"></span></h2>
+    <div class="grid kpis">
+      <div><div class="big" id="dFound">&ndash;</div><div class="sub">modules found</div></div>
+      <div><div class="big" id="dLevels">&ndash;</div><div class="sub">per depth level</div></div>
+      <div><div class="big" id="dEta">&ndash;</div><div class="sub" id="dEtaNote"></div></div>
+      <div><div class="big" id="dElapsed">&ndash;</div><div class="sub">elapsed</div></div>
+    </div>
+    <div class="sub" id="dCurrent" style="margin-top:10px"></div>
+    <div id="dSave" hidden style="display:flex; gap:8px; margin-top:12px; align-items:center; flex-wrap:wrap">
+      <input id="dScopeName" placeholder="scope name, e.g. myapp-d2" style="max-width:320px">
+      <button id="dSaveBtn" class="btn">Save as scope</button><span class="sub" id="dSaveMsg"></span>
+    </div>
+    <div class="tablewrap" style="margin-top:12px"><table>
+      <thead><tr><th>Depth</th><th>Module</th><th>Layer</th><th>Status</th><th class="num">Refs</th><th class="num">Time</th><th>How</th><th>Found via</th></tr></thead>
+      <tbody id="dRows"></tbody>
+    </table></div>
+  </div>
+</main>
+
+<!--
+  The node-link view is drawn by vis-network, loaded from a CDN. It is the ONLY thing on this
+  page that needs the internet; the rebuild-progress tab and every table are served entirely by
+  the local server. `onerror` records the failure so the explorer can say so plainly instead of
+  throwing "vis is not defined" into the console, which looks like a bug in the page.
+
+  To run fully offline, drop vis-network.min.js next to this file and change the src to
+  "vis-network.min.js" - it is served from the dashboard directory.
+-->
+<script src="vis-network.min.js" onerror="window.__visLocalMissing = true"></script>
+<script>
+  if (window.__visLocalMissing) {
+    document.write('<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js" onerror="window.__visFailed = true"><\/script>');
+  }
+</script>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtDur = (ms) => {
+  if (ms === null || ms === undefined) return '–';
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`;
+};
+const fmtClock = (t) => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '–';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const PHASES = ['listing', 'dataModel', 'structures', 'screens', 'blocks', 'clientActions', 'serverActions', 'extract'];
+
+// ---------------- run view ----------------
+let lastStatus = null;
+// Scope: ?scope= in the URL, else the last one picked here, else the server default.
+let SCOPE = new URLSearchParams(location.search).get('scope') || (() => { try { return localStorage.getItem('osgraph.scope'); } catch { return null; } })() || '';
+const q = () => (SCOPE ? `?scope=${encodeURIComponent(SCOPE)}` : '');
+async function loadScopes() {
+  try {
+    const { default: def, scopes } = await (await fetch('/api/scopes', { cache: 'no-store' })).json();
+    if (!scopes.some((x) => x.name === SCOPE)) SCOPE = def;
+    $('scopeSel').innerHTML = scopes.map((x) => `<option value="${esc(x.name)}">${esc(x.name)} (${x.modules} module${x.modules === 1 ? '' : 's'})</option>`).join('');
+    $('scopeSel').value = SCOPE;
+  } catch { /* keep the static option */ }
+}
+$('scopeSel').onchange = () => {
+  SCOPE = $('scopeSel').value;
+  try { localStorage.setItem('osgraph.scope', SCOPE); } catch { /* private window */ }
+  history.replaceState(null, '', `?scope=${encodeURIComponent(SCOPE)}`);
+  document.title = `osgraph — ${SCOPE}`;
+  G = null; $('gModule').length = 1;
+  refresh();
+  if (!$('graphView').hidden) loadGraph();
+};
+async function refresh() {
+  try {
+    const r = await fetch('/api/status' + q(), { cache: 'no-store' });
+    const s = await r.json();
+    if (SCOPE && s.scope !== SCOPE) return; // a response for the scope we just left
+    lastStatus = s;
+    renderRun(s);
+    $('liveDot').className = 'dot ' + (s.run.complete || s.run.finalized ? '' : s.run.stalled ? 'bad' : 'on');
+    $('liveText').textContent = s.run.finalized ? 'finished' : s.run.stalled ? 'no activity for 30 min' : `live · ${new Date().toLocaleTimeString()}`;
+  } catch {
+    $('liveDot').className = 'dot bad'; $('liveText').textContent = 'server unreachable';
+  }
+}
+function renderRun(s) {
+  const p = s.progress;
+  const pct = p.pctByTime;
+  $('pct').textContent = `${(pct * 100).toFixed(1)}%`;
+  $('pctNote').textContent = s.modules.some((m) => m.expectedMs) ? 'of the expected read time' : 'by element texts read (no timing history)';
+  $('mainBar').className = 'bar' + (s.run.finalized ? ' ok' : '');
+  $('mainBar').firstElementChild.style.width = `${(pct * 100).toFixed(2)}%`;
+  $('modulesLine').textContent = `${p.modulesDone} of ${p.modulesTotal} modules staged` + (p.modulesFailed ? ` · ${p.modulesFailed} failed (retried at the end)` : '');
+  $('paceLine').textContent = p.pace != null ? `pace ${p.pace.toFixed(2)}× the last run` : 'no previous run to compare';
+  const f = s.flows;
+  $('flowsBig').textContent = f ? `${(f.actions ?? 0).toLocaleString()} actions` : '–';
+  $('flowsSub').textContent = f ? `${(f.nodes ?? 0).toLocaleString()} flow nodes · ${(f.bindings ?? 0).toLocaleString()} bindings · ${f.unknown ?? 0} unknown · ${f.parseErrors ?? 0} parse errors` : 'flows.json is written at finalize';
+  $('eta').textContent = s.run.finalized ? 'done' : p.etaMs == null ? 'unknown' : fmtDur(p.etaMs);
+  $('etaAt').textContent = s.run.finalized ? 'graph.json written' : p.etaAt ? `finishes around ${fmtClock(p.etaAt)}` : p.etaMs == null ? 'first run of these modules — no timing history' : '';
+  $('elapsed').textContent = fmtDur(s.run.elapsedMs);
+  $('startedAt').textContent = s.run.startedAt ? `started ${fmtClock(s.run.startedAt)}` : '';
+  const done = s.modules.filter((m) => m.state === 'done');
+  $('nodes').textContent = done.reduce((n, m) => n + (m.nodes ?? 0), 0).toLocaleString() + ' nodes';
+  $('edges').textContent = done.reduce((n, m) => n + (m.edges ?? 0), 0).toLocaleString() + ' edges extracted (before merge)';
+
+  const b = $('banner');
+  if (s.run.finalized) { b.className = 'banner ok'; b.textContent = `Finished — graph.json written ${fmtClock(s.snapshot.writtenAt)}. Open the Graph explorer to browse it.`; }
+  else if (s.run.noRunLog) { b.className = 'banner'; b.textContent = `No run log found for scope '${s.scope}'. Showing what is on disk (stage / graph.json / flows.json).`; }
+  else if (s.run.stalled) { b.className = 'banner bad'; b.textContent = `No activity for 30 minutes (no log line and no element text written since ${fmtClock(s.run.lastActivityAt)}) — the run may be stuck.`; }
+  else if (s.run.complete) { b.className = 'banner bad'; b.textContent = `Pass ended with ${p.modulesTotal - p.modulesDone} module(s) not staged; a retry pass is needed.`; }
+  else { b.className = ''; b.textContent = ''; }
+
+  // current module
+  const c = s.current;
+  const next = s.modules.find((m) => m.state === 'pending' || m.state === 'failed');
+  if (c) {
+    $('curName').textContent = c.module;
+    $('curSub').textContent = `${fmtDur(c.elapsedMs)} elapsed · expected ~${fmtDur(c.expectedMs)}` +
+      (c.phase ? ` · ${c.phase}${c.phaseCount !== null ? (c.phaseItemsRead != null ? ` (${c.phaseItemsRead} of ${c.phaseCount} read)` : ` (${c.phaseCount} items)`) : ''} for ${fmtDur(c.phaseElapsedMs)}` : '');
+    $('curBar').firstElementChild.style.width = `${((c.pct ?? 0) * 100).toFixed(1)}%`;
+    $('phases').innerHTML = PHASES.map((ph) => {
+      const d = c.phasesDone?.[ph];
+      const e = c.phasesExpected?.[ph];
+      const cls = d !== undefined ? 'done' : ph === c.phase ? 'run' : e === 0 ? 'skip' : '';
+      const val = d !== undefined ? fmtDur(d) : ph === c.phase ? fmtDur(c.phaseElapsedMs) : e ? `~${fmtDur(e)}` : '—';
+      return `<div class="ph ${cls}"><b>${ph}</b>${val}</div>`;
+    }).join('');
+  } else if (!s.run.finalized && !s.run.complete && next) {
+    $('curName').textContent = next.module;
+    $('curSub').textContent = 'opening in Service Studio (osopener) / starting…';
+    $('curBar').firstElementChild.style.width = '0';
+    $('phases').innerHTML = PHASES.map((ph) => `<div class="ph"><b>${ph}</b>—</div>`).join('');
+  } else {
+    $('curName').textContent = '–'; $('curSub').textContent = s.run.finalized ? 'all modules staged' : ''; $('phases').innerHTML = '';
+    $('curBar').firstElementChild.style.width = s.run.finalized ? '100%' : '0';
+  }
+
+  // log
+  $('log').innerHTML = s.logTail.map((l) => `<span class="t">${l.at ? new Date(l.at).toLocaleTimeString() : '        '}</span> ${esc(l.text)}`).join('\n');
+  $('log').scrollTop = 1e9;
+
+  // table
+  const counts = s.modules.reduce((a, m) => ((a[m.state] = (a[m.state] ?? 0) + 1), a), {});
+  $('modCounts').textContent = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ');
+  const nextKey = !c && next ? next.module : null;
+  $('rows').innerHTML = s.modules.map((m) => {
+    const state = m.module === nextKey && !s.run.complete ? 'opening' : m.state;
+    const ratio = m.actualMs && m.expectedMs ? m.actualMs / m.expectedMs : null;
+    const bar = ratio ? `<span class="mini" title="${(ratio * 100).toFixed(0)}% of last run"><i class="${ratio > 1.25 ? 'slow' : ''}" style="width:${Math.min(100, ratio * 50)}%"></i></span> ${(ratio * 100).toFixed(0)}%` : '';
+    const time = state === 'running' && c ? fmtDur(c.elapsedMs) : fmtDur(m.actualMs);
+    const err = m.error ? ` <span class="muted" title="${esc(m.errorMessage)}">${esc(m.error)}</span>` : '';
+    return `<tr class="${state}"><td class="num">${m.index}</td><td class="mod">${esc(m.module)}</td><td>${esc(m.layer)}</td>` +
+      `<td><span class="chip ${state}">${state}</span>${err}</td><td class="num">${m.nodes ?? ''}</td><td class="num">${m.edges ?? ''}</td>` +
+      `<td class="num">${m.actualMs || state === 'running' ? time : ''}</td><td class="num">${fmtDur(m.expectedMs)}</td><td>${bar}</td>` +
+      `<td class="muted">${m.stagedAt ? fmtClock(Date.parse(m.stagedAt)) : ''}</td></tr>`;
+  }).join('');
+}
+loadScopes().then(() => { document.title = `osgraph — ${SCOPE}`; refresh(); });
+setInterval(refresh, 3000);
+
+// ---------------- tabs ----------------
+function showTab(t) {
+  for (const [b, v] of [['tabRun', 'runView'], ['tabGraph', 'graphView'], ['tabDisc', 'discView']]) { $(b).className = b === t ? 'on' : ''; $(v).hidden = b !== t; }
+  if (t === 'tabGraph') loadGraph();
+  if (t === 'tabDisc') discInit();
+}
+$('tabRun').onclick = () => showTab('tabRun');
+$('tabGraph').onclick = () => showTab('tabGraph');
+$('tabDisc').onclick = () => showTab('tabDisc');
+
+// ---------------- discovery ----------------
+let discTimer = null, discId = null, discInited = false;
+const depthHelp = () => {
+  const d = Number($('dDepth').value);
+  $('dDepthHelp').textContent = d === 1 ? 'Depth 1: the starters and the modules they reference.'
+    : `Depth ${d}: starters → their references → ` + Array.from({ length: d - 1 }, () => 'references of those').join(' → ') + '.';
+};
+async function discInit() {
+  if (discInited) return;
+  discInited = true;
+  depthHelp();
+  $('dDepth').onchange = depthHelp;
+  try {
+    const mods = await (await fetch('/api/discover/modules')).json();
+    $('dKnown').innerHTML = mods.map((m) => `<option value="${esc(m)}">`).join('');
+  } catch { /* autocomplete is optional */ }
+  pollDisc();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return { ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) };
+}
+$('dStart').onclick = async () => {
+  $('dMsg').textContent = 'starting…';
+  const r = await post('/api/discover/start', {
+    starters: $('dStarters').value, depth: Number($('dDepth').value), maxModules: Number($('dMax').value),
+    pruneByLayer: $('dPrune').checked, useCache: $('dCache').checked, dryRun: $('dDry').checked
+  });
+  $('dMsg').textContent = r.ok ? '' : r.body.error ?? `failed (${r.status})`;
+  if (r.ok) { discId = r.body.id; $('dScopeName').value = ''; $('dSaveMsg').textContent = ''; pollDisc(); }
+};
+$('dCancel').onclick = () => post('/api/discover/cancel', {});
+const saved = (r) => (r.ok ? `Saved ${r.body.count} modules → ${r.body.saved}` : r.body.error ?? 'failed');
+$('dSaveBtn').onclick = async () => {
+  const name = $('dScopeName').value.trim();
+  const r = await post('/api/discover/save', { id: discId, name });
+  if (r.status === 409 && r.body.exists) {
+    $('dSaveMsg').innerHTML = `${esc(r.body.error)} <button class="btn ghost" id="dOverwrite">Overwrite</button>`;
+    $('dOverwrite').onclick = async () => { $('dSaveMsg').textContent = saved(await post('/api/discover/save', { id: discId, name, overwrite: true })); };
+    return;
+  }
+  $('dSaveMsg').textContent = saved(r);
+};
+async function pollDisc() {
+  clearTimeout(discTimer);
+  let s;
+  try {
+    s = await (await fetch('/api/discover/status' + (discId ? `?id=${encodeURIComponent(discId)}` : ''), { cache: 'no-store' })).json();
+  } catch { discTimer = setTimeout(pollDisc, 3000); return; }
+  const busy = Boolean(lastStatus && !lastStatus.run.complete && !lastStatus.run.finalized && !lastStatus.run.stalled);
+  const dry = $('dDry').checked;
+  $('dStart').disabled = Boolean(s.running) || (busy && !dry);
+  $('dStart').title = busy && !dry ? 'A rebuild is using Service Studio' : '';
+  if (busy && !dry && !s.running && !$('dMsg').textContent) $('dMsg').textContent = 'Waiting for the rebuild to finish — Studio allows one client at a time. (A dry run can start now.)';
+  if ((!busy || dry) && $('dMsg').textContent.startsWith('Waiting')) $('dMsg').textContent = '';
+  $('dCancel').hidden = !s.running;
+  if (!s.none && !s.starting && s.modules) {
+    discId = s.id;
+    $('dRun').hidden = false;
+    const req = s.request ?? {};
+    $('dId').textContent = `${(req.starters ?? []).join(', ')} · depth ${req.depth}${req.dryRun ? ' · dry run' : ''}`;
+    $('dFound').textContent = s.modules.length;
+    $('dLevels').textContent = (s.levels ?? []).join(' · ');
+    $('dEta').textContent = s.done ? (s.stopped ? 'stopped' : 'done') : fmtDur(s.etaMs);
+    $('dEtaNote').textContent = s.done ? (s.stopped ?? 'finished') : `remaining, ${s.etaNote}`;
+    $('dElapsed').textContent = fmtDur(s.elapsedMs);
+    $('dCurrent').textContent = s.current ? `Now: ${s.current.module} (depth ${s.current.level}) — ${s.current.step}` : '';
+    $('dSave').hidden = !s.done;
+    if (s.done && !$('dScopeName').value) $('dScopeName').value = `${(req.starters ?? ['scope'])[0]}-d${req.depth}`;
+    const order = { expanded: 0, failed: 1, leaf: 2, listed: 3, skipped: 4, queued: 5 };
+    $('dRows').innerHTML = [...s.modules]
+      .sort((a, b) => a.level - b.level || (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.module.localeCompare(b.module))
+      .map((r) =>
+        `<tr><td class="num">${r.level}</td><td class="mod">${esc(r.module)}</td><td>${esc(r.layer)}</td>` +
+        `<td><span class="chip ${esc(r.state)}">${esc(r.state)}</span>${r.error ? ` <span class="muted" title="${esc(r.error)}">${esc(r.error.slice(0, 60))}</span>` : ''}</td>` +
+        `<td class="num">${r.refs ? r.refs.length : ''}</td><td class="num">${r.ms !== null && r.ms !== undefined ? fmtDur(r.ms) : ''}</td>` +
+        `<td class="muted">${esc(r.source ?? '')}</td><td class="mod muted">${esc(r.via ?? '')}</td></tr>`)
+      .join('');
+  }
+  discTimer = setTimeout(pollDisc, s.running || s.starting ? 1500 : 5000);
+}
+
+
+// ---------------- graph explorer ----------------
+let G = null, net = null, out = null, inn = null, byId = null, dir = 'dependents', depth = 1, selected = null;
+const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
+const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
+
+async function loadGraph() {
+  if (G) return;
+  $('gWhich').textContent = 'loading graph.json…';
+  const r = await fetch('/api/graph' + q(), { cache: 'no-store' });
+  if (!r.ok) { $('gWhich').textContent = (await r.json().catch(() => ({}))).error ?? 'no graph yet'; $('gStats').innerHTML = ''; if (net) { net.destroy(); net = null; } return; }
+  const which = r.headers.get('x-graph-which');
+  G = await r.json();
+  $('gWhich').innerHTML = which === 'current'
+    ? 'Showing the graph written by <b>this</b> run.'
+    : 'Showing the <b>previous</b> snapshot (pre-fix) until this run finishes.';
+  byId = new Map(G.nodes.map((n) => [n.id, n]));
+  out = new Map(); inn = new Map();
+  for (const l of G.links) {
+    (out.get(l.source) ?? out.set(l.source, []).get(l.source)).push(l);
+    (inn.get(l.target) ?? inn.set(l.target, []).get(l.target)).push(l);
+  }
+  const o = G.graph?.osgraph ?? {};
+  const scope = new Set(o.modules ?? []);
+  const elems = G.nodes.filter((n) => n.kind !== 'module');
+  $('gStats').innerHTML = [
+    ['nodes', G.nodes.length.toLocaleString()], ['edges', G.links.length.toLocaleString()],
+    ['scope modules', scope.size], ['in-scope elements', elems.filter((n) => scope.has(n.module) && !n.external && !n.placeholder).length],
+    ['external refs', elems.filter((n) => n.external).length], ['placeholders', o.placeholderCount ?? 0],
+    ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '–']
+  ].map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('');
+  const sel = $('gModule');
+  for (const m of [...scope].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(m)}</option>`);
+  sel.onchange = () => drawModule(sel.value);
+  drawOverview();
+}
+
+function layerOf(module) { return byId.get(`osgraph://${module}`)?.layer ?? 'UNKNOWN'; }
+function draw(nodes, edges, physics = true) {
+  // Say why, rather than throwing "vis is not defined". The tables and the progress tab are
+  // unaffected - only this node-link canvas needs the library.
+  if (typeof vis === 'undefined') {
+    $('net').innerHTML =
+      '<div style="padding:24px;line-height:1.6">The node-link view needs <code>vis-network</code>, ' +
+      'which could not be loaded. Every table on this page still works.<br><br>' +
+      'To draw it offline, save <code>vis-network.min.js</code> into the kit\'s <code>dashboard/</code> folder.</div>';
+    return;
+  }
+  const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const opts = {
+    nodes: { font: { size: 12, color: dark ? '#e8ebef' : '#14171c' }, borderWidth: 1 },
+    edges: { arrows: { to: { enabled: true, scaleFactor: 0.4 } }, color: { color: dark ? '#3a4350' : '#c5cbd4', highlight: '#2f6fe4' }, smooth: false },
+    physics: physics ? { solver: 'forceAtlas2Based', stabilization: { iterations: 150 } } : false,
+    interaction: { hover: true, tooltipDelay: 150 }
+  };
+  if (net) net.destroy();
+  net = new vis.Network($('net'), data, opts);
+  net.on('click', (e) => { if (e.nodes[0]) select(e.nodes[0]); });
+  net.on('doubleClick', (e) => {
+    const n = byId.get(e.nodes[0]);
+    if (n?.kind === 'module' && n.module) { $('gModule').value = n.module; drawModule(n.module); }
+  });
+}
+function drawOverview() {
+  const scope = new Set(G.graph?.osgraph?.modules ?? []);
+  const mods = G.nodes.filter((n) => n.kind === 'module');
+  const size = new Map();
+  for (const n of G.nodes) if (n.module && n.kind !== 'module') size.set(n.module, (size.get(n.module) ?? 0) + 1);
+  draw(
+    mods.map((n) => ({
+      id: n.id, label: n.label, shape: 'dot', size: 8 + Math.sqrt(size.get(n.module) ?? 1) * 2.2,
+      color: scope.has(n.module) ? LAYER_COLORS[n.layer] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
+      title: `${n.label}\nlayer ${n.layer}\n${size.get(n.module) ?? 0} elements${scope.has(n.module) ? '' : '\n(outside the scope)'}\ndouble-click to open`
+    })),
+    G.links.filter((l) => byId.get(l.source)?.kind === 'module' && byId.get(l.target)?.kind === 'module').map((l) => ({ from: l.source, to: l.target }))
+  );
+}
+function drawModule(module) {
+  if (!module) return drawOverview();
+  const ids = new Set(G.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
+  const edges = [];
+  const extra = new Set();
+  for (const id of ids) {
+    for (const l of out.get(id) ?? []) { edges.push(l); if (!ids.has(l.target)) extra.add(l.target); }
+    for (const l of inn.get(id) ?? []) { if (byId.get(l.source)?.kind === 'module') continue; edges.push(l); if (!ids.has(l.source)) extra.add(l.source); }
+  }
+  const all = [...ids, ...extra].filter((id) => byId.has(id));
+  if (all.length > 900) $('gWhich').insertAdjacentHTML('beforeend', `<br><span class="muted">${all.length} nodes — layout may take a moment.</span>`);
+  draw(
+    all.map((id) => {
+      const n = byId.get(id);
+      const own = ids.has(id);
+      return {
+        id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
+        color: n.placeholder ? '#d23b3b' : own ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
+        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder — unresolved)' : ''}`
+      };
+    }),
+    edges.filter((l) => byId.has(l.source) && byId.has(l.target)).map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
+  );
+}
+function select(id) {
+  selected = id;
+  const n = byId.get(id);
+  if (!n) return;
+  $('selName').innerHTML = `<b style="font-family:var(--mono)">${esc(n.label)}</b>`;
+  $('selKv').innerHTML = [['kind', n.kind], ['module', n.module ?? '–'], ['ui flow', n.uiFlow ?? '–'], ['layer', n.kind === 'module' ? n.layer : layerOf(n.module)],
+    ['status', n.placeholder ? 'placeholder (unresolved)' : n.external ? 'external' : 'in scope'], ['in / out', `${(inn.get(id) ?? []).length} / ${(out.get(id) ?? []).length}`]]
+    .map(([k, v]) => `<span>${k}</span><span>${esc(v)}</span>`).join('');
+  renderImpact();
+}
+function renderImpact() {
+  if (!selected) return;
+  const seen = new Map([[selected, 0]]);
+  let frontier = [selected];
+  for (let d = 1; d <= depth; d++) {
+    const nextF = [];
+    for (const id of frontier) {
+      const ls = dir === 'dependents' ? inn.get(id) ?? [] : out.get(id) ?? [];
+      for (const l of ls) {
+        const other = dir === 'dependents' ? l.source : l.target;
+        if (!seen.has(other)) { seen.set(other, d); nextF.push(other); }
+      }
+    }
+    frontier = nextF;
+  }
+  seen.delete(selected);
+  const items = [...seen.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
+  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth}`;
+  $('impact').innerHTML = items.slice(0, 400).map(([id, d]) => `<li data-id="${esc(id)}" title="${esc(id)}">${d}· ${esc(id.replace('osgraph://', ''))}</li>`).join('');
+  if (net) net.selectNodes([selected, ...items.map((x) => x[0])].filter((x) => net.body.data.nodes.get(x)));
+}
+$('impact').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
+$('gResults').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
+function focusNode(id) {
+  const n = byId.get(id);
+  if (!n) return;
+  if (n.module && $('gModule').value !== n.module && n.kind !== 'module') { $('gModule').value = (G.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : ''; if ($('gModule').value) drawModule(n.module); }
+  select(id);
+  if (net?.body.data.nodes.get(id)) net.focus(id, { scale: 1.1, animation: true });
+}
+$('gSearch').oninput = () => {
+  const q = $('gSearch').value.trim().toLowerCase();
+  if (q.length < 2 || !G) { $('gResults').innerHTML = ''; return; }
+  const hits = G.nodes.filter((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)).slice(0, 60);
+  $('gResults').innerHTML = hits.map((n) => `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`).join('');
+};
+$('dirDep').onclick = () => { dir = 'dependents'; $('dirDep').className = 'on'; $('dirDeps').className = ''; renderImpact(); };
+$('dirDeps').onclick = () => { dir = 'dependencies'; $('dirDeps').className = 'on'; $('dirDep').className = ''; renderImpact(); };
+document.querySelectorAll('[data-d]').forEach((b) => b.onclick = () => {
+  depth = Number(b.dataset.d);
+  document.querySelectorAll('[data-d]').forEach((x) => x.className = x === b ? 'on' : '');
+  renderImpact();
+});
+</script>
+</body>
+</html>

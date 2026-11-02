@@ -9,7 +9,7 @@ narrow window onto a large codebase. These three widen it:
 
 | Folder | What it is | Needs Studio running? |
 |---|---|---|
-| **[osgraph](osgraph/)** | MCP server: a deterministic dependency graph over a chosen set of modules. Impact, shortest path, layer violations, and regex search *inside* action logic | Only to build the snapshot — queries work offline |
+| **[osgraph](osgraph/)** | MCP server: a deterministic dependency graph over a chosen set of modules. Impact, shortest path, layer violations, and regex search *inside* action logic — plus a live progress site every rebuild raises automatically | Only to build the snapshot — queries work offline |
 | **[osopener](osopener/)** | MCP server: opens/closes modules in a running Service Studio via Windows UI Automation, so an agent can read a module that isn't on screen | Yes — it drives the real UI |
 | **[outsystems-token-manager](outsystems-token-manager/)** | Claude Code skill + hooks that manage the Service Studio session token: approve once, reuse across sessions, never leak it into a transcript | — |
 
@@ -41,6 +41,14 @@ is empty; it means *that name isn't open*. **osopener** opens it and confirms th
 dozens of modules, and asking an LLM to read them all is slow, expensive and
 non-reproducible. **osgraph** reads every element once, writes a snapshot, and answers
 from the graph — same question, same answer, no model involved, Studio can be shut.
+
+**"Is it still running, or did it hang?"** Reading a 30-module scope takes hours, and a long MCP
+tool call shows nothing while it works. So every `rebuild` automatically raises a **live progress
+site** and returns its URL: overall progress weighted by measured per-module durations, time
+remaining, the module and phase in flight, and a graph explorer once it lands. It binds to
+loopback by default, since the page shows your module names and graph with no authentication;
+`OSGRAPH_PROGRESS_HOST=0.0.0.0` opens it up to read from a phone, while the routes that can drive
+your Service Studio stay loopback-only either way.
 
 **The approval dialog.** Service Studio requires a human to approve each new agent
 session, and an unmanaged agent will request a fresh one every session, forget to pass

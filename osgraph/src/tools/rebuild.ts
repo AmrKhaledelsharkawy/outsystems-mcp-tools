@@ -8,13 +8,24 @@ import {
   type StageOutcome
 } from "../rebuild/rebuild.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
+import { ensureSite, siteInfo, type SiteInfo } from "../progress/site.js";
+import { writeTimings } from "../progress/timings.js";
 import { completenessFor, parseInput, permissiveShape, runTool, scopeArg, type OsgraphTool, type ToolContext } from "./tool.js";
 
 /**
  * A staged `rebuild` answers with the stage state. The snapshot and meta stay on disk — only the
  * `RebuildResult` summary is inlined, and only on the call that finalized the scope.
  */
-export type StageToolResult = Omit<StageOutcome, "outcome"> & { rebuild?: RebuildResult };
+export type StageToolResult = Omit<StageOutcome, "outcome"> & { rebuild?: RebuildResult; progressSite?: SiteInfo };
+
+/**
+ * A `rebuild` result with the live progress site's URL attached.
+ *
+ * The URL is returned in the result — not only logged — because a rebuild runs for minutes to
+ * hours and most MCP clients swallow stderr: a URL that only ever reached stderr is a URL the user
+ * never sees, which was the whole problem this site exists to solve.
+ */
+export type RebuildToolResult = RebuildResult & { progressSite?: SiteInfo };
 
 const strictSchema = z.object({
   scope: z
@@ -88,7 +99,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
   inputSchema,
   handler: (args, ctx) => {
     const scope = scopeArg(args.scope);
-    return runTool<RebuildResult | StageToolResult>(ctx, scope, async () => {
+    return runTool<RebuildToolResult | StageToolResult>(ctx, scope, async () => {
       const input = parseInput(strictSchema, args, "rebuild");
       // ADR-0007/F1: one rebuild at a time per process, and the loser is answered now, not in an hour.
       if (!ctx.rebuildGate.tryAcquire()) {
@@ -101,8 +112,25 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
           { scope: input.scope }
         );
       }
+      // Declared outside the try so the catch below can mark where the run died.
+      let site: Awaited<ReturnType<typeof ensureSite>> | undefined;
       try {
         const definition = ctx.scopeStore.read(input.scope);
+
+        // Raised BEFORE any Service Studio call, so the page is already up and showing the whole
+        // module plan by the time the first read goes out. Never throws: see `ensureSite`.
+        // `live` is the narrowed const the closure below captures; `site` is the outer handle the
+        // catch needs. Same object.
+        const live = await ensureSite(ctx.config);
+        site = live;
+        for (const line of live.banner.split("\n")) ctx.log(line);
+        live.state.beginRun(input.scope, definition.modules);
+        const stderrSink = progressSink(ctx);
+        const onProgress = (event: RebuildProgressEvent): void => {
+          live.state.handle(event);
+          stderrSink?.(event);
+        };
+
         if (input.module !== undefined) {
           const staged = await stageModule({
             scope: definition,
@@ -112,13 +140,18 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
             session: ctx.createSession(),
             rules: ctx.loadRules(),
             now: ctx.now,
-            onProgress: progressSink(ctx),
+            onProgress,
             fetchReferencedElements: fetchReferencedElements(ctx),
             fetchConcurrency: ctx.config.fetchConcurrency
           });
           // The snapshot and meta stay on disk: a tool response must never carry the whole graph.
           const { outcome: finalized, ...rest } = staged;
           const result: StageToolResult = finalized ? { ...rest, rebuild: finalized.result } : rest;
+          result.progressSite = siteInfo(live);
+          if (finalized) {
+            live.state.finishRun(finalized.result.perModule);
+            writeTimings(ctx.config.graphDir, input.scope, finalized.result.perModule);
+          }
           return {
             result,
             graphCompleteness: finalized?.graphCompleteness ?? completenessFor(ctx, input.scope)
@@ -130,7 +163,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
           session: ctx.createSession(),
           rules: ctx.loadRules(),
           now: ctx.now,
-          onProgress: progressSink(ctx),
+          onProgress,
           fetchReferencedElements: fetchReferencedElements(ctx),
           // OSG-016 §C1: the same width the client's gate is set to, from one config field.
           fetchConcurrency: ctx.config.fetchConcurrency,
@@ -138,7 +171,19 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
           // re-run offline (`reextract`) instead of re-reading the scope live.
           rawGraphDir: ctx.config.graphDir
         });
-        return { result: outcome.result, graphCompleteness: outcome.graphCompleteness };
+        live.state.finishRun(outcome.result.perModule);
+        // Persisted AFTER the snapshot is safely written: this run's measurements are what give
+        // the next run a real ETA instead of a progress bar with no prediction behind it.
+        writeTimings(ctx.config.graphDir, input.scope, outcome.result.perModule);
+        const result: RebuildToolResult = { ...outcome.result, progressSite: siteInfo(live) };
+        return { result, graphCompleteness: outcome.graphCompleteness };
+      } catch (err) {
+        // The page must show WHERE it died rather than freezing on a module forever.
+        site?.state.failRun(
+          err instanceof OsgraphToolError ? err.code : "UNKNOWN",
+          err instanceof Error ? err.message : String(err)
+        );
+        throw err;
       } finally {
         ctx.rebuildGate.release();
       }

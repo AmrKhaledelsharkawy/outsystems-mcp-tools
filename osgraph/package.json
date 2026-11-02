@@ -21,6 +21,7 @@
   },
   "files": [
     "dist",
+    "dashboard",
     "layer-rules.json",
     "README.md"
   ],

@@ -47,7 +47,7 @@ that stays an explicit decision, so a snapshot always covers exactly what you sa
 |---|---|
 | `defineScope` | Writes a scope file `{ name, modules }`. Overwrites a scope of the same name |
 | `listScopes` | Lists defined scopes, sorted by name |
-| `rebuild` | Full extraction run over one scope: reads every element of every module through the `servicestudio` MCP (read-only), parses edges, regenerates the snapshot **atomically** — all-or-nothing, so the previous snapshot survives any failure |
+| `rebuild` | Full extraction run over one scope: reads every element of every module through the `servicestudio` MCP (read-only), parses edges, regenerates the snapshot **atomically** — all-or-nothing, so the previous snapshot survives any failure. Raises the [live progress site](#the-live-progress-site) and returns its URL |
 | `queryImpact` | Reachable node set from one node (dependents *or* dependencies, optionally depth-capped), by in-process BFS |
 | `queryPath` | Shortest path between two nodes |
 | `listViolations` | Every cross-module edge whose source/target layers break a layer rule, plus modules whose layer suffix is `UNKNOWN` (exempt, never scored) |
@@ -56,6 +56,69 @@ that stays an explicit decision, so a snapshot always covers exactly what you sa
 
 Node ids look like `osgraph://<Module>/<Kind>/<Name>`, or
 `osgraph://<Module>/<Kind>/<UIFlow>/<Name>` for screens and blocks.
+
+## The live progress site
+
+**Every `rebuild` raises a live progress site automatically and returns its URL.** No flag, no
+separate process, no setup.
+
+A rebuild runs for minutes to hours and its only other output is stderr — which most MCP clients
+swallow. Without this, a running rebuild is indistinguishable from a hang. So the site comes up
+**before the first Service Studio call**, meaning there is never a window where work is happening
+that you cannot watch.
+
+The URL is returned **in the `rebuild` result** as `progressSite.url`, and printed to stderr as a
+banner. It is in the result on purpose: a URL that only ever reached stderr is a URL you never saw.
+
+What the page shows:
+
+| Live progress | Graph explorer |
+|---|---|
+| Overall progress weighted by expected duration, time remaining, elapsed, current module and its phase, per-module table with node/edge counts, live log | The finished graph, find-element search, per-module breakdown, and depth-N module **discovery** that can build a new scope for you |
+
+### Lifetime
+
+The site lives **in the osgraph server process** — so it stays up for your whole session, long
+after the run finishes, and disappears when the session ends. Nothing is left behind: no PID file,
+no stop command, no orphaned process holding a port.
+
+For the offline `reextract` command the site is **opt-in** (`--serve`), because that command is a
+one-shot process: a site raised there would die the instant it printed its own URL.
+
+### It binds to loopback by default
+
+The page serves your module names, your graph and your live log **with no authentication**. The
+shipped default is therefore `127.0.0.1`. To read it from your phone:
+
+```
+OSGRAPH_PROGRESS_HOST=0.0.0.0
+```
+
+The banner then lists every address the site is genuinely reachable on — only adapters that are
+actually up, so it can never print a stale IP from a disconnected adapter.
+
+**Mutating routes stay loopback-only regardless of the bind address.** Viewing the page is a
+convenience worth sharing; starting a discovery that opens modules in your live Service Studio, or
+writing a scope file, is not something a device across the network gets to do. Those return `403`
+to any non-loopback peer.
+
+### Turning it off
+
+```
+OSGRAPH_PROGRESS_SITE=off
+```
+
+Starting the site can never fail a rebuild: if the port cannot be bound, the reason is reported and
+the rebuild proceeds without the view.
+
+### Time remaining
+
+The ETA is weighted by each module's **measured** duration, so one 40-minute module cannot read as
+"1 of 30". Those measurements are written to `<graphDir>/<scope>/timings.json` after each run, which
+is why a real ETA appears from the **second** run onward. Timings are read across all scopes — read
+latency is a property of the module, not of the scope — so a new scope made of known modules has an
+ETA on its first run. An ETA is only promised when every unfinished module has history: one unknown
+module could be the 40-minute one, and a confidently wrong ETA is worse than none.
 
 ### Which tools need Service Studio
 
@@ -151,7 +214,9 @@ hard requirement above.
    `MODULES_NOT_OPEN` for anything that isn't open, and Service Studio has no API for
    opening a module — this step is why osopener is required, not merely convenient.
 4. `rebuild` that scope. It reads every element of every module, so expect this to
-   take a while on a large scope; it runs 4 reads at a time by default.
+   take a while on a large scope; it runs 4 reads at a time by default. **Open the
+   `progressSite.url` from the result** to watch it — that is also how you find out it is
+   progressing rather than hung.
 5. Query away — `queryImpact`, `searchFlows`, `listViolations` — with Studio closed if
    you like.
 
@@ -182,8 +247,12 @@ node dist/cli.js --help
 | `OSGRAPH_GRAPHIFY_BIN` | no | `graphify` | The pinned graphify executable used by `queryPath` |
 | `OSGRAPH_MAX_CONCURRENCY` | no | `4` | Reads in flight at once |
 | `OSGRAPH_FETCH_REFERENCED_ELEMENTS` | no | — | Also fetch elements referenced from outside the scope |
-| `OSGRAPH_REBUILD_PROGRESS` | no | — | Per-module progress on stderr |
+| `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
+| `OSGRAPH_PROGRESS_SITE` | no | `on` | `off`/`0`/`false`/`no`/`none` disables the live progress site |
+| `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
+| `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery. The repo's own layout needs no setting |
 
 osgraph **only ever reads** the session token — it never calls `createSessionToken`,
 because approving a session is a human act. It therefore **cannot obtain a token by

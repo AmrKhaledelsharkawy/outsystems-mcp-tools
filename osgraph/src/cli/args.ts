@@ -15,6 +15,7 @@ reextract options:
   --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
   --json             print the full result as JSON instead of a summary
   --quiet            no per-module progress on stderr
+  --serve            keep a live progress / graph-explorer site running afterwards
 `;
 
 /** `--flag value` and `--flag=value`, with bare flags mapping to `"true"`. */

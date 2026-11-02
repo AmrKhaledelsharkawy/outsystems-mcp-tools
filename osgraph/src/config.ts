@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { OsgraphErrorCode } from "./types.js";
 
 /** Thrown by `loadConfig` when the environment cannot yield a usable configuration. */
@@ -34,6 +35,36 @@ export interface OsgraphConfig {
    * pre-OSG-016 serial behaviour**, which is the escape hatch if a different Studio build regresses.
    */
   fetchConcurrency: number;
+  /** Live progress site. Raised automatically by `rebuild`/`reextract` unless disabled. */
+  site: SiteConfig;
+}
+
+/**
+ * The live progress site served in-process during a rebuild.
+ *
+ * It exists because a rebuild is long (hours on a large scope) and its only other output is
+ * stderr, which most MCP clients swallow — so without this a rebuild is indistinguishable from
+ * a hang. The site is raised before any work starts, so there is never a window in which work
+ * is happening unobserved.
+ */
+export interface SiteConfig {
+  /** `false` disables the site entirely (`OSGRAPH_PROGRESS_SITE=off`). Headless/CI escape hatch. */
+  enabled: boolean;
+  /**
+   * Bind address. Defaults to loopback **on purpose**: the site serves module names, the graph
+   * and the live log with no authentication, and a published default of `0.0.0.0` would put a
+   * stranger's proprietary module names on their office network the first time they ran a
+   * rebuild. `OSGRAPH_PROGRESS_HOST=0.0.0.0` opts in to reading it from a phone.
+   */
+  host: string;
+  /** First port tried; a busy port is stepped past (see `SITE_PORT_SCAN`). */
+  port: number;
+  /**
+   * osopener's `dist` directory — the discovery job imports its `openModule`/`closeModule`
+   * directly. Defaults to the `../osopener/dist` sibling, which is this repository's own layout.
+   * This is the one place osgraph's documented hard dependency on osopener is literal code.
+   */
+  osopenerDist: string;
 }
 
 export const ENV_SERVICESTUDIO_URL = "OSGRAPH_SERVICESTUDIO_URL";
@@ -42,6 +73,19 @@ export const ENV_GRAPH_DIR = "OSGRAPH_GRAPH_DIR";
 export const ENV_SCOPES_DIR = "OSGRAPH_SCOPES_DIR";
 export const ENV_GRAPHIFY_BIN = "OSGRAPH_GRAPHIFY_BIN";
 export const ENV_MAX_CONCURRENCY = "OSGRAPH_MAX_CONCURRENCY";
+export const ENV_PROGRESS_SITE = "OSGRAPH_PROGRESS_SITE";
+export const ENV_PROGRESS_HOST = "OSGRAPH_PROGRESS_HOST";
+export const ENV_PROGRESS_PORT = "OSGRAPH_PROGRESS_PORT";
+export const ENV_OSOPENER_DIST = "OSGRAPH_OSOPENER_DIST";
+
+/** Loopback by default — see `SiteConfig.host` for why this is not `0.0.0.0`. */
+export const DEFAULT_SITE_HOST = "127.0.0.1";
+export const DEFAULT_SITE_PORT = 7473;
+/** Consecutive ports tried when the first is taken, so two scopes can be watched at once. */
+export const SITE_PORT_SCAN = 20;
+
+/** Values of `OSGRAPH_PROGRESS_SITE` that turn the site off. Anything else leaves it on. */
+const SITE_OFF = new Set(["off", "0", "false", "no", "none"]);
 
 /** Default read width (ADR-0013): the server's measured admission limit. */
 export const DEFAULT_FETCH_CONCURRENCY = 4;
@@ -62,11 +106,35 @@ export function parseFetchConcurrency(value: string | undefined): number {
   return Math.min(MAX_FETCH_CONCURRENCY, Math.max(MIN_FETCH_CONCURRENCY, Math.trunc(n)));
 }
 
+/**
+ * Parses `OSGRAPH_PROGRESS_PORT`. Unset/unparseable -> the default; out of range -> the default,
+ * because a port a kernel will refuse is a typo, not an intention. Like the concurrency knob this
+ * never fails the process: the site is an observability aid, and refusing to start osgraph over a
+ * bad port would lose the rebuild as well as the view of it.
+ */
+export function parseSitePort(value: string | undefined): number {
+  const raw = nonEmpty(value);
+  if (raw === undefined) return DEFAULT_SITE_PORT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65_535) return DEFAULT_SITE_PORT;
+  return n;
+}
+
 export interface LoadConfigOptions {
   /** Defaults to `process.cwd()`. */
   cwd?: string;
   /** Injectable for tests; defaults to `fs.existsSync`. */
   existsSync?: (path: string) => boolean;
+  /**
+   * The osgraph package root, used to find the `../osopener/dist` sibling and `dashboard/`.
+   * Defaults to the directory above this module's own (`dist/` at runtime, `src/` under vitest).
+   */
+  packageRoot?: string;
+}
+
+/** `<packageRoot>` for the compiled `dist/config.js` — i.e. the directory holding package.json. */
+function defaultPackageRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
 type Env = Record<string, string | undefined>;
@@ -84,6 +152,7 @@ function nonEmpty(value: string | undefined): string | undefined {
 export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphConfig {
   const cwd = options.cwd ?? process.cwd();
   const exists = options.existsSync ?? existsSync;
+  const packageRoot = options.packageRoot ?? defaultPackageRoot();
 
   const serviceStudioUrl = nonEmpty(env[ENV_SERVICESTUDIO_URL]);
   if (serviceStudioUrl === undefined) {
@@ -116,6 +185,12 @@ export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphCo
     graphDir,
     scopesDir,
     graphifyBin: nonEmpty(env[ENV_GRAPHIFY_BIN]) ?? "graphify",
-    fetchConcurrency: parseFetchConcurrency(env[ENV_MAX_CONCURRENCY])
+    fetchConcurrency: parseFetchConcurrency(env[ENV_MAX_CONCURRENCY]),
+    site: {
+      enabled: !SITE_OFF.has((nonEmpty(env[ENV_PROGRESS_SITE]) ?? "on").toLowerCase()),
+      host: nonEmpty(env[ENV_PROGRESS_HOST]) ?? DEFAULT_SITE_HOST,
+      port: parseSitePort(env[ENV_PROGRESS_PORT]),
+      osopenerDist: nonEmpty(env[ENV_OSOPENER_DIST]) ?? join(packageRoot, "..", "osopener", "dist")
+    }
   };
 }
