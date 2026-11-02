@@ -4,7 +4,12 @@
 # and scope fixtures are excluded because they carry real module names — so there is
 # nothing here for `npm test` or `npm run lint` (which lints `src tests`) to run
 # against. This workflow therefore proves exactly what a fresh clone can prove:
-# both servers install and compile, on both platforms.
+# each server installs and compiles on every platform it actually supports.
+#
+# The matrix is written out per package rather than as a cross product, because
+# osopener declares `"os": ["win32"]` (it drives Windows UI Automation) and `npm ci`
+# refuses to install it anywhere else with EBADPLATFORM. Windows-only is a fact about
+# osopener, not a gap in its coverage.
 name: ci
 
 on:
@@ -18,12 +23,18 @@ permissions:
 
 jobs:
   build:
+    name: build (${{ matrix.package }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        package: [osgraph, osopener]
+        include:
+          # osgraph is platform-agnostic: ubuntu is the cheap leg, windows is the one
+          # platform Service Studio exists on and where the win32-only code paths run.
+          - { package: osgraph, os: ubuntu-latest }
+          - { package: osgraph, os: windows-latest }
+          # osopener is win32-only by declaration.
+          - { package: osopener, os: windows-latest }
     defaults:
       run:
         working-directory: ${{ matrix.package }}

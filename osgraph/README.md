@@ -18,6 +18,21 @@ Two kinds of question it answers:
 
 ---
 
+## ⚠️ Hard requirement — osgraph does not work alone
+
+**Install both of these before osgraph. This is not optional.**
+
+| Required | Why osgraph cannot do without it |
+|---|---|
+| **[osopener](../osopener/)** | `rebuild` can only read modules that are **open** in Service Studio. Anything else fails `MODULES_NOT_OPEN`. osopener is what opens them — Service Studio exposes no API for it |
+| **[outsystems-token-manager](../outsystems-token-manager/)** | Every Service Studio read needs a **human-approved** session token. osgraph only ever *reads* `token.txt` — it never calls `createSessionToken`, because approving a session is a human act. The token manager is what obtains, persists and reuses that token |
+
+Without both, `rebuild` cannot run — and `rebuild` is what produces the snapshot every
+other tool reads. You can still query a snapshot that already exists, but you cannot
+build one, which means you cannot get started and cannot ever refresh.
+
+---
+
 ## Why a scope
 
 A graph is built per **scope**: a named list of modules you choose
@@ -75,14 +90,22 @@ your own conventions.
 
 ## Install
 
-Requires **Node.js 20+** and a running Service Studio 11 with its MCP server enabled
-(for `rebuild` only).
+Requires **Node.js 20+**, a running Service Studio 11 with its MCP server enabled, and —
+as above — **[osopener](../osopener/) and
+[outsystems-token-manager](../outsystems-token-manager/) installed first**.
 
 ```bash
 git clone https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools.git
-cd outsystems-mcp-tools/osgraph
-npm install
-npm run build
+cd outsystems-mcp-tools
+
+# 1. the module opener osgraph depends on (Windows)
+cd osopener && npm install && npm run build && cd ..
+
+# 2. the session-token manager osgraph depends on
+cd outsystems-token-manager && ./install.ps1 -SkipMcpGuard && cd ..
+
+# 3. osgraph itself
+cd osgraph && npm install && npm run build
 ```
 
 That produces `dist/cli.js`.
@@ -117,12 +140,19 @@ common default.
 
 ### First run
 
-1. `defineScope` with a name and the modules you care about.
-2. Open those modules in Service Studio (`rebuild` fails `MODULES_NOT_OPEN` otherwise —
-   [osopener](../osopener) can open them for you).
-3. `rebuild` that scope. It reads every element of every module, so expect this to
+**Prerequisite:** osopener and the token manager must already be installed — see the
+hard requirement above.
+
+1. Make sure a session token exists. With the token manager installed this happens by
+   itself: the first Service Studio call raises the approval dialog once, and the token
+   is saved to `token.txt` for every session after that.
+2. `defineScope` with a name and the modules you care about.
+3. Open those modules with **osopener**'s `openModule`. `rebuild` fails
+   `MODULES_NOT_OPEN` for anything that isn't open, and Service Studio has no API for
+   opening a module — this step is why osopener is required, not merely convenient.
+4. `rebuild` that scope. It reads every element of every module, so expect this to
    take a while on a large scope; it runs 4 reads at a time by default.
-4. Query away — `queryImpact`, `searchFlows`, `listViolations` — with Studio closed if
+5. Query away — `queryImpact`, `searchFlows`, `listViolations` — with Studio closed if
    you like.
 
 Re-run `rebuild` when modules change (after a publish's merge completes). Rebuilds are
@@ -156,8 +186,10 @@ node dist/cli.js --help
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
 
 osgraph **only ever reads** the session token — it never calls `createSessionToken`,
-because approving a session is a human act. To have tokens issued and persisted
-automatically, see [`../outsystems-token-manager`](../outsystems-token-manager/INSTALL.md).
+because approving a session is a human act. It therefore **cannot obtain a token by
+itself**, which is why [outsystems-token-manager](../outsystems-token-manager/INSTALL.md)
+is a hard requirement rather than a convenience: without it there is nothing to create
+`token.txt`, and every Service Studio read fails.
 
 ---
 

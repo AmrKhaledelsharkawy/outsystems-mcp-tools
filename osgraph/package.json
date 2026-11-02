@@ -2,7 +2,7 @@
   "name": "osgraph",
   "version": "0.1.0",
   "license": "MIT",
-  "description": "Deterministic, no-LLM dependency graph over a user-defined scope of OutSystems 11 modules open in Service Studio, exposed as an MCP server.",
+  "description": "Deterministic, no-LLM dependency graph over a user-defined scope of OutSystems 11 modules open in Service Studio, exposed as an MCP server. REQUIRES osopener (to open the modules it reads) and outsystems-token-manager (to obtain the human-approved session token) to be installed.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools.git",
@@ -49,5 +49,9 @@
   "homepage": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/tree/main/osgraph#readme",
   "bugs": {
     "url": "https://github.com/AmrKhaledelsharkawy/outsystems-mcp-tools/issues"
+  },
+  "osgraphRequires": {
+    "osopener": "Opens the modules in Service Studio that `rebuild` reads; without it rebuild fails MODULES_NOT_OPEN.",
+    "outsystems-token-manager": "Obtains and persists the human-approved Service Studio session token; osgraph only reads token.txt and never calls createSessionToken."
   }
 }

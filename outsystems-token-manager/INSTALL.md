@@ -11,6 +11,15 @@ prints the token into a transcript.
 Works with any MCP server named `servicestudio` (the in-process MCP server that
 ships inside OutSystems Service Studio 11).
 
+> **Both servers in this repository require this package.** Neither
+> [osgraph](../osgraph/) nor [osopener](../osopener/) calls `createSessionToken` — they
+> only ever *read* `token.txt`, because approving a session is a human act. So without
+> the token manager installed there is nothing to create that file, and every Service
+> Studio read fails. Install this **first**.
+>
+> It stands on its own, though: it is useful with the bare `servicestudio` MCP server
+> and needs nothing else from this repository.
+
 ---
 
 ## What problem this solves

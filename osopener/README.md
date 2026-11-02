@@ -18,6 +18,13 @@ keyboard), because Service Studio exposes no API for opening a module.
 > **Windows only.** osopener drives Win32 UI Automation. It refuses to start on any
 > other platform.
 
+> **osopener is standalone, and [osgraph](../osgraph/) depends on it.** osopener needs
+> nothing from osgraph. But osgraph's `rebuild` can only read modules that are already
+> open, so if you use osgraph, **osopener is a hard requirement** — not an optional
+> companion. osopener does require
+> [outsystems-token-manager](../outsystems-token-manager/) for its session token
+> (see [Configuration](#configuration)).
+
 ---
 
 ## Tools
@@ -131,8 +138,10 @@ approving a session is a human act.
 Its first stderr line names the file it read. A `TOKEN_EXPIRED` means *that
 workspace's* token needs re-approving.
 
-To issue and persist tokens automatically, see
-[`../outsystems-token-manager`](../outsystems-token-manager/INSTALL.md).
+Because osopener cannot create a token, **[outsystems-token-manager](../outsystems-token-manager/INSTALL.md)
+is a hard requirement** for every `listApps`-backed tool (`listOpenModules`,
+`openModule`, `closeModule`). Without it nothing writes `token.txt` and only
+`focusStudio` works.
 
 ---
 
