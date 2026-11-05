@@ -325,11 +325,13 @@ describe("ChildProcessDiscovery", () => {
       }) as never
     });
   });
-  // `maxRetries` is load-bearing on Windows, not defensive padding: the job directory is written
-  // and re-read inside one test, and a recursive rmdir issued right after can still hit ENOTEMPTY
-  // while Windows finishes releasing the directory entries. It fails only there, and only in
-  // teardown — the assertions had already passed — so it surfaces as five unrelated test
-  // failures. Node retries ENOTEMPTY/EBUSY/EPERM when told how many times to.
+  // This teardown is a Windows canary, so do not soften it. An ENOTEMPTY here means something
+  // under `root` still holds an open handle — on Windows that blocks rmdir outright, and no number
+  // of retries clears it (CI proved that: 10 retries, still ENOTEMPTY, 2.8 s per test). It caught a
+  // real descriptor leak in `ChildProcessDiscovery`, which `spawnFn` being a fake made visible:
+  // the real `spawn` duplicates the stderr fd, so the leak was ours to close either way.
+  // `maxRetries` stays only for genuinely transient AV/indexer interference, which is a different
+  // failure from a held handle.
   afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
   it("writes the normalised request and spawns the job", async () => {
