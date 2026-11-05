@@ -1,10 +1,21 @@
-# Build gate for the published tree.
+# Build and test gate for the published tree.
 #
-# Deliberately narrow: the published repository ships `src/` only — the test suites
-# and scope fixtures are excluded because they carry real module names — so there is
-# nothing here for `npm test` or `npm run lint` (which lints `src tests`) to run
-# against. This workflow therefore proves exactly what a fresh clone can prove:
-# each server installs and compiles on every platform it actually supports.
+# What a fresh clone can prove, and nothing it cannot. Every package compiles on
+# every platform it supports; osgraph additionally runs its **published** test suite.
+#
+# osgraph's tests are split by fixture provenance (osgraph/tests/PROVENANCE.md): a
+# test reading a capture that carries real module/application/entity/screen names is
+# git-ignored, so it is absent from a clone and cannot run here. `npm test` would
+# therefore run a different, smaller set in CI than on a developer machine — silently.
+# `npm run test:published` instead names its files explicitly in
+# osgraph/vitest.published.config.ts, so CI runs a known set and a missing file is an
+# error rather than a quietly shrinking suite. It needs no Service Studio, no
+# osopener, no session token and no network.
+#
+# `npm run lint` is still not run here: it lints `src tests`, and most of `tests/` is
+# not in the clone.
+#
+# osopener has no published suite yet — its tests drive a live Windows GUI.
 #
 # The matrix is written out per package rather than as a cross product, because
 # osopener declares `"os": ["win32"]` (it drives Windows UI Automation) and `npm ci`
@@ -23,7 +34,7 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.package }}, ${{ matrix.os }})
+    name: build+test (${{ matrix.package }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,3 +61,8 @@ jobs:
       - run: npm ci
 
       - run: npm run build
+
+      # osgraph only: see the header. `test:published` re-runs the build, which is
+      # cheap and keeps the script usable on its own from a fresh clone.
+      - run: npm run test:published
+        if: matrix.package == 'osgraph'

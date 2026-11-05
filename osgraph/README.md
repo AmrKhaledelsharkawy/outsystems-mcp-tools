@@ -358,14 +358,25 @@ Measured against Service Studio **11.55.94**:
 ## Development
 
 ```bash
-npm run build   # tsc
-npm test        # build + vitest
-npm run lint    # eslint
+npm run build          # tsc
+npm run test:published # build + the suite a fresh clone can run — this is what CI gates
+npm test               # build + every test present locally, published set included
+npm run lint           # eslint
 ```
 
-The published repository ships `src/` only. The test suite, scope files and
-architecture-decision records are kept out because they carry real module and
-application names from the environment this was developed against.
+**Two suites, one directory.** The tests are split by **fixture provenance**: a test that reads a
+capture carrying real module, application, entity or screen names — or that needs Service Studio,
+osopener, a token or the network — stays local and git-ignored. Everything else is tracked, named
+file-by-file in [`vitest.published.config.ts`](vitest.published.config.ts), and runs in CI on ubuntu
+and windows. The rule, the per-file reasons and the one known pre-existing failure are in
+[`tests/PROVENANCE.md`](tests/PROVENANCE.md).
+
+`npm test` is still the gate for a change: locally it runs strictly more than CI can.
+
+The [decision record](docs/adr/) and [`GLOSSARY.md`](GLOSSARY.md) **are** published — every issue in
+the automatic-refresh backlog is written against their vocabulary. Real names in them are
+pseudonymised; the raw discovery measurement logs are not published at all. See
+[`docs/README.md`](docs/README.md).
 
 ---
 

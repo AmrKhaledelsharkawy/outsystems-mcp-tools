@@ -8,7 +8,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineScope, SCOPE_NAME_RE } from "../scopes/store.js";
@@ -75,10 +75,26 @@ export class ChildProcessDiscovery implements DiscoveryRunner {
 
     // stdout/stderr go to a file, never to our own stdio: this process speaks MCP on stdout, and
     // one stray child write would corrupt the protocol stream.
-    const child = this.spawnFn(process.execPath, [this.jobScript, dir], {
-      stdio: ["ignore", "ignore", openSync(join(dir, "stderr.log"), "a")],
-      env: { ...this.options.env, OSGRAPH_DISCOVER_STATE_DIR: this.options.stateDir }
-    });
+    //
+    // The fd is ours to close, and we must. `spawn` duplicates a numeric `stdio` entry for the
+    // child — it does not take ownership — so leaving it open leaks one descriptor per discovery
+    // job in this process. `uv_spawn` is synchronous, so by the time `spawn` returns the child
+    // already holds its own copy and closing ours cannot affect it. Closing it in `finally` also
+    // keeps a throwing `spawnFn` from leaking.
+    //
+    // Found by CI, on Windows only: an open handle there blocks `rmdir` on the enclosing directory
+    // outright (`ENOTEMPTY`, un-retryable), while Linux unlinks a file with open descriptors
+    // happily. The symptom was five `progress.discover` tests failing in teardown.
+    const errFd = openSync(join(dir, "stderr.log"), "a");
+    let child;
+    try {
+      child = this.spawnFn(process.execPath, [this.jobScript, dir], {
+        stdio: ["ignore", "ignore", errFd],
+        env: { ...this.options.env, OSGRAPH_DISCOVER_STATE_DIR: this.options.stateDir }
+      });
+    } finally {
+      closeSync(errFd);
+    }
     this.job = { id, dir, child };
     return { id };
   }

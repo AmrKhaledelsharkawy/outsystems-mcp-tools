@@ -6,15 +6,56 @@ node_modules/
 # the environment these servers were developed against. Anchored to each package
 # root on purpose — a bare `scopes/` would also swallow osgraph/src/scopes/,
 # which is source code.
-osgraph/tests/
 osgraph/scopes/
-osgraph/docs/
-osgraph/GLOSSARY.md
 osopener/tests/
 osopener/docs/
 osopener/screenshots/
 osopener/tracks/
 *.oml
+
+# osgraph's tests are split by FIXTURE PROVENANCE, not by convenience: a test that
+# reads a capture carrying real module/application/entity/screen names stays local;
+# a test over synthetic or in-memory inputs is published so a fresh clone and CI can
+# run it. The rule, and the per-file reasons, are in osgraph/tests/PROVENANCE.md.
+#
+# This is an ALLOWLIST on purpose — ignore the directory, then re-admit named files.
+# A denylist would publish the next real-name fixture by default, and it would pass
+# locally (where the ignored files exist), so nobody would notice until it was public.
+# Keep this list and vitest.published.config.ts's `include` in step.
+osgraph/tests/*
+!osgraph/tests/PROVENANCE.md
+!osgraph/tests/config.test.ts
+!osgraph/tests/graph.test.ts
+!osgraph/tests/graphify.test.ts
+!osgraph/tests/layers.test.ts
+!osgraph/tests/progress.discover.test.ts
+!osgraph/tests/progress.server.test.ts
+!osgraph/tests/progress.state.test.ts
+!osgraph/tests/scopes.test.ts
+!osgraph/tests/servicestudio.client.test.ts
+!osgraph/tests/servicestudio.fake.ts
+!osgraph/tests/servicestudio.token.test.ts
+!osgraph/tests/servicestudio.unwrap.test.ts
+!osgraph/tests/smoke.test.ts
+# Only the hand-written fixtures are published. `fixtures/*` re-ignores everything
+# inside the re-admitted directory, so the real-capture fixture directories and the
+# provenance README stay local — and, unlike a denylist, this file never has to name
+# them (a directory named after a customer module is itself a real name).
+!osgraph/tests/fixtures/
+osgraph/tests/fixtures/*
+!osgraph/tests/fixtures/synthetic/
+# …except stray generated state that happens to land under it: a discovery cache stamp is
+# machine-local output, read by no test.
+osgraph/tests/fixtures/synthetic/cache/
+
+# osgraph's decision record and glossary ARE published — every issue in the
+# automatic-refresh backlog depends on their vocabulary, and an agent with a fresh
+# clone must be able to read them. Real module and application names in them are
+# pseudonymised (see osgraph/docs/README.md). The discovery records are not
+# published: they are raw measurement logs full of real names.
+osgraph/docs/*
+!osgraph/docs/README.md
+!osgraph/docs/adr/
 
 # Ad-hoc live probe scripts: hardcoded local paths and real module names.
 .probe/

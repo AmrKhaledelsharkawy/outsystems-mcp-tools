@@ -1,0 +1,41 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("uXCIR2Atc0+es3zYuZSnNw*LYIWpF+Ey0aicHD144NUTA"));
+    var activity = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("uXCIR2Atc0+es3zYuZSnNw*hg460+gk0UGzMRTFlEBTOQ"));
+
+    /*** creating IStaticEntity 'LKP_LookupSourceType' ***/
+    var lKP_LookupSourceType = eSpace.CreateStaticEntity("LKP_LookupSourceType");
+    lKP_LookupSourceType.Description = "Lookup source type";
+    var id = lKP_LookupSourceType.CreateAttribute("Id");
+    id.DataType = eSpace.Model.IntegerType;
+    var label = lKP_LookupSourceType.CreateAttribute("Label");
+    label.DataType = eSpace.Model.TextType;
+
+    /*** creating IServerEntity 'LookupDefinition' ***/
+    var lookupDefinition = eSpace.CreateEntity("LookupDefinition");
+    lookupDefinition.Description = "One lookup";
+    var id2 = lookupDefinition.CreateAttribute("Id");
+    id2.DataType = eSpace.Model.LongIntegerType;
+    var sourceTypeId = lookupDefinition.CreateAttribute("SourceTypeId");
+    sourceTypeId.DataType = lKP_LookupSourceType.IdentifierType;
+    var createdBy = lookupDefinition.CreateAttribute("CreatedBy");
+    createdBy.DataType = user.IdentifierType;
+
+    /*** creating IServerEntity 'CustomLookupValue' ***/
+    var customLookupValue = eSpace.CreateEntity("CustomLookupValue");
+    customLookupValue.Description = "A value";
+    var id3 = customLookupValue.CreateAttribute("Id");
+    id3.DataType = eSpace.Model.LongIntegerType;
+    var lookupDefinitionId = customLookupValue.CreateAttribute("LookupDefinitionId");
+    lookupDefinitionId.DataType = lookupDefinition.IdentifierType;
+    var activityId = customLookupValue.CreateAttribute("ActivityId");
+    activityId.DataType = activity.IdentifierType;
+    var createdBy2 = customLookupValue.CreateAttribute("CreatedBy");
+    createdBy2.DataType = user.IdentifierType;
+
+    /*** creating IImage 'Logo' ***/
+    var logo = eSpace.CreateImage("Logo");
+    logo.Description = "not graphed";
+}
+```
