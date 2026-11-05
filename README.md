@@ -169,6 +169,12 @@ developed against.
 
 ---
 
+## Contributing
+
+Branching strategy, milestone branches, ticket workflow and the checks a change
+has to pass are in **[CONTRIBUTING.md](CONTRIBUTING.md)** — and in
+**[CLAUDE.md](CLAUDE.md)** for Claude Code sessions.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
