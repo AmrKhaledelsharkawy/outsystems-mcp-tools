@@ -1,0 +1,15 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    /*** creating IClientAction 'OSM004ToggleFlag' ***/
+    var oSM004ToggleFlag = eSpace.CreateClientAction("OSM004ToggleFlag");
+    oSM004ToggleFlag.Description = "Toggles a flag";
+    var startNode = oSM004ToggleFlag.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var bL_IsCodePatternValid2 = eSpace.ServerActions.Named("BL_IsCodePatternValid");
+    var bL_IsCodePatternValid = oSM004ToggleFlag.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("BL_IsCodePatternValid");
+    bL_IsCodePatternValid.Action = bL_IsCodePatternValid2;
+    var _System_ = eSpace.References.Named("(System)");
+    var setCurrentLocale2 = _System_.ClientActions.Named("SetCurrentLocale");
+    var setCurrentLocale = oSM004ToggleFlag.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("SetCurrentLocale");
+    setCurrentLocale.Action = setCurrentLocale2;
+}
+```

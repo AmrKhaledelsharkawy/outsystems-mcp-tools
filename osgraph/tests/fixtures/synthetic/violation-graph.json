@@ -1,0 +1,41 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {
+    "schema_version": "1.0",
+    "graphify_version": "0.9.91",
+    "note": "OSG-012 tier-1 synthetic fixture. Planted violations: UI->CS (Home references Customer) and BL->CW (BL_Do embeds Header). Foundation has no layer suffix -> UNKNOWN -> exempt."
+  },
+  "nodes": [
+    { "id": "osgraph://Demo_UI", "label": "Demo_UI", "file_type": "module", "source_file": "Demo_UI.oml", "kind": "module", "module": "Demo_UI", "layer": "UI" },
+    { "id": "osgraph://Demo_CW", "label": "Demo_CW", "file_type": "module", "source_file": "Demo_CW.oml", "kind": "module", "module": "Demo_CW", "layer": "CW" },
+    { "id": "osgraph://Demo_SL", "label": "Demo_SL", "file_type": "module", "source_file": "Demo_SL.oml", "kind": "module", "module": "Demo_SL", "layer": "SL" },
+    { "id": "osgraph://Demo_BL", "label": "Demo_BL", "file_type": "module", "source_file": "Demo_BL.oml", "kind": "module", "module": "Demo_BL", "layer": "BL" },
+    { "id": "osgraph://Demo_CS", "label": "Demo_CS", "file_type": "module", "source_file": "Demo_CS.oml", "kind": "module", "module": "Demo_CS", "layer": "CS" },
+    { "id": "osgraph://Foundation", "label": "Foundation", "file_type": "module", "source_file": "Foundation.oml", "kind": "module", "module": "Foundation", "layer": "UNKNOWN" },
+
+    { "id": "osgraph://Demo_UI/Screen/MainFlow/Home", "label": "Home", "file_type": "code", "source_file": "Demo_UI/Screens/MainFlow/Home", "kind": "Screen", "module": "Demo_UI", "layer": "UI" },
+    { "id": "osgraph://Demo_CW/Block/Common/Header", "label": "Header", "file_type": "code", "source_file": "Demo_CW/Blocks/Common/Header", "kind": "Block", "module": "Demo_CW", "layer": "CW" },
+    { "id": "osgraph://Demo_SL/ServerAction/SL_Do", "label": "SL_Do", "file_type": "code", "source_file": "Demo_SL/ServerActions/SL_Do", "kind": "ServerAction", "module": "Demo_SL", "layer": "SL" },
+    { "id": "osgraph://Demo_BL/ServerAction/BL_Do", "label": "BL_Do", "file_type": "code", "source_file": "Demo_BL/ServerActions/BL_Do", "kind": "ServerAction", "module": "Demo_BL", "layer": "BL" },
+    { "id": "osgraph://Demo_CS/Entity/Customer", "label": "Customer", "file_type": "code", "source_file": "Demo_CS/Entities/Customer", "kind": "Entity", "module": "Demo_CS", "layer": "CS" },
+    { "id": "osgraph://Foundation/Block/Layouts/LayoutMain", "label": "LayoutMain", "file_type": "code", "source_file": "Foundation/Blocks/Layouts/LayoutMain", "kind": "Block", "module": "Foundation", "layer": "UNKNOWN", "external": true }
+  ],
+  "links": [
+    { "source": "osgraph://Demo_UI/Screen/MainFlow/Home", "target": "osgraph://Demo_CW/Block/Common/Header", "relation": "embeds", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_UI/Screens/MainFlow/Home" },
+    { "source": "osgraph://Demo_CW/Block/Common/Header", "target": "osgraph://Demo_SL/ServerAction/SL_Do", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_CW/Blocks/Common/Header" },
+    { "source": "osgraph://Demo_SL/ServerAction/SL_Do", "target": "osgraph://Demo_BL/ServerAction/BL_Do", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_SL/ServerActions/SL_Do" },
+    { "source": "osgraph://Demo_BL/ServerAction/BL_Do", "target": "osgraph://Demo_CS/Entity/Customer", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_BL/ServerActions/BL_Do" },
+
+    { "source": "osgraph://Demo_UI/Screen/MainFlow/Home", "target": "osgraph://Demo_CS/Entity/Customer", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_UI/Screens/MainFlow/Home" },
+    { "source": "osgraph://Demo_BL/ServerAction/BL_Do", "target": "osgraph://Demo_CW/Block/Common/Header", "relation": "embeds", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_BL/ServerActions/BL_Do" },
+
+    { "source": "osgraph://Demo_UI/Screen/MainFlow/Home", "target": "osgraph://Foundation/Block/Layouts/LayoutMain", "relation": "embeds", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_UI/Screens/MainFlow/Home" },
+
+    { "source": "osgraph://Demo_UI", "target": "osgraph://Demo_CW", "relation": "depends_on", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_UI.oml" },
+    { "source": "osgraph://Demo_CW", "target": "osgraph://Demo_SL", "relation": "depends_on", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_CW.oml" },
+    { "source": "osgraph://Demo_SL", "target": "osgraph://Demo_BL", "relation": "depends_on", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_SL.oml" },
+    { "source": "osgraph://Demo_BL", "target": "osgraph://Demo_CS", "relation": "depends_on", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_BL.oml" },
+    { "source": "osgraph://Demo_UI", "target": "osgraph://Foundation", "relation": "depends_on", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "Demo_UI.oml" }
+  ]
+}
