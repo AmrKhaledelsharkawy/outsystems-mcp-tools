@@ -41,6 +41,84 @@ that stays an explicit decision, so a snapshot always covers exactly what you sa
 
 ---
 
+## Architecture
+
+How a published change becomes an answer. Read it as one pipeline, left to right:
+
+```text
+ developer's 1-Click Publish to DEV
+              |
+              v
+  [1] detection ....... poll an authoritative current-state read, every 60 s,
+                        plus a periodic full reconciliation scan.
+                        OutSystems 11 exposes NO publish webhook (ADR-0014);
+                        a revision is an opaque equality token, never ordered.
+              |
+              v
+  [2] dirty queue ..... durable, revision-aware, coalescing. Three publishes of
+                        one module become one pending extraction of the latest
+                        revision. Survives restart, because it is the only
+                        record of work owed.
+              |
+              v
+  [3] Studio worker ... ONE process, one machine-wide lease, one module at a
+                        time: osopener opens the module -> verify revision ->
+                        read it four-wide (ADR-0013) -> drain -> verify revision
+                        again -> close. Needs a logged-in interactive Windows
+                        desktop; GUI automation does not work in Session 0.
+              |
+              v
+  [4] shard cache ..... content-addressed per-module extraction and flow
+                        objects. An unchanged module is never re-read and its
+                        shard never re-uploaded.
+              |
+              v
+  [5] assembly ........ recompute the whole scope from the cached shards of ALL
+                        its modules - a pure, deterministic merge, no Studio
+                        involved - into one immutable generation plus a
+                        manifest. An incomplete revision vector is never
+                        published as a scope state.
+              |
+              v
+  [6] publication ..... upload immutable shards first, then the manifest, to a
+                        separate private GitHub repository (default) or a
+                        SharePoint document library. The manifest lands last and
+                        is read first, so it never names a missing shard.
+              |
+              v
+  [7] developer sync .. `osgraph sync` on each workstation downloads only the
+                        hashes it lacks, validates them, merges locally with the
+                        same deterministic builders, and atomically switches its
+                        local pointer. No Service Studio on the client, and no
+                        GUI control handed to it.
+```
+
+The vocabulary this pipeline uses — *revision*, *revision vector*, *generation*,
+*shard*, *manifest*, *watcher*, *dirty queue* — is defined, with the distinctions that
+matter, in [`GLOSSARY.md`](GLOSSARY.md).
+
+**Freshness is a measured target, not a guaranteed bound.** One real module commonly
+costs around three minutes of extraction at four parallel reads, and there is exactly
+one Studio worker, so a handful of simultaneously-changed modules can exceed any
+fifteen-minute goal on a correctly working system. osgraph therefore records a deadline
+per event and **reports the misses** instead of claiming compliance it cannot verify
+([ADR-0014](docs/adr/0014-publishes-detected-by-polling-a-current-state-read.md)).
+
+**And none of it makes osgraph standalone.** Automatic detection removes the human from
+*noticing* a publish. It does not remove **osopener** — nothing else can open a module
+for reading — or the **token manager**, because approving a Service Studio session is a
+human act that is never bypassed or automated. A watcher whose session token has expired
+stops and alerts; it does not work around the approval. See **"Hard requirement —
+osgraph does not work alone"** above.
+
+**What exists today:** stages 3, 4 (as `raw/` captures) and 5 (as a single snapshot) ship
+in the caller-triggered [`rebuild`](#tools) tool, which is **not** being removed — it stays
+the way to build a baseline and to force a re-read. Stages 1, 2, 6 and 7, immutable
+generations and the `watch` / `sync` / `status` / `doctor` commands are being built across
+milestones M0–M4; the issue tracker is the authority on what has landed.
+
+---
+
 ## Tools
 
 | Tool | Does |
