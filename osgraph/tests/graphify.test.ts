@@ -78,15 +78,23 @@ function fakeGraphify(dir: string, stdout: string, code: number, options: FakeGr
   const path = join(dir, name);
   writeFileSync(
     path,
-    `#!/bin/sh\nd=$(dirname "$0")\n` +
+    // `envWithPath` gives the child a PATH containing ONLY this temp directory — that is the whole
+    // point of the fixture, since it makes the fake the only resolvable `graphify`. So this script
+    // may use **shell builtins only**: `dirname` and `cat` are external binaries and are not on
+    // that PATH. Getting it wrong fails on Linux and passes on Windows, where the `.cmd` branch
+    // above uses nothing but cmd builtins (`echo`, `type`) — which is why it went unnoticed until
+    // CI first ran this suite. `${0%/*}` is the builtin dirname; `emit` is the builtin `cat`, with
+    // `|| [ -n "$l" ]` so a final line without a trailing newline is still printed.
+    `#!/bin/sh\ncase "$0" in */*) d=\${0%/*};; *) d=.;; esac\n` +
+      `emit() { while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done < "$1"; }\n` +
       `if [ "$1" = "--version" ]; then\n` +
       `  printf '[%s]\\n' "$${GRAPHIFY_ENV_NO_AUTO_REFRESH}" >> "$d/probes.txt"\n` +
-      `  cat "$d/version.txt"\n` +
+      `  emit "$d/version.txt"\n` +
       `  exit ${versionCode}\n` +
       `fi\n` +
       `printf '%s\\n' "$@" > "$d/args.txt"\n` +
       `printf '[%s]\\n' "$${GRAPHIFY_ENV_NO_AUTO_REFRESH}" > "$d/env.txt"\n` +
-      `cat "$d/out.txt"\n` +
+      `emit "$d/out.txt"\n` +
       `exit ${code}\n`
   );
   chmodSync(path, 0o755);

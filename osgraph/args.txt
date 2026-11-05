@@ -1,0 +1,5 @@
+path
+A
+B
+--graph
+g.json

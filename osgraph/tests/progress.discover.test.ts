@@ -325,7 +325,12 @@ describe("ChildProcessDiscovery", () => {
       }) as never
     });
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  // `maxRetries` is load-bearing on Windows, not defensive padding: the job directory is written
+  // and re-read inside one test, and a recursive rmdir issued right after can still hit ENOTEMPTY
+  // while Windows finishes releasing the directory entries. It fails only there, and only in
+  // teardown — the assertions had already passed — so it surfaces as five unrelated test
+  // failures. Node retries ENOTEMPTY/EBUSY/EPERM when told how many times to.
+  afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
   it("writes the normalised request and spawns the job", async () => {
     const { id } = await runner.start({ starters: ["MOD_A_BL"], depth: 2 });
