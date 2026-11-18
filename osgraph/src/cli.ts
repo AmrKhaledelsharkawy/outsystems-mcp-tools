@@ -1,16 +1,29 @@
 #!/usr/bin/env node
-import { join } from "node:path";
-import { loadConfig, OsgraphConfigError, type OsgraphConfig } from "./config.js";
+import { loadConfig, OsgraphConfigError, requireServiceStudioUrl, type OsgraphConfig } from "./config.js";
+import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
-import { parseArgs, USAGE } from "./cli/args.js";
+import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
 import { ensureSite } from "./progress/site.js";
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
 const EXIT_USAGE = 64;
+
+/** #7: `serve` starts without an endpoint, but says up front (stderr, never stdout) what that costs. */
+function noteMissingEndpoint(config: OsgraphConfig): void {
+  try {
+    requireServiceStudioUrl(config);
+  } catch (err) {
+    if (!(err instanceof OsgraphConfigError)) throw err;
+    process.stderr.write(
+      `osgraph: ${err.code}: ${err.message}\n` +
+        `osgraph: offline tools are available; 'rebuild' will refuse with ${err.code} until this is fixed.\n`
+    );
+  }
+}
 
 /**
  * Writes the message to stderr and exits once the write has flushed.
@@ -33,7 +46,7 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
   const result = reextractScope({
     scope,
     graphDir,
-    snapshotPath: join(graphDir, scope.name, "graph.json"),
+    snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name),
     rules: loadLayerRules(),
     ...(options.quiet === "true" ? {} : { onProgress: (line: string) => process.stderr.write(`${line}\n`) })
   });
@@ -80,7 +93,7 @@ if (options.help === "true" || command === "help") {
 } else {
   let config: OsgraphConfig | undefined;
   try {
-    config = loadConfig(process.env);
+    config = loadConfig(process.env, { requireServiceStudio: requiresServiceStudioAtStart(command) });
   } catch (err) {
     fail(EXIT_CONFIG, err instanceof OsgraphConfigError ? `${err.code}: ${err.message}` : String(err));
   }
@@ -91,6 +104,7 @@ if (options.help === "true" || command === "help") {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       });
     } else if (command === "serve") {
+      noteMissingEndpoint(config);
       startServer(config).catch((err: unknown) => {
         fail(EXIT_FATAL, `fatal: ${err instanceof Error ? err.message : String(err)}`);
       });

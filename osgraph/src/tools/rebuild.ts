@@ -10,7 +10,16 @@ import {
 import { OsgraphToolError } from "../servicestudio/types.js";
 import { ensureSite, siteInfo, type SiteInfo } from "../progress/site.js";
 import { writeTimings } from "../progress/timings.js";
-import { completenessFor, parseInput, permissiveShape, runTool, scopeArg, type OsgraphTool, type ToolContext } from "./tool.js";
+import {
+  completenessFor,
+  parseInput,
+  permissiveShape,
+  requireLiveEndpoint,
+  runTool,
+  scopeArg,
+  type OsgraphTool,
+  type ToolContext
+} from "./tool.js";
 
 /**
  * A staged `rebuild` answers with the stage state. The snapshot and meta stay on disk — only the
@@ -101,6 +110,9 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
     const scope = scopeArg(args.scope);
     return runTool<RebuildToolResult | StageToolResult>(ctx, scope, async () => {
       const input = parseInput(strictSchema, args, "rebuild");
+      // #7: rebuild is the live command; with no usable endpoint it refuses here, on dispatch,
+      // before it holds the gate or raises a site — never as a later connection error.
+      requireLiveEndpoint(ctx);
       // ADR-0007/F1: one rebuild at a time per process, and the loser is answered now, not in an hour.
       if (!ctx.rebuildGate.tryAcquire()) {
         throw new OsgraphToolError(

@@ -184,7 +184,7 @@ export const searchFlows: OsgraphTool<typeof inputSchema> = {
     "Each hit names the module, the element, the action, the node, the field and the matched text verbatim, so a " +
     "nodeId can be handed straight to getFlow. Expressions are never parsed — this regex IS the query over them. " +
     "Returns at most `limit` hits (default 200) with `totalHits` reporting the true count. " +
-    "Errors: INPUT_INVALID (including an invalid regex), SCOPE_NOT_FOUND, FLOWS_NOT_BUILT " +
+    "Errors: INPUT_INVALID (including an invalid regex), SCOPE_INVALID (a scope name that is not a single safe path segment), SCOPE_NOT_FOUND, FLOWS_NOT_BUILT " +
     "(run `osgraph reextract --scope <name>`, which is offline and takes seconds).",
   inputSchema,
   handler: (args, ctx: ToolContext) => {

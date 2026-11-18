@@ -1,0 +1,31 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow common) => {
+    
+    /*** creating IMobileBlock 'Tile' ***/
+    var tile = common.CreateBlock("Tile");
+    tile.Description = null; // default value
+    tile.Public = false; // default value
+    var eSpace = common.GetESpace();
+    
+    var clicked = tile.CreateEvent("Clicked");
+    clicked.IsMandatory = false;
+    
+    var onTileClick = tile.CreateScreenAction("OnTileClick");
+    
+    var startNode = onTileClick.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var formatDate = onTileClick.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("FormatDate");
+    var formatDate2 = eSpace.ClientActions.Named("FormatDate");
+    formatDate.Action = formatDate2;
+    startNode.Target = formatDate;
+    
+    var endNode = onTileClick.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    formatDate.Target = endNode;
+    
+    var container = tile.CreateWidget<ServiceStudio.Plugin.NRWidgets.IContainer>();
+    container.SetStyle("\"demo-tile\"");
+    var event1 = container.CreateEvent();
+    event1.Event = "onclick";
+    event1.Handler = onTileClick;
+}
+```

@@ -189,7 +189,7 @@ export const getFlow: OsgraphTool<typeof inputSchema> = {
     "which widget event calls which action, which lifecycle handler (OnReady…) runs which action, each block " +
     "instance's source block, its input arguments and its event handlers, and each If widget's condition. " +
     "ForEach ports read as cycle→ (the loop BODY) and exit→ (the continuation). Expressions are verbatim text, " +
-    "never parsed. Errors: INPUT_INVALID, SCOPE_NOT_FOUND, FLOWS_NOT_BUILT (run `osgraph reextract --scope <name>`, " +
+    "never parsed. Errors: INPUT_INVALID, SCOPE_INVALID (a scope name that is not a single safe path segment), SCOPE_NOT_FOUND, FLOWS_NOT_BUILT (run `osgraph reextract --scope <name>`, " +
     "which is offline and takes seconds), UNKNOWN_NODE (no such element, no such action, or an ambiguous name — " +
     "the candidates are listed).",
   inputSchema,

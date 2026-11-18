@@ -7,11 +7,11 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { canonicalJson, readMeta, writeFileAtomic } from "../graph/io.js";
+import { canonicalJson, FLOWS_FILE, readMeta, writeFileAtomic } from "../graph/io.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
 import { FLOWS_SCHEMA_VERSION, type FlowsArtifact } from "./build.js";
 
-export const FLOWS_FILE = "flows.json";
+export { FLOWS_FILE };
 
 /** `<dir of graph.json>/flows.json` — one artifact per scope, beside the snapshot (ADR-0005). */
 export function flowsPath(graphPath: string): string {

@@ -1,0 +1,31 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow common) => {
+    
+    /*** creating IMobileBlock 'Banner' ***/
+    var banner = common.CreateBlock("Banner");
+    banner.Description = null; // default value
+    banner.Public = false; // default value
+    var eSpace = common.GetESpace();
+    
+    var clicked = banner.CreateEvent("Clicked");
+    clicked.IsMandatory = false;
+    
+    var onBannerClick = banner.CreateScreenAction("OnBannerClick");
+    
+    var startNode = onBannerClick.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var showToast = onBannerClick.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ShowToast");
+    var showToast2 = eSpace.ClientActions.Named("ShowToast");
+    showToast.Action = showToast2;
+    startNode.Target = showToast;
+    
+    var endNode = onBannerClick.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    showToast.Target = endNode;
+    
+    var container = banner.CreateWidget<ServiceStudio.Plugin.NRWidgets.IContainer>();
+    container.SetStyle("\"demo-banner\"");
+    var event1 = container.CreateEvent();
+    event1.Event = "onclick";
+    event1.Handler = onBannerClick;
+}
+```

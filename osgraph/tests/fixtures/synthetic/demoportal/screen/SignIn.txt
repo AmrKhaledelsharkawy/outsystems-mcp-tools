@@ -1,0 +1,159 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow signIn) => {
+
+    /*** creating IMobileScreen 'SignIn' ***/
+    var signIn2 = signIn.CreateScreen("SignIn");
+    signIn2.GetESpace().Roles.ToList().ForEach(x => x.Delete());
+    var eSpace = signIn.GetESpace();
+    var mOD_DEMO_Roles = eSpace.References.Named("MOD_DEMO_Roles");
+    var mOD_DEMO_PortalUser = mOD_DEMO_Roles.Roles.Named("MOD_DEMO_PortalUser");
+    signIn2.Roles.Add(mOD_DEMO_PortalUser);
+    var anonymous = eSpace.SystemRoles.OfType<OutSystems.Model.Logic.ISystemRole>().Named("Anonymous");
+    signIn2.Roles.Add(anonymous);
+    signIn2.AnonymousAccess = false; // default value
+    signIn2.CustomURL = true;
+    signIn2.Description = null; // default value
+    signIn2.HorizontalPosition = 2371;
+    signIn2.PageName = "signin";
+    signIn2.Public = true;
+    signIn2.SetTitle("\"Sign in\"");
+    signIn2.VerticalPosition = 1457;
+
+    var errorMessage = signIn2.CreateLocalVariable("ErrorMessage");
+    errorMessage.DataType = eSpace.TextType;
+    errorMessage.SetDefaultValue(null); // default value
+
+    var showError = signIn2.CreateLocalVariable("ShowError");
+    showError.DataType = eSpace.BooleanType;
+    showError.SetDefaultValue(null); // default value
+    signIn2.OnDestroy.Destination = null; // default value
+    signIn2.OnInitialize.Destination = null; // default value
+    signIn2.OnRender.Destination = null; // default value
+
+    var showErrorEvent = signIn2.CreateScreenAction("ShowErrorEvent");
+    showErrorEvent.Description = null; // default value
+
+    var errorMsg = showErrorEvent.CreateInputParameter("ErrorMsg");
+    errorMsg.DataType = eSpace.TextType;
+    errorMsg.IsMandatory = true; // default value
+
+    var onReady = signIn2.CreateScreenAction("OnReady");
+    onReady.Description = null; // default value
+
+    var startNode = onReady.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    startNode.IsDisabled = false; // default value
+
+    var commentNode = onReady.CreateNode<OutSystems.Model.Logic.Nodes.ICommentNode>();
+    commentNode.HorizontalPosition = 4300;
+    commentNode.Text = "Runs once the screen has rendered.";
+    commentNode.VerticalPosition = 1000; // default value
+
+    var onSignInReady = onReady.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("OnSignInReady");
+    var onSignInReady2 = eSpace.ServerActions.Named("OnSignInReady");
+    onSignInReady.Action = onSignInReady2;
+    onSignInReady.AnimationEffect = OutSystems.Model.Enumerations.ExecuteActionAnimationEffectType.None; // default value
+    onSignInReady.HorizontalPosition = 3200;
+    onSignInReady.VerticalPosition = 3200;
+
+    var setDateFormat = onReady.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("SetDateFormat").ConnectedBelow(onSignInReady, 1829);
+    var mOD_DEMO_Configurations_Lib = eSpace.References.Named("MOD_DEMO_Configurations_Lib");
+    var setDateFormat2 = mOD_DEMO_Configurations_Lib.ClientActions.Named("SetDateFormat");
+    setDateFormat.Action = setDateFormat2;
+    var dateFormat = setDateFormat2.InputParameters.Named("DateFormat");
+    setDateFormat.SetArgumentValue(dateFormat, "\"yyyy-MM-dd\"");
+
+    var endNode = onReady.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    endNode.HorizontalPosition = 3196;
+    endNode.VerticalPosition = 6840;
+    signIn2.OnReady.Destination = onReady;
+    startNode.Target = onSignInReady;
+    setDateFormat.Target = endNode;
+
+    var startNode2 = showErrorEvent.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+
+    var assignNode = showErrorEvent.CreateNode<OutSystems.Model.Logic.Nodes.IAssignNode>();
+    assignNode.Label = null; // default value
+
+    var assignment = assignNode.CreateAssignment("ShowError", "True");
+    startNode2.Target = assignNode;
+
+    var assignNode2 = showErrorEvent.CreateNode<OutSystems.Model.Logic.Nodes.IAssignNode>();
+
+    var assignment2 = assignNode2.CreateAssignment("ErrorMessage", "ErrorMsg");
+    assignNode.Target = assignNode2;
+
+    var endNode2 = showErrorEvent.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    assignNode2.Target = endNode2;
+
+    var navigateToDashboard = signIn2.CreateScreenAction("NavigateToDashboard");
+    navigateToDashboard.Description = null; // default value
+
+    var startNode3 = navigateToDashboard.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+
+    var destinationNode = navigateToDashboard.CreateNode<OutSystems.Model.Logic.Nodes.IDestinationNode>();
+    var mainFlow = eSpace.MobileFlows.Named("MainFlow");
+    var dashboard = mainFlow.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileScreen>().Named("Dashboard");
+    destinationNode.Destination = dashboard;
+    destinationNode.Transition = OutSystems.Model.Enumerations.TransitionTypeWithInheritance.Inherited; // default value
+    startNode3.Target = destinationNode;
+
+    var navigateToHome = signIn2.CreateScreenAction("NavigateToHome");
+
+    var startNode4 = navigateToHome.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+
+    var destinationNode2 = navigateToHome.CreateNode<OutSystems.Model.Logic.Nodes.IDestinationNode>();
+    var home = mainFlow.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileScreen>().Named("Home");
+    destinationNode2.Destination = home;
+    startNode4.Target = destinationNode2;
+
+    var toggleError = signIn2.CreateScreenAction("ToggleError");
+
+    var startNode5 = toggleError.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+
+    var assignNode3 = toggleError.CreateNode<OutSystems.Model.Logic.Nodes.IAssignNode>();
+
+    var assignment3 = assignNode3.CreateAssignment("ShowError", "False");
+    startNode5.Target = assignNode3;
+
+    var endNode3 = toggleError.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    assignNode3.Target = endNode3;
+
+    var layoutSignInInstance = signIn2.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    layoutSignInInstance.CustomStyle = null; // default value
+    var mOD_DEMO_Layouts = eSpace.References.Named("MOD_DEMO_Layouts");
+    var demoLayouts = mOD_DEMO_Layouts.MobileFlows.Named("DemoLayouts");
+    var layoutSignIn = demoLayouts.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlockSignature>().Named("LayoutSignIn");
+    layoutSignInInstance.SourceBlock = layoutSignIn;
+    var extendedClass = layoutSignIn.InputParameters.Named("ExtendedClass");
+    layoutSignInInstance.SetArgumentValue(extendedClass, null);
+
+    var placeholderContentWidget = layoutSignInInstance.PlaceholdersContent.FirstOrDefault(p => p.Placeholder?.Name == "MainContent");
+    var showErrorIf = placeholderContentWidget.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IIfWidget>("ShowErrorIf");
+    showErrorIf.Animate = false; // default value
+    showErrorIf.SetCondition("ShowError");
+
+    var container = showErrorIf.TrueBranch.CreateWidget<ServiceStudio.Plugin.NRWidgets.IContainer>();
+    container.SetStyle("\"alert alert-error\"");
+    container.SetVisible("ErrorMessage <> \"\"");
+
+    var event1 = container.CreateEvent();
+    event1.Event = "onclick";
+    event1.Handler = toggleError;
+
+    var otpPanelInstance = placeholderContentWidget.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    otpPanelInstance.CustomStyle = null; // default value
+    var mOD_DEMO_Portal_CW = eSpace.References.Named("MOD_DEMO_Portal_CW");
+    var mainFlow2 = mOD_DEMO_Portal_CW.MobileFlows.Named("MainFlow");
+    var otpPanel = mainFlow2.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlockSignature>().Named("OtpPanel");
+    otpPanelInstance.SourceBlock = otpPanel;
+    var eventHandler = otpPanelInstance.EventHandlers.FirstOrDefault(e => e.Event.Name == "ShowErrorEvent");
+    eventHandler.Handler = showErrorEvent;
+    eventHandler.SetArgumentValue(errorMsg, "ErrorMsg");
+    var eventHandler2 = otpPanelInstance.EventHandlers.FirstOrDefault(e => e.Event.Name == "NavigateToDashboard");
+    eventHandler2.Handler = navigateToDashboard;
+    var eventHandler3 = otpPanelInstance.EventHandlers.FirstOrDefault(e => e.Event.Name == "NavigateToHome");
+    eventHandler3.Handler = navigateToHome;
+    var eventHandler4 = otpPanelInstance.EventHandlers.FirstOrDefault(e => e.Event.Name == "ScrollToEvent");
+    eventHandler4.Handler = null; // default value
+}
+```

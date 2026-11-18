@@ -1,0 +1,10 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IStructure 'SL_CatalogItem' ***/
+    var sL_CatalogItem = eSpace.CreateStructure("SL_CatalogItem");
+    sL_CatalogItem.Description = "One catalog row, as the service layer returns it";
+    var id = sL_CatalogItem.CreateAttribute("Id");
+    id.DataType = eSpace.Model.LongIntegerType;
+}
+```

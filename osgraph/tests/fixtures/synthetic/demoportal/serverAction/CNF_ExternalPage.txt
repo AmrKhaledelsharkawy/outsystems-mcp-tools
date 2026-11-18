@@ -1,0 +1,19 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+    
+    /*** creating IServerAction 'CNF_ExternalPage' ***/
+    var cNF_ExternalPage = eSpace.CreateServerAction("CNF_ExternalPage");
+    cNF_ExternalPage.Description = "CNF_ExternalPage (synthetic)";
+    
+    var startNode = cNF_ExternalPage.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var mOD_DEMO_Configurations_CNF = eSpace.References.Named("MOD_DEMO_Configurations_CNF");
+    var cNF_GetSetting2 = mOD_DEMO_Configurations_CNF.ServerActions.Named("CNF_GetSetting");
+    var cNF_GetSetting = cNF_ExternalPage.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("CNF_GetSetting");
+    cNF_GetSetting.Action = cNF_GetSetting2;
+    startNode.Target = cNF_GetSetting;
+    var endNode = cNF_ExternalPage.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    cNF_GetSetting.Target = endNode;
+}
+```

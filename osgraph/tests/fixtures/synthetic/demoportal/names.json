@@ -1,0 +1,143 @@
+{
+  "screens": [
+    {
+      "Name": "Home",
+      "Description": "",
+      "UIFlow": "MainFlow",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Catalog",
+      "Description": "",
+      "UIFlow": "MainFlow",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Contact",
+      "Description": "",
+      "UIFlow": "MainFlow",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Help",
+      "Description": "",
+      "UIFlow": "MainFlow",
+      "IsReferenced": false
+    },
+    {
+      "Name": "SignIn",
+      "Description": "",
+      "UIFlow": "SignIn",
+      "IsReferenced": false
+    }
+  ],
+  "blocks": [
+    {
+      "Name": "Banner",
+      "Description": "",
+      "UIFlow": "Common",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Card",
+      "Description": "A card pattern, as published by the common library.",
+      "UIFlow": "Common",
+      "IsReferenced": true
+    },
+    {
+      "Name": "Card",
+      "Description": "",
+      "UIFlow": "DemoPatterns",
+      "IsReferenced": true
+    },
+    {
+      "Name": "Footer",
+      "Description": "",
+      "UIFlow": "Common",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Header",
+      "Description": "",
+      "UIFlow": "Common",
+      "IsReferenced": false
+    },
+    {
+      "Name": "OtpPanel",
+      "Description": "",
+      "UIFlow": "MainFlow",
+      "IsReferenced": true
+    },
+    {
+      "Name": "Sidebar",
+      "Description": "",
+      "UIFlow": "Common",
+      "IsReferenced": false
+    },
+    {
+      "Name": "Tile",
+      "Description": "",
+      "UIFlow": "Common",
+      "IsReferenced": false
+    }
+  ],
+  "cacts": [
+    {
+      "Name": "FormatDate",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "ScrollTop",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "ShowToast",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "ToggleMenu",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "ValidateEmail",
+      "Description": "",
+      "IsReferenced": false
+    }
+  ],
+  "sacts": [
+    {
+      "Name": "CNF_ExternalPage",
+      "Description": "CNF_ExternalPage",
+      "IsReferenced": true
+    },
+    {
+      "Name": "GetCatalog",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "LogVisit",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "OnSignInReady",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "SaveContact",
+      "Description": "",
+      "IsReferenced": false
+    },
+    {
+      "Name": "SendMail",
+      "Description": "",
+      "IsReferenced": false
+    }
+  ]
+}
