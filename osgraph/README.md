@@ -24,10 +24,10 @@ Two kinds of question it answers:
 
 | Required | Why osgraph cannot do without it |
 |---|---|
-| **[osopener](../osopener/)** | `rebuild` can only read modules that are **open** in Service Studio. Anything else fails `MODULES_NOT_OPEN`. osopener is what opens them — Service Studio exposes no API for it |
+| **[osopener](../osopener/)** | `rebuild` can only read modules that are **open** in Service Studio. Anything else fails `MODULES_NOT_OPEN`. osopener is what opens them — Service Studio exposes no API for it. `osgraph run` loads it directly to open and close every module |
 | **[outsystems-token-manager](../outsystems-token-manager/)** | Every Service Studio read needs a **human-approved** session token. osgraph only ever *reads* `token.txt` — it never calls `createSessionToken`, because approving a session is a human act. The token manager is what obtains, persists and reuses that token |
 
-Without both, `rebuild` cannot run — and `rebuild` is what produces the snapshot every
+Without both, neither `rebuild` nor `osgraph run` can run — and `rebuild` is what produces the snapshot every
 other tool reads. You can still query a snapshot that already exists, but you cannot
 build one, which means you cannot get started and cannot ever refresh.
 
@@ -301,6 +301,61 @@ hard requirement above.
 Re-run `rebuild` when modules change (after a publish's merge completes). Rebuilds are
 caller-triggered on purpose: nothing watches your modules behind your back.
 
+The steps above suit a **small** scope. Past roughly 30 open modules Service Studio
+degrades (it splits into extra windows and its environment-list fetch grows from ~5 s
+to over 45 s), so for anything larger use `osgraph run` below.
+
+### Large scopes and single-module refresh: `osgraph run`
+
+> **Requires osopener and the token manager, like every live osgraph path.** `run`
+> opens and closes each module through **osopener** (Service Studio has no API for
+> opening one), and every read needs the human-approved session token in `token.txt`
+> that the **token manager** creates — osgraph only reads it. Without osopener `run`
+> stops with `OSOPENER_UNAVAILABLE` before touching Studio; without a token no read
+> can succeed. `run` also needs `OSGRAPH_SERVICESTUDIO_URL` at start.
+
+```bash
+node dist/cli.js run --scope <name>                    # full staged build, resumable
+node dist/cli.js run --scope <name> --module <module>  # refresh ONE module
+node dist/cli.js run --scope <name> --max-open 12 --max-consecutive-failures 3 --json
+```
+
+**Full staged build.** For each scope module that is not yet staged: make room
+(closing only tabs this process opened whose extraction is already staged, while
+`--max-open`, default 12, tabs are open), open it via osopener, stage it, wait for the
+read drain, and close the tab it opened. A module you already had open is read but
+left open. The last module finalizes `graph.json` and `flows.json` exactly as the
+staged `rebuild({ scope, module })` does. **Resumable:** a module with a stage entry is
+skipped, so after an interruption you run the same command again.
+
+**One-module refresh.** `--module M` re-reads only `M` and then re-extracts the whole
+scope offline from `raw/`, so `graph.json` and `flows.json` come out byte-identical to
+`osgraph reextract` over the same captures. Every other scope module must already have
+a `raw/` capture; if one does not, it fails with `RUN_CAPTURES_MISSING` naming them
+(run a full `osgraph run --scope <name>` first). It reports the capture age of every
+other module: the rest of the graph is only as fresh as its last full read.
+
+**Robustness**, learned from a 287-module run:
+
+- **Foreground gate** — osopener only sends input while Studio owns the foreground;
+  `run` waits (logging the window in front about once a minute) instead of failing.
+- **Retry by failure kind** — `foreground` waits and retries; `studio-busy` (only a
+  transient Progress window appeared) waits for Studio to go idle; `open-dialog`
+  closes the "Open from Environment" dialog only after confirming it is up, and logs
+  "dismissed" only when it is gone afterwards; `other` is not retried.
+- **Full diagnostics** — every failed attempt logs code, message and failed step;
+  giving up keeps osopener's real error and saves a screenshot under
+  `<graphDir>/<scope>/run/screenshots/`. The run log and a per-module report sit in
+  `<graphDir>/<scope>/run/`.
+- **Circuit breaker** — after `--max-consecutive-failures` (default 3, `0` disables)
+  modules in a row fail to open, the run stops: Studio itself is most likely stuck.
+  Fix or restart it and run the same command again.
+- A tab is never closed with reads still queued (the reader is drained first), and
+  osopener refuses to close a module with unsaved changes.
+
+The live progress site is raised and its URL printed before any work starts; add
+`--serve` to keep it up after the run ends.
+
 ### Offline re-extract
 
 If you change the parser and want to regenerate `graph.json` + `flows.json` from raw
@@ -318,7 +373,7 @@ node dist/cli.js --help
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
+| `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
 | `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file |
 | `OSGRAPH_GRAPH_DIR` | no | `<cwd>/.osgraph` | Where snapshots are written |
 | `OSGRAPH_SCOPES_DIR` | no | `<package>/scopes` | Where scope files live |
@@ -330,7 +385,7 @@ node dist/cli.js --help
 | `OSGRAPH_PROGRESS_SITE` | no | `on` | `off`/`0`/`false`/`no`/`none` disables the live progress site |
 | `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
-| `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery. The repo's own layout needs no setting |
+| `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |
 
 osgraph **only ever reads** the session token — it never calls `createSessionToken`,
 because approving a session is a human act. It therefore **cannot obtain a token by

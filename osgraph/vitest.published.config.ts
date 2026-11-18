@@ -26,6 +26,7 @@ export default defineConfig({
       "tests/raw.test.ts",
       "tests/rebuild.test.ts",
       "tests/reextract.test.ts",
+      "tests/run.test.ts",
       "tests/scopes.test.ts",
       "tests/servicestudio.client.test.ts",
       "tests/servicestudio.token.test.ts",

@@ -163,6 +163,80 @@ export interface OsopenerAdapter {
   owns(module: string): boolean;
   /** Modules this process opened and has not yet closed, in the order they were opened. */
   ownedModules(): string[];
+  /**
+   * Read-mostly probes of Studio's UI (foreground, the open dialog, a screenshot), for a caller that
+   * retries opens (#48 `osgraph run`). Absent when the adapter was built without osopener's helper.
+   */
+  readonly ui?: StudioUi;
+}
+
+/** What osopener's foreground probe reports. */
+export interface StudioForeground {
+  /** True when Service Studio's process owns the foreground window. */
+  isStudio: boolean;
+  /** Title of the foreground window, whoever owns it. */
+  title: string;
+}
+
+/**
+ * The few UI probes a retrying open loop needs, over osopener's UI helper. Each one is a single
+ * helper step; none of them opens or closes a module. `dismissOpenDialog` is the only one that sends
+ * input, it is scoped to the "Open from Environment" dialog by name, and it does NOT report whether
+ * it worked: the caller must check `openDialogPresent()` before and after, so a "dismissed" log line
+ * is never written for a dialog that was never up.
+ */
+export interface StudioUi {
+  foreground(): Promise<StudioForeground>;
+  /** Asks Studio to take the foreground. The next `foreground()` is the verdict, not this call. */
+  focus(): Promise<void>;
+  /** True when an "Open from Environment" window is up right now. */
+  openDialogPresent(): Promise<boolean>;
+  /** Clicks into the "Open from Environment" dialog, then sends Esc. Never touches a save prompt. */
+  dismissOpenDialog(): Promise<void>;
+  /** Captures the screen to `outPath`; resolves the written path, or null when no capture was taken. */
+  screenshot(outPath: string): Promise<string | null>;
+}
+
+/** The title osopener's open step drives; the only dialog `dismissOpenDialog` may touch. */
+export const OPEN_DIALOG_TITLE = "Open from Environment";
+
+/** osopener's helper, structurally (`osopener/src/helper.ts` `HelperRunner`). */
+export interface OsopenerHelper {
+  run(command: string, args?: Record<string, string | number | boolean>, timeoutMs?: number): Promise<Record<string, unknown>>;
+}
+
+/** Builds the UI probes over osopener's helper. Exported so the mapping is testable without Studio. */
+export function createHelperStudioUi(helper: OsopenerHelper, sleep: (ms: number) => Promise<void> = defaultSleep): StudioUi {
+  const present = async (): Promise<boolean> => {
+    const dump = await helper.run("uia-dump", { Depth: 2 });
+    return JSON.stringify(dump["nodes"] ?? []).includes(OPEN_DIALOG_TITLE);
+  };
+  return {
+    async foreground() {
+      const r = await helper.run("foreground-title");
+      return { isStudio: r["isStudio"] === true, title: String(r["title"] ?? "") };
+    },
+    async focus() {
+      await helper.run("focus");
+    },
+    openDialogPresent: present,
+    async dismissOpenDialog() {
+      // The dialog's content is a webview: Esc only lands once the dialog itself has been clicked.
+      await helper.run("uia-click", { Name: `^${OPEN_DIALOG_TITLE}$`, Depth: 3 });
+      await sleep(400);
+      await helper.run("send-keys", { Keys: "{ESC}" });
+      await sleep(1200);
+    },
+    async screenshot(outPath) {
+      const r = await helper.run("screenshot", { Out: outPath });
+      if (r["ok"] === false) return null;
+      return typeof r["path"] === "string" ? r["path"] : outPath;
+    }
+  };
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -273,7 +347,7 @@ export interface OsopenerTools {
 }
 
 /** Wraps osopener's raw tool handlers. Exported so the result handling is testable on its own. */
-export function createOsopenerAdapter(tools: OsopenerTools, dist: string): OsopenerAdapter {
+export function createOsopenerAdapter(tools: OsopenerTools, dist: string, ui?: StudioUi): OsopenerAdapter {
   // Exact names, as osopener matches them (it compares against listApps verbatim).
   const owned = new Set<string>();
 
@@ -300,6 +374,7 @@ export function createOsopenerAdapter(tools: OsopenerTools, dist: string): Osope
 
   return {
     dist,
+    ...(ui !== undefined ? { ui } : {}),
     async open(module) {
       let result: unknown;
       try {
@@ -431,7 +506,7 @@ export async function loadOsopenerAdapter(dist: string, options: LoadOsopenerOpt
     });
   }
 
-  let ctx: unknown;
+  let ctx: { config: Record<string, unknown>; client: unknown; helper: unknown };
   try {
     ctx = {
       config: cfg,
@@ -453,7 +528,8 @@ export async function loadOsopenerAdapter(dist: string, options: LoadOsopenerOpt
         open: (input) => openTool.handler(input, ctx),
         close: (input) => closeTool.handler(input, ctx)
       },
-      dist
+      dist,
+      createHelperStudioUi(ctx.helper as OsopenerHelper)
     )
   };
 }
