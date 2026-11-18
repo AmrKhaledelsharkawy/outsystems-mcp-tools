@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { join } from "node:path";
 import { loadConfig, OsgraphConfigError, requireServiceStudioUrl, type OsgraphConfig } from "./config.js";
+import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
@@ -46,7 +46,7 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
   const result = reextractScope({
     scope,
     graphDir,
-    snapshotPath: join(graphDir, scope.name, "graph.json"),
+    snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name),
     rules: loadLayerRules(),
     ...(options.quiet === "true" ? {} : { onProgress: (line: string) => process.stderr.write(`${line}\n`) })
   });
