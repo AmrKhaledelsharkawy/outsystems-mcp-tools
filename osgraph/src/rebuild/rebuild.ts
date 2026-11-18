@@ -675,9 +675,14 @@ class ModuleWalker {
   }
 }
 
-/** Runs one scope rebuild end to end. Throws `OsgraphToolError` on every abort path (snapshot untouched). */
-interface ModuleTiming {
+/**
+ * Timing of one module's extraction. `phases` are overlapping wall-clock spans, not a partition of
+ * `durationMs` — see `RebuildPerModule`.
+ */
+export interface ModuleTiming {
+  /** Canonical module name as Service Studio reports it (`listApps`). */
   module: string;
+  /** The spelling the caller asked for; equals `module` unless the scope spelled it differently. */
   requested: string;
   durationMs: number;
   referencedOnlyCount: number;
@@ -687,38 +692,102 @@ interface ModuleTiming {
   concurrency: number;
 }
 
-interface WalkAndExtractOptions {
-  session: ServiceStudioSession;
+export interface ExtractOpenModuleOptions {
+  /** The reader to walk through. The caller owns the session (acquire/release); this never touches it. */
+  reader: ServiceStudioReader;
+  /** Scope name — names the `raw/` capture directory and appears in `KIND_READ_FAILED` messages. */
   scope: string;
+  /**
+   * The module's row from the live open-module listing (`listApps`). It is what the walk reads by
+   * (`app.name`, `app.moduleType`) and what `moduleKey` / `moduleVersion` are reported from. The
+   * primitive does not re-list or re-validate it: resolving and checking the open state stay the
+   * callers' jobs (`resolveScopeModules`).
+   */
   app: ServiceStudioApp;
-  requested: string;
-  index: number;
-  total: number;
-  retryDelayMs: number;
-  fetchReferenced: boolean;
-  /** Element fan-out width for this module (OSG-016 §C1). */
-  fetchConcurrency: number;
-  emit: (event: RebuildProgressEvent) => void;
+  /** The spelling the caller asked for; default `app.name`. Recorded as `requestedAs` in the raw manifest. */
+  requested?: string;
+  /** `module-start` progress position; default 1 of 1. */
+  index?: number;
+  total?: number;
+  /** Back-off before the OSG-011 retry; default 250 ms. */
+  retryDelayMs?: number;
+  /** S6 audit F3 escape hatch; default false (referenced-only listing entries are not fetched). */
+  fetchReferencedElements?: boolean;
+  /** Read width (OSG-016 §C1; ADR-0013), clamped to [1, 8]; default `DEFAULT_FETCH_CONCURRENCY`. */
+  fetchConcurrency?: number;
+  onProgress?: (event: RebuildProgressEvent) => void;
   /** F0 raw capture root; undefined writes no files. */
   rawGraphDir?: string;
-  now: () => Date;
+  now?: () => Date;
+}
+
+export interface OpenModuleExtraction {
+  extracted: ExtractedModule;
+  timing: ModuleTiming;
+  /**
+   * The module's `raw/` capture directory (`<rawGraphDir>/<scope>/raw/<module>/`, manifest written
+   * last), or `undefined` when the caller disabled raw capture.
+   */
+  rawCapturePath: string | undefined;
+  /** `app.key` as the live open-module listing reported it. */
+  moduleKey: string;
+  /** `app.version` as the live open-module listing reported it. */
+  moduleVersion: string;
 }
 
 /**
- * Reads one module and parses it. Shared by the all-at-once path (`rebuildScope`) and the staged
- * one (`stageModule`) so both produce byte-identical extractions — the staged snapshot must not be
- * distinguishable from the one the single call would have written.
+ * The single-module extraction primitive: walk ONE already-open module through the servicestudio
+ * reads and parse it. There is exactly one copy of the MCP extraction logic (`walkAndExtract`): this
+ * primitive, `rebuildScope` (once per scope module) and `stageModule` (its one module) all run it, so
+ * a direct extraction, a staged one and an all-at-once one stay byte-identical.
+ *
+ * It publishes no scope snapshot and writes no stage file; those stay the callers' jobs. The only
+ * files it writes are the module's `raw/` capture, and only when `rawGraphDir` is set.
+ *
+ * Failure rules are the rebuild's (see the file header): an element read is retried once then
+ * skipped (`TOOL_ERROR`); a kind-level read is retried once then aborts with `KIND_READ_FAILED`; a
+ * session-level `OsgraphToolError` propagates unchanged.
+ *
+ * `reader.drain()` is awaited on **every** path out — success, kind-level failure, session error,
+ * cancellation, any thrown exception — before the caller regains control, because a caller's next
+ * act is typically osopener's `closeModule`, and closing a tab under a queued read is the one
+ * reproducible failure mode (OSG-016 §B1; ADR-0013).
  */
-async function walkAndExtract(
-  options: WalkAndExtractOptions
-): Promise<{ extracted: ExtractedModule; timing: ModuleTiming }> {
-  const { session, scope, app, requested, index, total, retryDelayMs, fetchReferenced, fetchConcurrency, emit } = options;
+export async function extractOpenModule(options: ExtractOpenModuleOptions): Promise<OpenModuleExtraction> {
+  try {
+    return await walkAndExtract(options);
+  } finally {
+    // OSG-016 §B1: never hand control back while reads are in flight or queued. On the success path
+    // everything has settled and this is free; on an abort path it is the only thing between a
+    // half-finished wave and a closing tab.
+    await options.reader.drain?.();
+  }
+}
+
+/**
+ * The one copy of the per-module MCP walk + extraction, without the drain barrier. Only callers that
+ * own the barrier themselves may call it directly: `extractOpenModule` (drains on every path out) and
+ * the two scope entry points, which await `drain()` once in their own `finally` before *their* caller
+ * regains control — exactly as before this primitive existed, so their observable behaviour (one
+ * barrier per rebuild, not one per module) is unchanged. Between two modules of one `rebuildScope`
+ * nobody closes a tab, so a per-module barrier there would buy nothing.
+ */
+async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenModuleExtraction> {
+  const { reader, scope, app } = options;
+  const requested = options.requested ?? app.name;
+  const index = options.index ?? 1;
+  const total = options.total ?? 1;
+  const retryDelayMs = options.retryDelayMs ?? 250;
+  const fetchReferenced = options.fetchReferencedElements === true;
+  const fetchConcurrency = resolveFetchConcurrency(options.fetchConcurrency);
+  const emit = options.onProgress ?? (() => undefined);
+  const now = options.now ?? (() => new Date());
   const moduleStarted = Date.now();
   emit({ type: "module-start", module: app.name, index, total, moduleType: app.moduleType });
   const raw =
     options.rawGraphDir !== undefined ? new RawModuleWriter(options.rawGraphDir, scope, app.name) : undefined;
   const walker = new ModuleWalker(
-    session.reader,
+    reader,
     scope,
     app.name,
     isTraditional(app.moduleType),
@@ -743,7 +812,7 @@ async function walkAndExtract(
   raw?.writeManifest({
     requestedAs: requested,
     moduleType: app.moduleType,
-    capturedAt: options.now().toISOString(),
+    capturedAt: now().toISOString(),
     referencedOnlyCount: walker.referencedOnlyCount,
     skipped: walker.skipped.map((s) => ({ kind: s.kind, name: s.name, reason: s.reason }))
   });
@@ -759,10 +828,14 @@ async function walkAndExtract(
       referencedOnlyCount: walker.referencedOnlyCount,
       phases: walker.phaseDurations,
       concurrency: fetchConcurrency
-    }
+    },
+    rawCapturePath: raw?.moduleDir,
+    moduleKey: app.key,
+    moduleVersion: app.version
   };
 }
 
+/** Runs one scope rebuild end to end. Throws `OsgraphToolError` on every abort path (snapshot untouched). */
 export async function rebuildScope(options: RebuildOptions): Promise<RebuildOutcome> {
   const { scope, snapshotPath, session, rules } = options;
   const now = options.now ?? (() => new Date());
@@ -784,16 +857,16 @@ export async function rebuildScope(options: RebuildOptions): Promise<RebuildOutc
 
     for (const [i, { requested, app }] of resolved.entries()) {
       const walked = await walkAndExtract({
-        session,
+        reader: session.reader,
         scope: scope.name,
         app,
         requested,
         index: i + 1,
         total: resolved.length,
         retryDelayMs,
-        fetchReferenced,
+        fetchReferencedElements: fetchReferenced,
         fetchConcurrency,
-        emit,
+        onProgress: emit,
         rawGraphDir: options.rawGraphDir,
         now
       });
@@ -821,7 +894,8 @@ export async function rebuildScope(options: RebuildOptions): Promise<RebuildOutc
     // very next act is typically osopener's `closeModule`, and closing a module out from under a
     // queued read is the one thing that reproduces the temp-OML error. On the success path everything
     // has already settled and this is free; on an abort path (a session-level error, a kind-level
-    // failure) it is the only thing between a half-finished wave and a closing tab.
+    // failure) it is the only thing between a half-finished wave and a closing tab. This is the same
+    // barrier `extractOpenModule` raises, held here once for the whole scope (see `walkAndExtract`).
     await session.reader.drain?.();
     session.release();
   }
@@ -1054,16 +1128,16 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     const [resolved] = resolveScopeModules({ name: scope.name, modules: [inScope] }, apps);
 
     const walked = await walkAndExtract({
-      session,
+      reader: session.reader,
       scope: scope.name,
       app: resolved.app,
       requested: resolved.requested,
       index: 1,
       total: 1,
       retryDelayMs,
-      fetchReferenced,
+      fetchReferencedElements: fetchReferenced,
       fetchConcurrency,
-      emit,
+      onProgress: emit,
       // The staged path always captures: `graphDir` is where its stage already lives, and a staged
       // run is exactly the case (one module at a time, hours apart) where re-reading live is worst.
       rawGraphDir: options.rawGraphDir ?? graphDir,
