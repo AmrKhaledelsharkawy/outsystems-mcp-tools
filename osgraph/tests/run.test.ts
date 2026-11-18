@@ -302,7 +302,108 @@ describe("runScope: open -> stage -> drain -> close for every unstaged module", 
   });
 });
 
+describe("runScope: --max-open holds when closes keep failing", () => {
+  it("tries every closable tab, never owns more than --max-open, and stops instead of opening more", async () => {
+    const graphDir = tmp();
+    const refused = (m: string): RawResult[] =>
+      Array.from({ length: 10 }, () => ({ closed: false, error: { code: "UIA_ELEMENT_NOT_FOUND", message: `tab '${m}' close button not found` } }));
+    const s = fakeStudio(mods(), { closeScript: { alpha: refused("alpha"), beta: refused("beta"), gamma: refused("gamma") } });
+    const logs: string[] = [];
+    const result = await runScope({ ...common(graphDir, s, logs), maxOpen: 2 });
+    expect(result.finalized).toBe(false);
+    expect(result.stoppedEarly).toContain("could not be closed (alpha, beta)");
+    expect(result.stoppedEarly).toContain("resumes");
+    expect(s.maxRunOwned).toBeLessThanOrEqual(2);
+    // Both owned tabs were tried before giving up on room (no `break` on the first refusal).
+    const order = s.events.filter((e) => e.startsWith("open:") || e.startsWith("close:"));
+    expect(order).toEqual(["open:alpha", "close:alpha", "open:beta", "close:beta", "close:alpha", "close:beta"]);
+    expect(s.events).not.toContain("open:gamma");
+    expect(result.rows.map((r) => [r.module, r.outcome])).toEqual([
+      ["alpha", "staged"],
+      ["beta", "staged"]
+    ]);
+    expect(logs.some((l) => l.startsWith("STOPPED:"))).toBe(true);
+  });
+});
+
+describe("runScope: listApps failures in the make-room step", () => {
+  it("a transient listApps error is recorded as that module's open failure and the run goes on", async () => {
+    const graphDir = tmp();
+    const s = fakeStudio(mods());
+    const real = s.reader.listApps.bind(s.reader);
+    let n = 0;
+    s.reader.listApps = async () => {
+      n++;
+      if (n === 1) throw new OsgraphToolError("SERVICESTUDIO_CALL_FAILED", "listApps timed out");
+      return real();
+    };
+    const result = await runScope({ ...common(graphDir, s, []) });
+    expect(result.rows[0]).toMatchObject({
+      module: "alpha",
+      outcome: "open-failed",
+      error: { code: "SERVICESTUDIO_CALL_FAILED", message: "listApps timed out" }
+    });
+    expect(result.rows.slice(1).map((r) => r.outcome)).toEqual(["staged", "staged", "staged"]);
+    expect(result.failures).toBe(1);
+    expect(result.finalized).toBe(false);
+  });
+
+  it("a session-fatal listApps error fails the site's run and rethrows", async () => {
+    const graphDir = tmp();
+    const s = fakeStudio(mods());
+    s.reader.listApps = async () => {
+      throw tokenExpiredError();
+    };
+    const failRuns: string[] = [];
+    const state = { beginRun: () => undefined, handle: () => undefined, finishRun: () => undefined, failRun: (c: string) => failRuns.push(c) } as unknown as RunState;
+    await expect(runScope({ ...common(graphDir, s, []), state })).rejects.toMatchObject({ code: "TOKEN_EXPIRED" });
+    expect(failRuns).toEqual(["TOKEN_EXPIRED"]);
+    expect(JSON.parse(read(join(runDirFor(graphDir, "demo"), "report.json"))).rows).toMatchObject([
+      { module: "alpha", outcome: "open-failed", error: { code: "TOKEN_EXPIRED" } }
+    ]);
+    expect(s.events.filter((e) => e.startsWith("open:"))).toEqual([]);
+  });
+});
+
 describe("runScope: resumable", () => {
+  it("finalizes from the stage when every scope module is already staged but nothing finalized", async () => {
+    const graphDir = tmp();
+    // Staged under a larger scope that never completed; the scope then shrank to SCOPE.
+    const pre = fakeStudio(mods(syntheticWideModule(1, "extra")), { userOpen: [...SCOPE.modules] });
+    for (const m of SCOPE.modules) {
+      await stageModule({
+        scope: { name: "demo", modules: [...SCOPE.modules, "extra"] },
+        module: m,
+        graphDir,
+        snapshotPath: resolveScopeArtifactPaths(graphDir, "demo").graph,
+        session: pre.createSession(),
+        rules,
+        now: () => T0,
+        retryDelayMs: 0
+      });
+    }
+    const paths = resolveScopeArtifactPaths(graphDir, "demo");
+    expect(existsSync(paths.graph)).toBe(false);
+
+    const s = fakeStudio(mods());
+    const finishes: number[] = [];
+    const state = {
+      beginRun: () => undefined,
+      handle: () => undefined,
+      finishRun: (pm: unknown[]) => finishes.push(pm.length),
+      failRun: () => undefined
+    } as unknown as RunState;
+    const result = await runScope({ ...common(graphDir, s, []), state });
+    expect(result.rows.every((r) => r.outcome === "skipped")).toBe(true);
+    expect(result.finalized).toBe(true);
+    expect(result.rebuild?.nodeCount).toBeGreaterThan(0);
+    expect(existsSync(paths.graph)).toBe(true);
+    expect(readStage(graphDir, "demo").entries).toEqual([]);
+    expect(finishes).toEqual([4]);
+    expect(s.events.filter((e) => e.startsWith("open:"))).toEqual([]);
+  });
+
+
   it("skips modules that already have a stage entry, so a re-run continues an interrupted one", async () => {
     const graphDir = tmp();
     // First run: gamma cannot be opened (not transient), so the run ends unfinalized.
@@ -356,6 +457,12 @@ describe("runScope: circuit breaker", () => {
     const result = await runScope({ ...common(graphDir, s, []), maxConsecutiveFailures: 0 });
     expect(result.stoppedEarly).toBeUndefined();
     expect(result.rows.map((r) => r.outcome)).toEqual(["open-failed", "open-failed", "open-failed", "staged"]);
+
+    // fail, fail, ok (already open by the user), fail: not three in a row.
+    const s3 = fakeStudio(mods(), { userOpen: ["gamma"], openScript: { alpha: stuck(), beta: stuck(), delta: stuck() } });
+    const r3 = await runScope({ ...common(tmp(), s3, []), maxConsecutiveFailures: 3 });
+    expect(r3.stoppedEarly).toBeUndefined();
+    expect(r3.rows.map((r) => r.outcome)).toEqual(["open-failed", "open-failed", "staged", "open-failed"]);
 
     const s2 = fakeStudio(mods(), { openScript: { alpha: stuck(), gamma: stuck() } });
     const r2 = await runScope({ ...common(tmp(), s2, []), maxConsecutiveFailures: 2 });
@@ -599,6 +706,54 @@ describe("honest recovery and the foreground gate", () => {
   });
 });
 
+describe("helper-backed UI: osopener's helper resolves { ok: false } instead of throwing", () => {
+  type Answer = Record<string, unknown>;
+  const helperUi = (answers: Record<string, Answer[]>) => {
+    const calls: string[] = [];
+    const ui = createHelperStudioUi(
+      {
+        run: async (command) => {
+          calls.push(command);
+          return answers[command]?.shift() ?? { ok: true };
+        }
+      },
+      noSleep
+    );
+    return { ui, calls };
+  };
+  const failed = (code: string): Answer => ({ ok: false, error: { code, message: `${code} happened` } });
+  const withDialog: Answer = { ok: true, nodes: [{ name: "Open from Environment" }] };
+
+  it("a failed dump BEFORE the dismiss is an error, not 'absent'", async () => {
+    const { ui, calls } = helperUi({ "uia-dump": [failed("STUDIO_NOT_FOUND")] });
+    const logs: string[] = [];
+    expect(await dismissOpenDialogHonestly(ui, (l) => logs.push(l))).toBe("error");
+    expect(logs.some((l) => l.includes("nothing to dismiss"))).toBe(false);
+    expect(logs[0]).toContain("STUDIO_NOT_FOUND");
+    expect(calls).toEqual(["uia-dump"]);
+  });
+
+  it("a failed dump AFTER the Esc is an error, and nothing is logged as dismissed", async () => {
+    const { ui } = helperUi({ "uia-dump": [withDialog, failed("UIA_ERROR")] });
+    const logs: string[] = [];
+    expect(await dismissOpenDialogHonestly(ui, (l) => logs.push(l))).toBe("error");
+    expect(logs.some((l) => l.includes("dismissed"))).toBe(false);
+  });
+
+  it("a refused click sends no Esc", async () => {
+    const { ui, calls } = helperUi({ "uia-dump": [withDialog], "uia-click": [failed("STUDIO_NOT_FOREGROUND")] });
+    expect(await dismissOpenDialogHonestly(ui, () => undefined)).toBe("error");
+    expect(calls).toEqual(["uia-dump", "uia-click"]);
+    expect(calls).not.toContain("send-keys");
+  });
+
+  it("foreground and focus throw on ok:false; the gate treats that as 'not Studio'", async () => {
+    const { ui } = helperUi({ "foreground-title": [failed("STUDIO_NOT_FOUND")], focus: [failed("STUDIO_NOT_FOUND")] });
+    await expect(ui.focus()).rejects.toThrow(/STUDIO_NOT_FOUND/);
+    await expect(ui.foreground()).rejects.toMatchObject({ code: "STUDIO_NOT_FOUND", command: "foreground-title" });
+  });
+});
+
 /* -------------------------------------------------------------------------------------------- */
 /* One-module refresh                                                                            */
 /* -------------------------------------------------------------------------------------------- */
@@ -694,6 +849,24 @@ describe("refreshModule: --module M", () => {
     expect(readStage(graphDir, "demo").entries.map((e) => e.module)).toEqual(["beta"]);
   });
 
+  it("removes the transient stage entry even when staging throws after writing it (finalize error)", async () => {
+    const graphDir = tmp();
+    await runScope({ ...common(graphDir, fakeStudio(mods()), []) });
+    const paths = resolveScopeArtifactPaths(graphDir, "demo");
+    // Every OTHER module is staged, so staging beta finalizes; graph.json is a directory, so it throws.
+    const pre = fakeStudio(mods(), { userOpen: [...SCOPE.modules] });
+    for (const m of ["alpha", "gamma", "delta"]) {
+      await stageModule({ scope: SCOPE, module: m, graphDir, snapshotPath: paths.graph, session: pre.createSession(), rules, now: () => T0, retryDelayMs: 0 });
+    }
+    rmSync(paths.graph, { force: true });
+    mkdirSync(paths.graph);
+    const s = fakeStudio(mods());
+    await expect(refreshModule({ ...common(graphDir, s, [], T1), module: "beta" })).rejects.toBeDefined();
+    // beta's own entry is gone; the entries of the interrupted full run are kept.
+    expect(readStage(graphDir, "demo").entries.map((e) => e.module)).toEqual(["alpha", "delta", "gamma"]);
+    expect(s.events.filter((e) => e.startsWith("open:") || e.startsWith("close:"))).toEqual(["open:beta", "close:beta"]);
+  });
+
   it("an open that fails surfaces MODULE_OPEN_FAILED with osopener's real error", async () => {
     const graphDir = tmp();
     await runScope({ ...common(graphDir, fakeStudio(mods()), []) });
@@ -767,5 +940,13 @@ describe("osgraph run (CLI)", () => {
     });
     expect(r.code).toBe(64);
     expect(r.stderr).toContain("--max-open must be an integer >= 1");
+  });
+
+  it.each([" ", "0x10", "1e2", "-1"])("rejects --max-consecutive-failures %j instead of reading it as a number", async (value) => {
+    const r = await runCli(["run", "--scope", "demo", "--max-consecutive-failures", value], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_PROGRESS_SITE: "off"
+    });
+    expect(r.code).toBe(64);
   });
 });

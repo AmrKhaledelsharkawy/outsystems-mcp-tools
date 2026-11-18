@@ -205,26 +205,70 @@ export interface OsopenerHelper {
   run(command: string, args?: Record<string, string | number | boolean>, timeoutMs?: number): Promise<Record<string, unknown>>;
 }
 
-/** Builds the UI probes over osopener's helper. Exported so the mapping is testable without Studio. */
+/** Thrown by the helper-backed UI when osopener's helper resolves `{ ok: false, error }` instead of throwing. */
+export class StudioUiError extends Error {
+  readonly code: string;
+  readonly command: string;
+  constructor(command: string, code: string, message: string) {
+    super(`helper ${command} failed: ${code}: ${message}`);
+    this.name = "StudioUiError";
+    this.code = code;
+    this.command = command;
+  }
+}
+
+/**
+ * Runs one helper command and throws when the helper reports failure. osopener's helper RESOLVES
+ * `{ ok: false, error }` for most failures (Studio not found, UIA errors, not foreground, a save
+ * prompt), so a probe that ignored `ok` would read a failed dump as "no dialog" and log a recovery
+ * that never happened.
+ */
+async function runChecked(
+  helper: OsopenerHelper,
+  command: string,
+  args?: Record<string, string | number | boolean>
+): Promise<Record<string, unknown>> {
+  const r = await helper.run(command, args);
+  if (r["ok"] === false) {
+    const error = (r["error"] ?? {}) as { code?: unknown; message?: unknown };
+    throw new StudioUiError(
+      command,
+      typeof error.code === "string" && error.code.length > 0 ? error.code : "HELPER_FAILED",
+      typeof error.message === "string" && error.message.length > 0 ? error.message : "helper reported ok:false"
+    );
+  }
+  return r;
+}
+
+/**
+ * Builds the UI probes over osopener's helper. Exported so the mapping is testable without Studio.
+ * Every probe except `screenshot` throws `StudioUiError` on a helper `ok: false`; callers
+ * (`dismissOpenDialogHonestly`, the foreground gate) already treat a throw as "not observed".
+ */
 export function createHelperStudioUi(helper: OsopenerHelper, sleep: (ms: number) => Promise<void> = defaultSleep): StudioUi {
+  // UNVERIFIED LIVE (#48): osopener treats this dialog as its own foreground window, while this probe
+  // searches a depth-2 dump rooted at Studio's main window. Whether the dialog appears in that tree
+  // on the installed build is checked only by the human-attended live run; if it does not, this
+  // always answers false and recovery reports `absent`.
   const present = async (): Promise<boolean> => {
-    const dump = await helper.run("uia-dump", { Depth: 2 });
+    const dump = await runChecked(helper, "uia-dump", { Depth: 2 });
     return JSON.stringify(dump["nodes"] ?? []).includes(OPEN_DIALOG_TITLE);
   };
   return {
     async foreground() {
-      const r = await helper.run("foreground-title");
+      const r = await runChecked(helper, "foreground-title");
       return { isStudio: r["isStudio"] === true, title: String(r["title"] ?? "") };
     },
     async focus() {
-      await helper.run("focus");
+      await runChecked(helper, "focus");
     },
     openDialogPresent: present,
     async dismissOpenDialog() {
       // The dialog's content is a webview: Esc only lands once the dialog itself has been clicked.
-      await helper.run("uia-click", { Name: `^${OPEN_DIALOG_TITLE}$`, Depth: 3 });
+      // A refused click throws here, so no Esc goes to whatever window does have focus.
+      await runChecked(helper, "uia-click", { Name: `^${OPEN_DIALOG_TITLE}$`, Depth: 3 });
       await sleep(400);
-      await helper.run("send-keys", { Keys: "{ESC}" });
+      await runChecked(helper, "send-keys", { Keys: "{ESC}" });
       await sleep(1200);
     },
     async screenshot(outPath) {

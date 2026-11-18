@@ -93,8 +93,11 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
 /** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
 function intFlag(value: string | undefined, fallback: number): number | null {
   if (value === undefined) return fallback;
+  // Plain decimal digits only: `Number("")`/`Number(" ")` is 0 (which would silently disable the
+  // circuit breaker), and `0x10` / `1e2` are not what anyone means on a command line.
+  if (!/^\d+$/.test(value)) return null;
   const n = Number(value);
-  return Number.isInteger(n) && n >= 0 ? n : null;
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 /**
@@ -186,7 +189,9 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     }
     if (result.stoppedEarly !== undefined) lines.push(`  STOPPED: ${result.stoppedEarly}`);
     lines.push(`  log ${result.logPath}`);
-    if (result.stoppedEarly !== undefined || (result.failures > 0 && !result.finalized)) exitCode = 1;
+    if (result.incomplete !== undefined) lines.push(`  INCOMPLETE: ${result.incomplete}`);
+    // Anything short of a written graph.json is not success, whatever the reason.
+    if (!result.finalized) exitCode = 1;
   }
 
   if (options.json === "true") {
@@ -224,7 +229,17 @@ if (options.help === "true" || command === "help") {
     } else if (command === "run") {
       runRun(config, options).catch((err: unknown) => {
         const code = (err as { code?: unknown } | null)?.code;
-        fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        const text = `${typeof code === "string" ? `${code}: ` : ""}${message}`;
+        if (options.json === "true") {
+          // A --json consumer reads stdout only: give it the error there too, then fail as usual.
+          const details = (err as { details?: unknown } | null)?.details;
+          const payload = { error: { code: typeof code === "string" ? code : "INTERNAL_ERROR", message, ...(details !== undefined ? { details } : {}) } };
+          process.stdout.write(`${JSON.stringify(payload, null, 2)}
+`, () => fail(EXIT_FATAL, text));
+          return;
+        }
+        fail(EXIT_FATAL, text);
       });
     } else if (command === "serve") {
       noteMissingEndpoint(config);

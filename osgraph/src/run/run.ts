@@ -31,7 +31,7 @@ import type { RunState } from "../progress/state.js";
 import { reextractScope, type ReextractResult } from "../reextract.js";
 import { listRawModules, rawManifestPath, type RawManifest } from "../rebuild/raw.js";
 import type { ServiceStudioSession } from "../rebuild/reader.js";
-import { stageModule, type RebuildProgressEvent, type RebuildResult, type StageOutcome } from "../rebuild/rebuild.js";
+import { finalizeStage, stageModule, type RebuildProgressEvent, type RebuildResult, type StageOutcome } from "../rebuild/rebuild.js";
 import { readStage, stagePath } from "../rebuild/stage.js";
 import type { ScopeDefinition } from "../scopes/store.js";
 import { OsgraphToolError, type ServiceStudioApp } from "../servicestudio/types.js";
@@ -112,8 +112,10 @@ export interface RunScopeResult {
   finalized: boolean;
   /** Present when the run finalized: the same result an all-at-once rebuild returns. */
   rebuild?: RebuildResult;
-  /** Present when the circuit breaker stopped the run. */
+  /** Present when the run stopped early: the circuit breaker, or --max-open reached because closes failed. */
   stoppedEarly?: string;
+  /** Present when nothing failed yet the stage is still incomplete (e.g. an unreadable stage entry). */
+  incomplete?: string;
   failures: number;
   runDir: string;
   logPath: string;
@@ -260,6 +262,20 @@ function setup(options: RunCommonOptions): {
   };
 }
 
+/** Removes every stage entry for `module` (case-insensitively). True when one was removed. */
+function removeStageEntry(graphDir: string, scope: string, module: string): boolean {
+  let removed = false;
+  for (const e of readStage(graphDir, scope).entries) {
+    if (lower(e.module) !== lower(module)) continue;
+    const path = stagePath(graphDir, scope, e.module);
+    if (existsSync(path)) {
+      rmSync(path, { force: true });
+      removed = true;
+    }
+  }
+  return removed;
+}
+
 function stagedNames(graphDir: string, scope: string): Set<string> {
   return new Set(readStage(graphDir, scope).entries.map((e) => lower(e.module)));
 }
@@ -317,51 +333,89 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
         continue;
       }
 
-      // 1. Make room, then open it unless it is open already.
-      let apps = await s.listApps();
-      const isOpen = (name: string): boolean => apps.some((a) => a.isOpen === true && lower(a.name) === lower(name));
+      // 1. Make room, then open it unless it is open already. A failure anywhere in this step
+      // (listApps included) is a per-module open failure, unless it means the session is gone.
       let openedHere = false;
       let attempts: number | undefined;
-      if (!isOpen(mod)) {
-        // Only tabs THIS process opened, whose extraction is already on disk, and never the target.
-        const closable = opener
-          .ownedModules()
-          .filter((o) => lower(o) !== lower(mod) && staged.has(lower(o)) && isOpen(o));
-        while (apps.filter((a) => a.isOpen === true).length >= maxOpen && closable.length > 0) {
-          const victim = closable.shift() as string;
-          const closed = await s.closeAfterDrain(victim);
-          if (!closed.ok) break;
-          await s.sleep(s.gapMs);
-          apps = await s.listApps();
-        }
-        const opened = await s.openWithRetry(mod);
-        if (!opened.ok) {
-          log(`${tag} open FAILED ${describeOsopenerFailure(opened.failure)}`);
-          record({
-            module: mod,
-            outcome: "open-failed",
-            error: failureRow(opened.failure),
-            attempts: opened.attempts,
-            ...(opened.screenshotPath !== undefined ? { screenshotPath: opened.screenshotPath } : {})
-          });
-          consecutiveOpenFailures++;
-          if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures) {
-            stoppedEarly =
-              `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${opened.failure.code}). ` +
-              `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
-              `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
-              `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
-            log(`STOPPED: ${stoppedEarly}`);
-            break;
+      let stopForRoom = false;
+      let openFailure: { error: NonNullable<RunModuleRow["error"]>; attempts?: number; screenshotPath?: string } | undefined;
+      try {
+        let apps = await s.listApps();
+        const isOpen = (name: string): boolean => apps.some((a) => a.isOpen === true && lower(a.name) === lower(name));
+        if (!isOpen(mod)) {
+          // Only tabs THIS process opened, whose extraction is already on disk, and never the target.
+          const closable = opener
+            .ownedModules()
+            .filter((o) => lower(o) !== lower(mod) && staged.has(lower(o)) && isOpen(o));
+          while (apps.filter((a) => a.isOpen === true).length >= maxOpen && closable.length > 0) {
+            const victim = closable.shift() as string;
+            const closed = await s.closeAfterDrain(victim);
+            // A refused close leaves that tab open; try the next one rather than giving up on room.
+            if (!closed.ok) continue;
+            await s.sleep(s.gapMs);
+            apps = await s.listApps();
           }
-          continue;
+          // --max-open bounds the tabs this process holds. If closes keep failing, stop rather than
+          // open one more: that is exactly the >30-tab degradation this command exists to avoid.
+          const ownedOpen = opener.ownedModules().filter((o) => isOpen(o));
+          if (ownedOpen.length >= maxOpen) {
+            stoppedEarly =
+              `${ownedOpen.length} tab(s) this run opened could not be closed (${ownedOpen.join(", ")}) and ` +
+              `--max-open is ${maxOpen}: opening ${mod} would exceed it. osopener's close is failing (a save ` +
+              `prompt, or a tab-close step that no longer matches this Studio build). Close those tabs by ` +
+              `hand, then run the same command again: staged modules are skipped, so it resumes.`;
+            log(`STOPPED: ${stoppedEarly}`);
+            stopForRoom = true;
+          } else {
+            const opened = await s.openWithRetry(mod);
+            if (!opened.ok) {
+              log(`${tag} open FAILED ${describeOsopenerFailure(opened.failure)}`);
+              openFailure = {
+                error: failureRow(opened.failure),
+                attempts: opened.attempts,
+                ...(opened.screenshotPath !== undefined ? { screenshotPath: opened.screenshotPath } : {})
+              };
+            } else {
+              openedHere = opened.openedHere;
+              attempts = opened.attempts;
+              log(`   open ${mod} ok${opened.attempts > 1 ? ` after ${opened.attempts} attempts` : ""}`);
+              await s.sleep(s.gapMs);
+            }
+          }
         }
-        consecutiveOpenFailures = 0;
-        openedHere = opened.openedHere;
-        attempts = opened.attempts;
-        log(`   open ${mod} ok${opened.attempts > 1 ? ` after ${opened.attempts} attempts` : ""}`);
-        await s.sleep(s.gapMs);
+      } catch (err) {
+        const e = errorOf(err);
+        log(`${tag} open FAILED ${e.code}: ${e.message}`);
+        if (SESSION_FATAL.has(e.code)) {
+          record({ module: mod, outcome: "open-failed", error: e });
+          options.state?.failRun(e.code, e.message);
+          throw err;
+        }
+        openFailure = { error: e };
       }
+      if (stopForRoom) break;
+      if (openFailure !== undefined) {
+        record({
+          module: mod,
+          outcome: "open-failed",
+          error: openFailure.error,
+          ...(openFailure.attempts !== undefined ? { attempts: openFailure.attempts } : {}),
+          ...(openFailure.screenshotPath !== undefined ? { screenshotPath: openFailure.screenshotPath } : {})
+        });
+        consecutiveOpenFailures++;
+        if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures) {
+          stoppedEarly =
+            `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${openFailure.error.code}). ` +
+            `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+            `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+            `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+          log(`STOPPED: ${stoppedEarly}`);
+          break;
+        }
+        continue;
+      }
+      // The module is open (it already was, or this run opened it): earlier failures were not "in a row".
+      consecutiveOpenFailures = 0;
 
       // 2. Stage it. `stageModule` drains the reader on every path out.
       let row: RunModuleRow;
@@ -428,6 +482,43 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   }
 
   const failures = rows.filter((r) => r.outcome === "open-failed" || r.outcome === "stage-failed").length;
+
+  // Resume wedge: every scope module has a stage entry but nothing finalized (a finalize that threw
+  // after its entry was written, a kill between the two, or a scope that shrank after staging).
+  // Finalize from the stage now, offline, exactly as `stageModule` would have.
+  let incomplete: string | undefined;
+  if (finalized === undefined && stoppedEarly === undefined && failures === 0) {
+    let fin: ReturnType<typeof finalizeStage>;
+    try {
+      fin = finalizeStage({
+        scope,
+        graphDir,
+        snapshotPath,
+        rules: options.rules,
+        now: s.now,
+        ...(options.fetchConcurrency !== undefined ? { fetchConcurrency: options.fetchConcurrency } : {})
+      });
+    } catch (err) {
+      const e = errorOf(err);
+      log(`finalize FAILED ${e.code}: ${e.message}`);
+      options.state?.failRun(e.code, e.message);
+      throw err;
+    }
+    if (fin.outcome !== undefined) {
+      finalized = fin.outcome.result;
+      log("every scope module is staged: finalized from the stage");
+      s.onProgress({ type: "done", durationMs: finalized.durationMs, snapshotPath });
+      options.state?.finishRun(finalized.perModule);
+      writeTimings(graphDir, scope.name, finalized.perModule);
+    } else {
+      incomplete =
+        `stage incomplete although no module failed: missing ${fin.missingModules.join(", ")}` +
+        (fin.unreadableStageFiles.length > 0 ? `; unreadable stage files: ${fin.unreadableStageFiles.join(", ")}` : "");
+      log(incomplete);
+      options.state?.failRun("RUN_INCOMPLETE", incomplete);
+    }
+  }
+
   if (stoppedEarly !== undefined) {
     options.state?.failRun("RUN_STOPPED", stoppedEarly);
   } else if (finalized === undefined && failures > 0) {
@@ -455,6 +546,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     finalized: finalized !== undefined,
     ...(finalized !== undefined ? { rebuild: finalized } : {}),
     ...(stoppedEarly !== undefined ? { stoppedEarly } : {}),
+    ...(incomplete !== undefined ? { incomplete } : {}),
     failures,
     runDir: s.runDir,
     logPath: s.logPath,
@@ -536,7 +628,8 @@ export async function refreshModule(options: RefreshModuleOptions): Promise<Refr
 
   let openedHere = false;
   let closed = false;
-  let staged: StageOutcome;
+  let stagedResult: StageOutcome | undefined;
+  let stageEntryRemoved = false;
   await s.session.acquire();
   try {
     const apps = await s.listApps();
@@ -558,7 +651,7 @@ export async function refreshModule(options: RefreshModuleOptions): Promise<Refr
     }
 
     try {
-      staged = await stageModule({
+      stagedResult = await stageModule({
         scope,
         module: inScope,
         graphDir,
@@ -583,18 +676,15 @@ export async function refreshModule(options: RefreshModuleOptions): Promise<Refr
   } finally {
     await s.session.reader.drain?.();
     s.session.release();
-  }
-
-  // The stage entry is transient: the refresh's product is raw/<module>/, not a stage.
-  let stageEntryRemoved = false;
-  if (!stagedBefore && !staged.finalized) {
-    const path = stagePath(graphDir, scope.name, staged.staged.module);
-    if (existsSync(path)) {
-      rmSync(path, { force: true });
-      stageEntryRemoved = true;
-      log(`   removed the transient stage entry for ${staged.staged.module}`);
+    // The stage entry is transient: the refresh's product is raw/<module>/, not a stage. Removed on
+    // every path out (also when staging threw after writing it, e.g. a finalize error) so a later
+    // full run never mistakes it for progress of its own. A stage this call finalized is cleared.
+    if (!stagedBefore && stagedResult?.finalized !== true) {
+      stageEntryRemoved = removeStageEntry(graphDir, scope.name, inScope);
+      if (stageEntryRemoved) log(`   removed the transient stage entry for ${inScope}`);
     }
   }
+  const staged = stagedResult as StageOutcome;
   log(
     `   ${staged.staged.module} captured: nodes=${staged.staged.nodeCount} edges=${staged.staged.edgeCount} ` +
       `skipped=${staged.staged.skippedCount}`
