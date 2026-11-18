@@ -115,3 +115,27 @@ Tests  1 failed | 562 passed | 2 skipped (565)
 ```
 
 That is the documented baseline. **Any other failure is caused by your change.**
+
+### Diagnosis (#41)
+
+The failure is a **stale assertion against a listing wave that grew**, not a concurrency or ordering
+bug in the pool. Observed call order for `syntheticWideModule(10)` at width 4:
+
+```
+listApps | getScreenNames | getWebBlockNames | getActionNames(client) | getActionNames(server)
+         | getActionNames(service) | getDataModel | getStructures | getClientAction(A_Act00) …
+```
+
+`ModuleWalker.walk()` (`src/rebuild/rebuild.ts`) now lists **five** kinds in wave 1, not four: a
+`getActionNames(service)` call was added so a Service module's `SL_*` actions are no longer invisible.
+The pool is width 4, so the fifth listing is dispatched only once one of the first four answers — at
+call index 5. `order.slice(5, 7)` is therefore `['getActionNames', 'getDataModel']`, exactly what
+the test reports. Everything else A6.2b checks still holds: the first four listings are one wave,
+the module texts follow the listings, and no element fetch starts before the last listing answered.
+The comment above `listingWave` ("the four name listings … exactly fill the server's admission
+window") predates the fifth listing in the same way.
+
+What is **not** decided here — and why the assertion is still untouched — is which contract is
+right: assert a five-call listing phase (4 + 1 at width 4), or stop issuing the service listing for
+modules that cannot have service actions so the wave is four again. That is a behaviour decision
+about `rebuild.ts`, outside a test-publishing change.
