@@ -3,6 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { flowsPath } from "../src/flows/io.js";
+import { scopeFiles } from "../src/progress/state.js";
+import { completenessFor, createToolContext } from "../src/tools/tool.js";
+import type { OsgraphConfig } from "../src/config.js";
 import type { ExtractedModule } from "../src/extract/index.js";
 import {
   atomicTempPath,
@@ -12,6 +16,9 @@ import {
   readGraphCompleteness,
   readMeta,
   readSnapshot,
+  resolveScopeArtifactPaths,
+  resolveScopeSnapshotPath,
+  metaPath,
   stripVolatile,
   writeSnapshot,
   type Snapshot
@@ -485,5 +492,47 @@ describe("buildSnapshot — consumer-side clash renames (Name2) (ADR-0008 Amendm
   it("a numbered name whose base does not exist stays a counted placeholder", () => {
     expect(byId("osgraph://MOD_B_CW/Structure/ST_Main2")).toMatchObject({ placeholder: true });
     expect(snapshot.graph.osgraph.placeholderCount).toBe(2);
+  });
+});
+
+describe("resolveScopeArtifactPaths: the one scope-artifact path seam (issue #4)", () => {
+  const graphDir = join(tmpdir(), "osgraph-resolver-demo");
+
+  it("returns the ADR-0005 layout <graphDir>/<scope>/{graph,meta,flows}.json", () => {
+    const paths = resolveScopeArtifactPaths(graphDir, "MOD_Demo_X");
+    expect(paths).toEqual({
+      dir: join(graphDir, "MOD_Demo_X"),
+      graph: join(graphDir, "MOD_Demo_X", "graph.json"),
+      meta: join(graphDir, "MOD_Demo_X", "meta.json"),
+      flows: join(graphDir, "MOD_Demo_X", "flows.json")
+    });
+    expect(resolveScopeSnapshotPath(graphDir, "MOD_Demo_X")).toBe(paths.graph);
+  });
+
+  it("agrees with the sibling helpers every reader and writer already uses", () => {
+    const paths = resolveScopeArtifactPaths(graphDir, "demo.scope-1");
+    expect(metaPath(paths.graph)).toBe(paths.meta);
+    expect(flowsPath(paths.graph)).toBe(paths.flows);
+    expect(scopeFiles(graphDir, "demo.scope-1")).toEqual({ graph: paths.graph, meta: paths.meta, flows: paths.flows });
+  });
+
+  it.each(["", ".", "..", "../x", "a/b", "a\\b", "/abs", "C:", "a b", "x/../../y"])(
+    "rejects %j with SCOPE_INVALID: a scope is a trusted single path segment",
+    (bad) => {
+      expect(() => resolveScopeArtifactPaths(graphDir, bad)).toThrow(expect.objectContaining({ code: "SCOPE_INVALID" }));
+      expect(() => resolveScopeSnapshotPath(graphDir, bad)).toThrow(expect.objectContaining({ code: "SCOPE_INVALID" }));
+    }
+  );
+
+  it("is the tool context's default snapshot path, and the test override still wins", () => {
+    const config = { graphDir, scopesDir: join(graphDir, "scopes") } as unknown as OsgraphConfig;
+    expect(createToolContext(config).snapshotPath("MOD_Demo_X")).toBe(join(graphDir, "MOD_Demo_X", "graph.json"));
+    const overridden = createToolContext(config, { snapshotPath: (scope) => `/elsewhere/${scope}.json` });
+    expect(overridden.snapshotPath("MOD_Demo_X")).toBe("/elsewhere/MOD_Demo_X.json");
+  });
+
+  it("an invalid scope name still reports a never-rebuilt graphCompleteness, as before the seam", () => {
+    const config = { graphDir, scopesDir: join(graphDir, "scopes") } as unknown as OsgraphConfig;
+    expect(completenessFor(createToolContext(config), "a/b")).toEqual({ skippedCount: 0, lastRebuildAt: null });
   });
 });

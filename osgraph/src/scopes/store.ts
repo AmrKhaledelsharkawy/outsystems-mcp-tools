@@ -7,8 +7,9 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalJson, writeFileAtomic } from "../graph/io.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
+import { SCOPE_NAME_RE, assertScopeName } from "./name.js";
 
-export const SCOPE_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+export { SCOPE_NAME_RE, assertScopeName };
 
 export interface ScopeDefinition {
   name: string;
@@ -22,19 +23,6 @@ export interface ScopeEntry extends ScopeDefinition {
 
 function scopeInvalid(message: string, details?: unknown): OsgraphToolError {
   return new OsgraphToolError("SCOPE_INVALID", message, details);
-}
-
-/** Validates `name`; throws `SCOPE_INVALID` for anything that is not a safe single path segment. */
-export function assertScopeName(name: unknown): asserts name is string {
-  if (typeof name !== "string" || name.length === 0) {
-    throw scopeInvalid("scope name must be a non-empty string");
-  }
-  if (!SCOPE_NAME_RE.test(name) || name === "." || name === "..") {
-    throw scopeInvalid(
-      `scope name '${name}' is invalid: use only letters, digits, '_', '.', '-' (not '.' or '..')`,
-      { name }
-    );
-  }
 }
 
 /** Validates + dedupes the module list (user order kept). Throws `SCOPE_INVALID`. */
