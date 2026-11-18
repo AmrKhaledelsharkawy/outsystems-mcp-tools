@@ -11,7 +11,7 @@
  * client can redact.
  */
 import { readFile as fsReadFile } from "node:fs/promises";
-import type { OsgraphConfig } from "../config.js";
+import { requireServiceStudioUrl, type OsgraphConfig } from "../config.js";
 import { ServiceStudioClient, TOKEN_EXPIRED_MESSAGE } from "./client.js";
 import { unwrapJson } from "./unwrap.js";
 import { OsgraphToolError, type ServiceStudioClientOptions, type TokenProvider } from "./types.js";
@@ -202,7 +202,9 @@ export function createServiceStudioClient(
   options: TokenProviderOptions & Omit<ServiceStudioClientOptions, "url" | "tokenProvider"> = {}
 ): { client: ServiceStudioClient; tokenProvider: TokenProvider } {
   const client = new ServiceStudioClient({
-    url: config.serviceStudioUrl,
+    // #7: the endpoint is validated here, at the moment a live client is built, not at process
+    // start — throws OsgraphConfigError CONFIG_MISSING / CONFIG_INVALID.
+    url: requireServiceStudioUrl(config),
     fetchImpl: options.fetchImpl,
     timeoutMs: options.timeoutMs,
     transientRetryDelayMs: options.transientRetryDelayMs,

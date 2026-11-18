@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ScopeStore } from "../src/scopes/store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cliPath = join(here, "..", "dist", "cli.js");
@@ -41,9 +42,9 @@ interface ExitResult {
   stderr: string;
 }
 
-function runCli(env: Record<string, string>): Promise<ExitResult> {
+function runCli(env: Record<string, string>, args: string[] = []): Promise<ExitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [cliPath, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += String(d)));
@@ -58,13 +59,130 @@ describe("osgraph CLI smoke", () => {
     expect(existsSync(cliPath)).toBe(true);
   });
 
-  it("exits 2, names OSGRAPH_SERVICESTUDIO_URL on stderr, writes nothing to stdout when URL unset", async () => {
-    const result = await runCli(cleanEnv());
-    expect(result.code).toBe(2);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("OSGRAPH_SERVICESTUDIO_URL");
-    expect(result.stderr).toContain("CONFIG_MISSING");
-  });
+  // #7 (command-scoped configuration). This test used to assert that the server exited 2 at start
+  // when OSGRAPH_SERVICESTUDIO_URL was unset. That unconditional check is gone on purpose: the
+  // offline tools must start with no Service Studio anywhere. What survives is the same CONFIG_MISSING
+  // message — on stderr at start, and as the live tool's answer when `rebuild` is dispatched.
+  it("with OSGRAPH_SERVICESTUDIO_URL unset: the server starts, offline tools answer, rebuild refuses with CONFIG_MISSING", async () => {
+    const root = mkdtempSync(join(tmpdir(), "osgraph-smoke-nourl-"));
+    const scopesDir = join(root, "scopes");
+    const graphDir = join(root, "graphs");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [cliPath],
+      env: cleanEnv({ OSGRAPH_GRAPH_DIR: graphDir, OSGRAPH_SCOPES_DIR: scopesDir, OSGRAPH_PROGRESS_SITE: "off" }),
+      stderr: "pipe"
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (d) => (stderr += String(d)));
+    const client = new Client({ name: "osgraph-smoke", version: "0.0.0" });
+    const callJson = async (name: string, args: Record<string, unknown>) => {
+      const res = await client.callTool({ name, arguments: args });
+      const content = res.content as Array<{ type: string; text: string }>;
+      return {
+        isError: res.isError === true,
+        body: JSON.parse(content[0]!.text) as { result?: unknown; error?: { code: string; message: string } }
+      };
+    };
+    try {
+      await client.connect(transport);
+      expect((await client.listTools()).tools).toHaveLength(8);
+
+      const def = await callJson("defineScope", { name: "demo", modules: ["MOD_Demo_X_BL"] });
+      expect(def.isError).toBe(false);
+      const list = await callJson("listScopes", {});
+      expect(list.isError).toBe(false);
+      expect(list.body.result).toMatchObject({ count: 1 });
+      const missing = await callJson("listViolations", { scope: "demo" });
+      expect(missing.body.error?.code).toBe("SNAPSHOT_MISSING");
+
+      const rb = await callJson("rebuild", { scope: "demo" });
+      expect(rb.isError).toBe(true);
+      expect(rb.body.error?.code).toBe("CONFIG_MISSING");
+      expect(rb.body.error?.message).toContain("OSGRAPH_SERVICESTUDIO_URL");
+
+      // Refused on dispatch: no session was ever built, so no token was ever asked for.
+      expect(stderr).not.toContain("rebuild: acquiring session token");
+      // ...and the user was told at start, on stderr (stdout is the MCP transport).
+      expect(stderr).toContain("CONFIG_MISSING");
+      expect(stderr).toContain("OSGRAPH_SERVICESTUDIO_URL");
+    } finally {
+      await client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("with OSGRAPH_SERVICESTUDIO_URL not an http(s) URL: the server starts and rebuild refuses with CONFIG_INVALID", async () => {
+    const root = mkdtempSync(join(tmpdir(), "osgraph-smoke-badurl-"));
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [cliPath],
+      env: cleanEnv({
+        OSGRAPH_SERVICESTUDIO_URL: "not-a-url",
+        OSGRAPH_GRAPH_DIR: join(root, "graphs"),
+        OSGRAPH_SCOPES_DIR: join(root, "scopes"),
+        OSGRAPH_PROGRESS_SITE: "off"
+      }),
+      stderr: "pipe"
+    });
+    const client = new Client({ name: "osgraph-smoke", version: "0.0.0" });
+    try {
+      await client.connect(transport);
+      await client.callTool({ name: "defineScope", arguments: { name: "demo", modules: ["MOD_Demo_X_BL"] } });
+      const res = await client.callTool({ name: "rebuild", arguments: { scope: "demo" } });
+      expect(res.isError).toBe(true);
+      const body = JSON.parse((res.content as Array<{ text: string }>)[0]!.text) as { error?: { code: string; message: string } };
+      expect(body.error?.code).toBe("CONFIG_INVALID");
+      expect(body.error?.message).toContain("not-a-url");
+    } finally {
+      await client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("offline `reextract` runs to completion with OSGRAPH_SERVICESTUDIO_URL unset", async () => {
+    const root = mkdtempSync(join(tmpdir(), "osgraph-smoke-reextract-"));
+    const scopesDir = join(root, "scopes");
+    const graphDir = join(root, "graphs");
+    try {
+      new ScopeStore(scopesDir).define({ name: "demo", modules: ["MOD_Demo_X_BL"] });
+      // A minimal complete raw capture: one data-model text plus the manifest written last.
+      const moduleDir = join(graphDir, "demo", "raw", "MOD_Demo_X_BL");
+      mkdirSync(moduleDir, { recursive: true });
+      const entities = readFileSync(join(here, "fixtures", "synthetic", "entities.txt"), "utf8");
+      writeFileSync(join(moduleDir, "entities.txt"), entities);
+      writeFileSync(
+        join(moduleDir, "manifest.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          scope: "demo",
+          module: "MOD_Demo_X_BL",
+          moduleType: "Traditional",
+          capturedAt: "2026-11-01T00:00:00.000Z",
+          referencedOnlyCount: 0,
+          skipped: [],
+          texts: [{ kind: "Entity", call: "getDataModel", file: "entities.txt", bytes: Buffer.byteLength(entities, "utf8") }]
+        })
+      );
+
+      const result = await runCli(cleanEnv({ OSGRAPH_SCOPES_DIR: scopesDir, OSGRAPH_GRAPH_DIR: graphDir }), [
+        "reextract",
+        "--scope",
+        "demo",
+        "--json",
+        "--quiet"
+      ]);
+      expect(result.stderr).not.toContain("CONFIG_MISSING");
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout) as { scope: string; missingCaptures: unknown[]; nodeCount: number };
+      expect(payload.scope).toBe("demo");
+      expect(payload.missingCaptures).toEqual([]);
+      expect(payload.nodeCount).toBeGreaterThan(0);
+      expect(existsSync(join(graphDir, "demo", "graph.json"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("serves all eight tools over stdio; listScopes on an empty workspace answers with graphCompleteness", async () => {
     const root = mkdtempSync(join(tmpdir(), "osgraph-smoke-"));

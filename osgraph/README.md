@@ -304,7 +304,7 @@ caller-triggered on purpose: nothing watches your modules behind your back.
 ### Offline re-extract
 
 If you change the parser and want to regenerate `graph.json` + `flows.json` from raw
-texts already captured — **no Service Studio, no session token**:
+texts already captured — **no Service Studio, no session token, no `OSGRAPH_SERVICESTUDIO_URL`**:
 
 ```bash
 node dist/cli.js reextract --scope <name>
@@ -318,7 +318,7 @@ node dist/cli.js --help
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port |
+| `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
 | `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file |
 | `OSGRAPH_GRAPH_DIR` | no | `<cwd>/.osgraph` | Where snapshots are written |
 | `OSGRAPH_SCOPES_DIR` | no | `<package>/scopes` | Where scope files live |
