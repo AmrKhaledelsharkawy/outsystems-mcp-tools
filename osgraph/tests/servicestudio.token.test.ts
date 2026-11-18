@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { OsgraphConfigError } from "../src/config.js";
 import { ServiceStudioClient } from "../src/servicestudio/client.js";
 import {
   createServiceStudioClient,
@@ -83,6 +84,27 @@ describe("createTokenProvider mode selection", () => {
     );
     expect(client.url).toBe(URL);
     expect(tokenProvider.mode).toBe("interactive");
+  });
+
+  // #7: the endpoint is validated when a live client is built, not at process start — and nothing
+  // goes on the wire when it is missing or malformed.
+  it("createServiceStudioClient refuses with CONFIG_MISSING / CONFIG_INVALID and sends nothing", () => {
+    const fake = new FakeServiceStudio(() => ({ text: "" }));
+    for (const [serviceStudioUrl, code] of [
+      [undefined, "CONFIG_MISSING"],
+      ["   ", "CONFIG_MISSING"],
+      ["foo", "CONFIG_INVALID"]
+    ] as const) {
+      let caught: unknown;
+      try {
+        createServiceStudioClient({ serviceStudioUrl, tokenFile: undefined }, { fetchImpl: fake.fetch });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(OsgraphConfigError);
+      expect((caught as OsgraphConfigError).code).toBe(code);
+    }
+    expect(fake.calls).toHaveLength(0);
   });
 });
 

@@ -1,7 +1,7 @@
 import { z, type ZodRawShape, type ZodType } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { join } from "node:path";
-import type { OsgraphConfig } from "../config.js";
+import { OsgraphConfigError, requireServiceStudioUrl, type OsgraphConfig } from "../config.js";
 import { readGraphCompleteness, readSnapshot, type Snapshot } from "../graph/index.js";
 import { loadLayerRules, type LayerRules } from "../layers/rules.js";
 import { ScopeStore } from "../scopes/store.js";
@@ -279,11 +279,25 @@ export async function runTool<T>(
       if (err.details !== undefined) error.details = err.details;
       return errorResponse(error, completeness);
     }
+    if (err instanceof OsgraphConfigError) {
+      // #7: a live tool dispatched without a usable servicestudio endpoint answers with the
+      // configuration error itself (CONFIG_MISSING / CONFIG_INVALID), never a downstream one.
+      return errorResponse({ code: err.code, message: err.message }, completeness);
+    }
     return errorResponse(
       { code: "INTERNAL_ERROR", message: ctx.redactSecrets(err instanceof Error ? err.message : String(err)) },
       completeness
     );
   }
+}
+
+/**
+ * #7: the gate every tool that talks to Service Studio passes before it does anything else —
+ * before the rebuild gate, the progress site or a session exist. Throws `OsgraphConfigError`
+ * (which `runTool` answers as `CONFIG_MISSING` / `CONFIG_INVALID`). Offline tools never call it.
+ */
+export function requireLiveEndpoint(ctx: ToolContext): string {
+  return requireServiceStudioUrl(ctx.config);
 }
 
 /** Reads a scope's snapshot; `SCOPE_NOT_FOUND` when neither snapshot nor scope file exists, else `SNAPSHOT_MISSING`. */
