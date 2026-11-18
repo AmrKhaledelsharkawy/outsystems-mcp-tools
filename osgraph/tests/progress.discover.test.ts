@@ -16,13 +16,24 @@ import {
   type DiscoverLive,
   type DiscoverStatus,
   DEFAULT_MAX_MODULES,
+  DISCOVERY_ERROR_MAX,
   MAX_DEPTH,
   discoveryLayerOf,
+  discoveryOpener,
   parseReferences,
   parseRequest,
   runDiscovery
 } from "../src/progress/discover.js";
-import { ChildProcessDiscovery } from "../src/progress/discovery.js";
+import { ChildProcessDiscovery, discoveryAvailable, discoveryUnavailableReason } from "../src/progress/discovery.js";
+import {
+  classifyOpenFailure,
+  createOsopenerAdapter,
+  describeOsopenerFailure,
+  loadOsopenerAdapter,
+  OSOPENER_ENTRY_FILES,
+  OsopenerOperationError,
+  type OsopenerTools
+} from "../src/osopener/adapter.js";
 
 describe("parseRequest", () => {
   it("clamps depth and the module cap into sane bounds", () => {
@@ -418,5 +429,405 @@ describe("ChildProcessDiscovery", () => {
     writeFileSync(join(root, "scopes", "x (1).json"), JSON.stringify({ modules: ["MOD_FromDup_BL"] }));
 
     expect(runner.knownModules()).toEqual(["MOD_FromCopy_BL", "MOD_FromDup_BL", "MOD_FromScope_BL"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* The shared osopener adapter (issue #6). Lives in this published file because discovery is its */
+/* first caller; every input below is synthetic and nothing touches Service Studio or osopener.  */
+/* -------------------------------------------------------------------------------------------- */
+
+/** osopener's real wording for the failure that cost a 287-module run 5.5 h. */
+const STUDIO_BUSY_MESSAGE =
+  "'Open from Environment' did not produce a settled Studio dialog window (only a transient Progress window was seen)";
+
+function scriptedTools(script: { open?: unknown[]; close?: unknown[] }): OsopenerTools & {
+  calls: { open: Record<string, unknown>[]; close: Record<string, unknown>[] };
+} {
+  const calls = { open: [] as Record<string, unknown>[], close: [] as Record<string, unknown>[] };
+  const next = async (queue: unknown[] | undefined): Promise<unknown> => {
+    const item = queue?.shift();
+    if (item instanceof Error) throw item;
+    return item;
+  };
+  return {
+    calls,
+    open: async (input) => {
+      calls.open.push(input);
+      return next(script.open);
+    },
+    close: async (input) => {
+      calls.close.push(input);
+      return next(script.close);
+    }
+  };
+}
+
+const OPENED = { opened: true, alreadyOpen: false, studioLaunched: false, durationMs: 15_000, steps: [] };
+const ALREADY_OPEN = { opened: true, alreadyOpen: true, studioLaunched: false, durationMs: 20, steps: [] };
+const CLOSED = { closed: true, alreadyClosed: false, durationMs: 4_500, steps: [] };
+const UNSAVED_REFUSAL = {
+  closed: false,
+  alreadyClosed: false,
+  durationMs: 900,
+  steps: [
+    { step: "listApps", ok: true, ms: 10 },
+    { step: "tab-close", ok: false, ms: 800, detail: "save prompt cancelled with Esc" }
+  ],
+  error: {
+    code: "UNSAVED_CHANGES_DIALOG",
+    message: "module has unsaved changes; the close was cancelled and the module stays open"
+  }
+};
+
+describe("classifyOpenFailure", () => {
+  it("reads the transient-Progress-window failure as studio-busy, not as a stuck dialog", () => {
+    expect(classifyOpenFailure(STUDIO_BUSY_MESSAGE)).toBe("studio-busy");
+  });
+
+  it("sorts foreground, open-dialog and everything else", () => {
+    expect(classifyOpenFailure("foreground window belongs to pid 4242")).toBe("foreground");
+    expect(classifyOpenFailure("'Open from Environment' list never showed the module")).toBe("open-dialog");
+    expect(classifyOpenFailure("module 'MOD_Demo_X_BL' not found in the environment")).toBe("other");
+    expect(classifyOpenFailure(undefined)).toBe("other");
+  });
+});
+
+describe("classifyOpenFailure: osopener's real refusals", () => {
+  // osopener's two refusals (osopener/scripts/studio-ui.ps1) both end "refusing to send input".
+  const UNSAVED = "Foreground window title matches /save|unsaved/i; refusing to send input.";
+  const NOT_FOREGROUND = "Foreground window belongs to pid 4242, not Service Studio; refusing to send input.";
+
+  it("never reads a save prompt as a transient foreground problem", () => {
+    expect(classifyOpenFailure(UNSAVED, "UNSAVED_CHANGES_DIALOG")).toBe("other");
+    expect(classifyOpenFailure(UNSAVED)).toBe("other");
+  });
+
+  it("reads STUDIO_NOT_FOREGROUND as foreground", () => {
+    expect(classifyOpenFailure(NOT_FOREGROUND, "STUDIO_NOT_FOREGROUND")).toBe("foreground");
+    expect(classifyOpenFailure(NOT_FOREGROUND)).toBe("foreground");
+  });
+
+  it("classifies a failed open by osopener's code", async () => {
+    const adapter = createOsopenerAdapter(
+      scriptedTools({
+        open: [
+          { opened: false, steps: [], error: { code: "UNSAVED_CHANGES_DIALOG", message: UNSAVED, details: { foregroundTitle: "Save changes?" } } }
+        ]
+      }),
+      "/fake/dist"
+    );
+    expect(await adapter.open("MOD_Demo_X_BL")).toMatchObject({
+      ok: false,
+      failure: { code: "UNSAVED_CHANGES_DIALOG", kind: "other", details: { foregroundTitle: "Save changes?" } }
+    });
+  });
+});
+
+describe("osopener adapter: open", () => {
+  it("keeps osopener's full error — code, untruncated message, failed step — plus a classification", async () => {
+    const longTail = " x".repeat(200);
+    const tools = scriptedTools({
+      open: [
+        {
+          opened: false,
+          alreadyOpen: false,
+          studioLaunched: false,
+          durationMs: 76_000,
+          steps: [
+            { step: "focus", ok: true, ms: 5 },
+            { step: "open-dialog", ok: false, ms: 75_000, detail: "only a Progress window" }
+          ],
+          screenshotPath: "C:/tmp/shot.png",
+          error: {
+            code: "UIA_ELEMENT_NOT_FOUND",
+            message: STUDIO_BUSY_MESSAGE + longTail,
+            details: { labels: ["Progress"] }
+          }
+        }
+      ]
+    });
+    const adapter = createOsopenerAdapter(tools, "/fake/dist");
+    const outcome = await adapter.open("MOD_Demo_X_BL");
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.code).toBe("UIA_ELEMENT_NOT_FOUND");
+    expect(outcome.failure.message).toBe(STUDIO_BUSY_MESSAGE + longTail);
+    expect(outcome.failure.failedStep).toEqual({ step: "open-dialog", detail: "only a Progress window" });
+    expect(outcome.failure.kind).toBe("studio-busy");
+    expect(outcome.failure.steps).toHaveLength(2);
+    expect(outcome.failure.screenshotPath).toBe("C:/tmp/shot.png");
+    expect(outcome.failure.details).toEqual({ labels: ["Progress"] });
+    expect(describeOsopenerFailure(outcome.failure)).toMatch(
+      /^UIA_ELEMENT_NOT_FOUND \(studio-busy\): 'Open from Environment' did not produce .* \[step open-dialog: only a Progress window\]$/
+    );
+    expect(adapter.ownedModules()).toEqual([]);
+  });
+
+  it("turns a thrown handler into a failure instead of throwing", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [new Error("helper crashed")] }), "/fake/dist");
+    expect(await adapter.open("MOD_Demo_X_BL")).toMatchObject({
+      ok: false,
+      failure: { code: "HANDLER_THREW", message: "helper crashed", kind: "other" }
+    });
+  });
+
+  it("never reads a result as success unless osopener said opened: true", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [undefined, { opened: false }] }), "/fake/dist");
+    expect(await adapter.open("MOD_Demo_X_BL")).toMatchObject({ ok: false, failure: { code: "NO_RESULT" } });
+    expect(await adapter.open("MOD_Demo_X_BL")).toMatchObject({ ok: false, failure: { code: "UNKNOWN" } });
+  });
+
+  it("passes the module name and a timeout through to osopener", async () => {
+    const tools = scriptedTools({ open: [OPENED] });
+    await createOsopenerAdapter(tools, "/fake/dist").open("MOD_Demo_X_BL");
+    expect(tools.calls.open[0]).toMatchObject({ name: "MOD_Demo_X_BL" });
+    expect(typeof tools.calls.open[0]?.["timeoutMs"]).toBe("number");
+  });
+});
+
+describe("osopener adapter: ownership and close", () => {
+  it("owns what it opened, never what was already open", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [OPENED, ALREADY_OPEN] }), "/fake/dist");
+    expect(await adapter.open("MOD_Demo_A_BL")).toMatchObject({ ok: true, openedHere: true, alreadyOpen: false });
+    expect(await adapter.open("MOD_Demo_B_BL")).toMatchObject({ ok: true, openedHere: false, alreadyOpen: true });
+    expect(adapter.owns("MOD_Demo_A_BL")).toBe(true);
+    expect(adapter.owns("MOD_Demo_B_BL")).toBe(false);
+    expect(adapter.ownedModules()).toEqual(["MOD_Demo_A_BL"]);
+  });
+
+  it("closeOwned refuses a module this process did not open, without calling osopener", async () => {
+    const tools = scriptedTools({ open: [ALREADY_OPEN], close: [CLOSED] });
+    const adapter = createOsopenerAdapter(tools, "/fake/dist");
+    await adapter.open("MOD_Demo_B_BL");
+    expect(await adapter.closeOwned("MOD_Demo_B_BL")).toMatchObject({ ok: false, failure: { code: "NOT_OWNED" } });
+    expect(tools.calls.close).toEqual([]);
+  });
+
+  it("a successful close releases ownership", async () => {
+    const tools = scriptedTools({ open: [OPENED], close: [CLOSED] });
+    const adapter = createOsopenerAdapter(tools, "/fake/dist");
+    await adapter.open("MOD_Demo_A_BL");
+    expect(await adapter.closeOwned("MOD_Demo_A_BL")).toEqual({ ok: true, alreadyClosed: false, durationMs: 4_500 });
+    expect(adapter.ownedModules()).toEqual([]);
+    expect(tools.calls.close).toEqual([{ name: "MOD_Demo_A_BL" }]);
+  });
+
+  it("propagates osopener's refusal to close (unsaved changes) and keeps the tab as still owned", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [OPENED], close: [UNSAVED_REFUSAL] }), "/fake/dist");
+    await adapter.open("MOD_Demo_A_BL");
+    const outcome = await adapter.closeOwned("MOD_Demo_A_BL");
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.code).toBe("UNSAVED_CHANGES_DIALOG");
+    expect(outcome.failure.message).toContain("unsaved changes");
+    expect(outcome.failure.failedStep).toEqual({ step: "tab-close", detail: "save prompt cancelled with Esc" });
+    expect(adapter.owns("MOD_Demo_A_BL")).toBe(true);
+  });
+
+  it("reports alreadyClosed, and a thrown close as a failure", async () => {
+    const adapter = createOsopenerAdapter(
+      scriptedTools({ close: [{ closed: true, alreadyClosed: true, durationMs: 3, steps: [] }, new Error("boom")] }),
+      "/fake/dist"
+    );
+    expect(await adapter.close("MOD_Demo_A_BL")).toMatchObject({ ok: true, alreadyClosed: true });
+    expect(await adapter.close("MOD_Demo_A_BL")).toMatchObject({ ok: false, failure: { code: "HANDLER_THREW" } });
+  });
+});
+
+describe("discoveryOpener", () => {
+  it("throws osopener's code and message on a failed open", async () => {
+    const adapter = createOsopenerAdapter(
+      scriptedTools({
+        open: [{ opened: false, steps: [], error: { code: "UIA_ELEMENT_NOT_FOUND", message: STUDIO_BUSY_MESSAGE } }]
+      }),
+      "/fake/dist"
+    );
+    await expect(discoveryOpener(adapter).open("MOD_Demo_A_BL")).rejects.toThrow(
+      /^open failed: UIA_ELEMENT_NOT_FOUND \(studio-busy\): 'Open from Environment' did not produce/
+    );
+  });
+
+  it("throws when osopener refuses the close", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [OPENED], close: [UNSAVED_REFUSAL] }), "/fake/dist");
+    const live = discoveryOpener(adapter);
+    await live.open("MOD_Demo_A_BL");
+    await expect(live.close("MOD_Demo_A_BL")).rejects.toThrow(/close refused: UNSAVED_CHANGES_DIALOG/);
+  });
+
+  it("leaves a module osopener found already open alone when discovery asks to close it", async () => {
+    const tools = scriptedTools({ open: [ALREADY_OPEN], close: [CLOSED] });
+    const live = discoveryOpener(createOsopenerAdapter(tools, "/fake/dist"));
+    await live.open("MOD_Demo_B_BL");
+    await live.close("MOD_Demo_B_BL");
+    expect(tools.calls.close).toEqual([]);
+  });
+
+  it("bounds the error text a discovery row stores, keeping the full failure on the error", async () => {
+    const longMessage = STUDIO_BUSY_MESSAGE + " x".repeat(400);
+    const adapter = createOsopenerAdapter(
+      scriptedTools({ open: [{ opened: false, steps: [], error: { code: "UIA_ELEMENT_NOT_FOUND", message: longMessage } }] }),
+      "/fake/dist"
+    );
+    const err = await discoveryOpener(adapter)
+      .open("MOD_Demo_A_BL")
+      .then(() => null, (e: unknown) => e as OsopenerOperationError);
+    expect(err).toBeInstanceOf(OsopenerOperationError);
+    expect(err?.message.length).toBeLessThanOrEqual(DISCOVERY_ERROR_MAX);
+    expect(err?.failure.message).toBe(longMessage);
+  });
+
+  it("a module osopener found already open is reported as was-open and never closed", async () => {
+    const tools = scriptedTools({ open: [ALREADY_OPEN], close: [CLOSED] });
+    const status = await runDiscovery({
+      request: parseRequest({ starters: ["MOD_Demo_A_BL"], depth: 1 }),
+      cache: new Map(),
+      aliases: {},
+      live: {
+        openModules: async () => new Set<string>(),
+        references: async () => ["MOD_Demo_B_ST"],
+        ...discoveryOpener(createOsopenerAdapter(tools, "/fake/dist"))
+      },
+      report: () => undefined
+    });
+    expect(status.modules.find((m) => m.module === "MOD_Demo_A_BL")?.source).toBe("live (was open)");
+    expect(tools.calls.close).toEqual([]);
+  });
+
+  it("a refused close does not fail the walk, and the tab stays recorded as this process's", async () => {
+    const adapter = createOsopenerAdapter(scriptedTools({ open: [OPENED], close: [UNSAVED_REFUSAL] }), "/fake/dist");
+    const status = await runDiscovery({
+      request: parseRequest({ starters: ["MOD_Demo_A_BL"], depth: 1 }),
+      cache: new Map(),
+      aliases: {},
+      live: {
+        openModules: async () => new Set<string>(),
+        references: async () => ["MOD_Demo_B_ST"],
+        ...discoveryOpener(adapter)
+      },
+      report: () => undefined
+    });
+    expect(status.stopped).toBeNull();
+    expect(status.modules.find((m) => m.module === "MOD_Demo_A_BL")?.state).toBe("expanded");
+    expect(adapter.owns("MOD_Demo_A_BL")).toBe(true);
+  });
+});
+
+describe("loadOsopenerAdapter", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "osgraph-osopener-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A synthetic osopener dist: real files, real dynamic import, scripted behaviour. */
+  function writeFakeDist(overrides: Partial<Record<(typeof OSOPENER_ENTRY_FILES)[number], string>> = {}): string {
+    const dist = join(dir, "dist");
+    const files: Record<string, string> = {
+      "config.js": [
+        "export function loadConfig(env, options) {",
+        "  if (!env.FAKE_OSOPENER_URL) {",
+        '    const e = new Error("FAKE_OSOPENER_URL is not set.");',
+        '    e.code = "CONFIG_MISSING";',
+        "    throw e;",
+        "  }",
+        '  return { serviceStudioUrl: env.FAKE_OSOPENER_URL, powershellExe: "pwsh", helperScript: options.packageRoot };',
+        "}"
+      ].join("\n"),
+      "servicestudio.js": "export class HttpServiceStudioClient { constructor(o) { this.o = o; } }",
+      "helper.js": "export class PowerShellHelper { constructor(o) { this.o = o; } }",
+      "tools/openModule.js": [
+        "export const openModule = { async handler(input, ctx) {",
+        "  if (!ctx.config.serviceStudioUrl) throw new Error('no config in ctx');",
+        "  return { opened: true, alreadyOpen: false, studioLaunched: false, durationMs: 1, steps: [] };",
+        "} };"
+      ].join("\n"),
+      "tools/closeModule.js": [
+        "export const closeModule = { async handler() {",
+        '  return { closed: false, alreadyClosed: false, durationMs: 1, steps: [], error: { code: "UNSAVED_CHANGES_DIALOG", message: "unsaved" } };',
+        "} };"
+      ].join("\n"),
+      ...overrides
+    };
+    for (const [file, body] of Object.entries(files)) {
+      mkdirSync(join(dist, file, ".."), { recursive: true });
+      writeFileSync(join(dist, file), body);
+    }
+    return dist;
+  }
+
+  const ENV = { FAKE_OSOPENER_URL: "http://127.0.0.1:1/mcp" };
+
+  it("absent: no location configured", async () => {
+    const result = await loadOsopenerAdapter("", { env: {} });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "absent" } });
+    if (!result.ok) expect(result.failure.message).toContain("OSGRAPH_OSOPENER_DIST");
+  });
+
+  it("absent: nothing at the configured location", async () => {
+    const result = await loadOsopenerAdapter(join(dir, "nowhere"), { env: {} });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "absent" } });
+    if (!result.ok) expect(result.failure.message).toMatch(/not installed at .*npm run build/);
+  });
+
+  it("absent: an incomplete build names the missing files", async () => {
+    mkdirSync(join(dir, "dist"));
+    writeFileSync(join(dir, "dist", "config.js"), "export function loadConfig() { return {}; }");
+    const result = await loadOsopenerAdapter(join(dir, "dist"), { env: {} });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "absent" } });
+    if (!result.ok) expect(result.failure.message).toContain("tools/openModule.js");
+  });
+
+  it("import-failed: a file that does not parse", async () => {
+    const dist = writeFakeDist({ "helper.js": "export const = ;" });
+    const result = await loadOsopenerAdapter(dist, { env: ENV });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "import-failed" } });
+    if (!result.ok) expect(result.failure.detail).toBeTruthy();
+  });
+
+  it("import-failed: a build that does not export what osgraph needs", async () => {
+    const dist = writeFakeDist({ "tools/closeModule.js": "export const somethingElse = 1;" });
+    const result = await loadOsopenerAdapter(dist, { env: ENV });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "import-failed" } });
+    if (!result.ok) expect(result.failure.message).toContain("closeModule.handler");
+  });
+
+  it("import-failed: an import that throws", async () => {
+    const dist = writeFakeDist();
+    const result = await loadOsopenerAdapter(dist, {
+      env: ENV,
+      importModule: async () => {
+        throw new Error("ERR_MODULE_NOT_FOUND: zod");
+      }
+    });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "import-failed", detail: "ERR_MODULE_NOT_FOUND: zod" } });
+  });
+
+  it("config-rejected: keeps osopener's error code and message", async () => {
+    const dist = writeFakeDist();
+    const result = await loadOsopenerAdapter(dist, { env: {} });
+    expect(result).toMatchObject({ ok: false, failure: { cause: "config-rejected", code: "CONFIG_MISSING" } });
+    if (!result.ok) expect(result.failure.message).toContain("FAKE_OSOPENER_URL is not set");
+  });
+
+  it("loads a complete build, and its results flow through the adapter", async () => {
+    const dist = writeFakeDist();
+    const result = await loadOsopenerAdapter(dist, { env: ENV });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(await result.adapter.open("MOD_Demo_A_BL")).toMatchObject({ ok: true, openedHere: true });
+    expect(result.adapter.ownedModules()).toEqual(["MOD_Demo_A_BL"]);
+    expect(await result.adapter.closeOwned("MOD_Demo_A_BL")).toMatchObject({
+      ok: false,
+      failure: { code: "UNSAVED_CHANGES_DIALOG" }
+    });
+    expect(result.adapter.owns("MOD_Demo_A_BL")).toBe(true);
+  });
+
+  it("discoveryAvailable keeps its old answer: false when osopener is absent", async () => {
+    expect(await discoveryAvailable(join(dir, "nowhere"))).toBe(false);
+    expect(await discoveryUnavailableReason(join(dir, "nowhere"))).toMatchObject({ cause: "absent" });
   });
 });

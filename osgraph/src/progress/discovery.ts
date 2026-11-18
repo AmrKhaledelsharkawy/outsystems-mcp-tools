@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 import { resolveScopeSnapshotPath } from "../graph/io.js";
 import { defineScope, SCOPE_NAME_RE } from "../scopes/store.js";
 import type { DiscoveryRunner, DiscoveryStatus } from "./server.js";
-import { loadOsopener, parseRequest } from "./discover.js";
+import { loadOsopenerAdapter, type OsopenerLoadFailure } from "../osopener/adapter.js";
+import { parseRequest } from "./discover.js";
 
 export interface DiscoveryOptions {
   /** Where job directories and the reference cache live. */
@@ -42,8 +43,17 @@ function readJson<T>(path: string, fallback: T): T {
  * discovery is unavailable instead of failing at the moment they press the button.
  */
 export async function discoveryAvailable(osopenerDist: string): Promise<boolean> {
-  if (!existsSync(osopenerDist)) return false;
-  return (await loadOsopener(osopenerDist)) !== null;
+  return (await discoveryUnavailableReason(osopenerDist)) === null;
+}
+
+/**
+ * Why discovery cannot run, or null when it can. Same check as `discoveryAvailable`, through the
+ * shared osopener adapter, but keeping the cause (absent / import failed / config rejected) and
+ * its actionable message for whoever wants to show it.
+ */
+export async function discoveryUnavailableReason(osopenerDist: string): Promise<OsopenerLoadFailure | null> {
+  const loaded = await loadOsopenerAdapter(osopenerDist);
+  return loaded.ok ? null : loaded.failure;
 }
 
 export class ChildProcessDiscovery implements DiscoveryRunner {
