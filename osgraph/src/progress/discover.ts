@@ -28,6 +28,12 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  describeLoadFailure,
+  loadOsopenerAdapter,
+  type OsopenerAdapter,
+  OsopenerOperationError
+} from "../osopener/adapter.js";
 
 /** Hard bounds on a request. A depth-7 discovery of a large estate is a days-long accident. */
 export const MAX_DEPTH = 6;
@@ -405,56 +411,28 @@ function writeAtomic(path: string, body: string): void {
   renameSync(tmp, path);
 }
 
-/** Loads the two osopener tools. Returns null — never throws — when osopener is not built. */
-export async function loadOsopener(osopenerDist: string): Promise<{
-  open(module: string): Promise<void>;
-  close(module: string): Promise<void>;
-} | null> {
-  interface ToolResult {
-    opened?: boolean;
-    closed?: boolean;
-    error?: { code?: string; message?: string };
-  }
-  interface Tool {
-    handler(input: Record<string, unknown>, ctx: unknown): Promise<ToolResult>;
-  }
-  const url = (file: string): string => pathToFileURL(join(osopenerDist, file)).href;
-  try {
-    // Untyped by nature: this crosses a package boundary at a path only known at runtime.
-    const config = (await import(url("config.js"))) as {
-      loadConfig(env: Record<string, string | undefined>, options: { packageRoot: string }): Record<string, unknown>;
-    };
-    const studio = (await import(url("servicestudio.js"))) as {
-      HttpServiceStudioClient: new (options: { url: unknown; tokenFile: unknown }) => unknown;
-    };
-    const helperMod = (await import(url("helper.js"))) as {
-      PowerShellHelper: new (options: { powershellExe: unknown; scriptPath: unknown }) => unknown;
-    };
-    const openMod = (await import(url("tools/openModule.js"))) as { openModule: Tool };
-    const closeMod = (await import(url("tools/closeModule.js"))) as { closeModule: Tool };
-
-    const cfg = config.loadConfig(process.env, { packageRoot: join(osopenerDist, "..") });
-    const client = new studio.HttpServiceStudioClient({ url: cfg["serviceStudioUrl"], tokenFile: cfg["tokenFile"] });
-    const ctx = {
-      config: cfg,
-      client,
-      helper: new helperMod.PowerShellHelper({ powershellExe: cfg["powershellExe"], scriptPath: cfg["helperScript"] })
-    };
-
-    return {
-      open: async (module) => {
-        const result = await openMod.openModule.handler({ name: module, timeoutMs: 75_000 }, ctx);
-        if (result.opened !== true) {
-          throw new Error(`open failed: ${result.error?.code ?? "?"} ${result.error?.message?.slice(0, 160) ?? ""}`.trim());
-        }
-      },
-      close: async (module) => {
-        await closeMod.closeModule.handler({ name: module }, ctx);
-      }
-    };
-  } catch {
-    return null;
-  }
+/**
+ * The two osopener operations discovery needs, as `DiscoverLive` expects them: throwing on
+ * failure. Built on the shared adapter, so the thrown message carries osopener's code, message,
+ * failed step and failure kind, and a close osopener refused (unsaved changes, cancelled prompt)
+ * throws instead of passing for success — which keeps the module in the job's open set, exactly
+ * as a tab that is still open should be.
+ *
+ * Closes go through `closeOwned`: a module osopener reported as already open was never this
+ * process's to close, even if the job's own open-set had gone stale.
+ */
+export function discoveryOpener(adapter: OsopenerAdapter): Pick<DiscoverLive, "open" | "close"> {
+  return {
+    open: async (module) => {
+      const outcome = await adapter.open(module);
+      if (!outcome.ok) throw new OsopenerOperationError("open failed", outcome.failure);
+    },
+    close: async (module) => {
+      const outcome = await adapter.closeOwned(module);
+      if (outcome.ok || outcome.failure.code === "NOT_OWNED") return;
+      throw new OsopenerOperationError("close refused", outcome.failure);
+    }
+  };
 }
 
 /**
@@ -493,7 +471,10 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Pro
 
   let live: DiscoverLive | undefined;
   if (!request.dryRun) {
-    const tools = await loadOsopener(env["OSGRAPH_OSOPENER_DIST"] ?? "");
+    const loaded = await loadOsopenerAdapter(env["OSGRAPH_OSOPENER_DIST"] ?? "", { env });
+    if (!loaded.ok) process.stderr.write(`discover: ${describeLoadFailure(loaded.failure)}
+`);
+    const tools = loaded.ok ? discoveryOpener(loaded.adapter) : null;
     const studio = await loadOsgraphClient(env);
     if (tools && studio) {
       live = {
