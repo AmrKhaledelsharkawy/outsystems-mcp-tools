@@ -177,3 +177,36 @@ describe2("requireServiceStudioUrl (#7: the live-operation gate)", () => {
     expect2(requireServiceStudioUrl({ serviceStudioUrl: "https://studio.example.test/mcp" })).toBe("https://studio.example.test/mcp");
   });
 });
+
+import { REQUIRES_SERVICESTUDIO_AT_START, requiresServiceStudioAtStart } from "../src/cli/args.js";
+
+describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start without an endpoint)", () => {
+  const load = (command: string, table?: Readonly<Record<string, boolean>>) =>
+    loadConfig2({}, { cwd: "C:/w", existsSync: () => false, requireServiceStudio: requiresServiceStudioAtStart(command, table) });
+
+  it2("serve and reextract start without an endpoint", () => {
+    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false });
+    expect2(requiresServiceStudioAtStart("serve")).toBe(false);
+    expect2(requiresServiceStudioAtStart("reextract")).toBe(false);
+    expect2(load("serve").serviceStudioUrl).toBeUndefined();
+    expect2(load("reextract").serviceStudioUrl).toBeUndefined();
+  });
+
+  it2("unknown commands and Object.prototype keys answer false, so they reach the usage error", () => {
+    expect2(requiresServiceStudioAtStart("nope")).toBe(false);
+    expect2(requiresServiceStudioAtStart("toString")).toBe(false);
+    expect2(requiresServiceStudioAtStart("constructor")).toBe(false);
+  });
+
+  it2("a command listed as true fails at start with CONFIG_MISSING (the EXIT_CONFIG branch)", () => {
+    const table = { ...REQUIRES_SERVICESTUDIO_AT_START, live: true };
+    expect2(requiresServiceStudioAtStart("live", table)).toBe(true);
+    try {
+      load("live", table);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect2(err).toBeInstanceOf(ConfigError2);
+      expect2((err as ConfigError2).code).toBe("CONFIG_MISSING");
+    }
+  });
+});

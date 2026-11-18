@@ -4,25 +4,13 @@ import { loadConfig, OsgraphConfigError, requireServiceStudioUrl, type OsgraphCo
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
-import { parseArgs, USAGE } from "./cli/args.js";
+import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
 import { ensureSite } from "./progress/site.js";
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
 const EXIT_USAGE = 64;
-
-/**
- * #7: command-scoped configuration. `true` = the command does nothing but drive Service Studio, so a
- * missing / invalid `OSGRAPH_SERVICESTUDIO_URL` fails it at start with `EXIT_CONFIG`. `false` = the
- * command starts without an endpoint: `reextract` only reads local captures, and `serve` hosts the
- * offline query tools alongside `rebuild`, which checks the endpoint itself when it is dispatched.
- * A new live-only CLI command must be listed here as `true`.
- */
-const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
-  serve: false,
-  reextract: false
-};
 
 /** #7: `serve` starts without an endpoint, but says up front (stderr, never stdout) what that costs. */
 function noteMissingEndpoint(config: OsgraphConfig): void {
@@ -31,10 +19,8 @@ function noteMissingEndpoint(config: OsgraphConfig): void {
   } catch (err) {
     if (!(err instanceof OsgraphConfigError)) throw err;
     process.stderr.write(
-      `osgraph: ${err.code}: ${err.message}
-` +
-        `osgraph: offline tools are available; 'rebuild' will refuse with ${err.code} until this is fixed.
-`
+      `osgraph: ${err.code}: ${err.message}\n` +
+        `osgraph: offline tools are available; 'rebuild' will refuse with ${err.code} until this is fixed.\n`
     );
   }
 }
@@ -107,7 +93,7 @@ if (options.help === "true" || command === "help") {
 } else {
   let config: OsgraphConfig | undefined;
   try {
-    config = loadConfig(process.env, { requireServiceStudio: REQUIRES_SERVICESTUDIO_AT_START[command] === true });
+    config = loadConfig(process.env, { requireServiceStudio: requiresServiceStudioAtStart(command) });
   } catch (err) {
     fail(EXIT_CONFIG, err instanceof OsgraphConfigError ? `${err.code}: ${err.message}` : String(err));
   }
