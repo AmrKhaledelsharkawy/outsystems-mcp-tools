@@ -135,11 +135,51 @@ Whenever a session starts implementing a ticket, in this order:
 10. Commit the changes.
 11. Open a PR targeting the **milestone branch, not `main`**.
 12. Reference the GitHub Issue in the PR body (`Closes #<n>` / `Refs #<n>`).
-13. **Stop** after completing the ticket.
+13. Comment on the Issue with the PR number and what landed (see "Closing an
+    issue" below). Leave the Issue **open**.
+14. **Stop** after completing the ticket.
 
 If a blocking dependency is unmet, stop and report it. Do not implement the
 dependency as a side quest, and do not start a different ticket instead unless
 explicitly asked.
+
+### Closing an issue
+
+**An issue is closed when its PR is merged — never when the PR is merely open.**
+A PR under review can still get changes requested, and an issue closed at
+open-time hides live work from every "what is left?" query. Opening the PR earns
+a comment on the issue; merging it earns the close.
+
+**Nothing closes these issues automatically, and `Closes #<n>` will not do it.**
+GitHub honours a closing keyword only when the PR merges into the repository's
+**default** branch. Every issue PR here targets a **milestone branch** by design
+(§2, §4), so the keyword is documentation of intent, not a mechanism. Keep
+writing it — it links the PR to the issue — but **close the issue by hand**.
+
+So, after a merge:
+
+1. Confirm the merge actually landed: `git fetch origin --prune` and check the
+   merge commit is on the milestone branch. A merged PR page is not proof the
+   commits are where the next ticket will branch from (§3 step 4 depends on this).
+2. Comment on the issue naming **the PR and the merge commit**, and state which
+   acceptance criteria are met — and which are **not**, if any.
+3. Close it with state reason **completed**.
+4. Anything deliberately left undone becomes its **own** issue, linked from that
+   comment. Never close over an unmet criterion in silence.
+
+Three cases that are not a plain close:
+
+- **Work split across published and local-only trees.** Some acceptance criteria
+  land in git-ignored files (ADRs, test fixtures carrying real module names). The
+  comment must say so explicitly, so a reader of the clone is not left looking
+  for a file that was never published.
+- **A `needs-human-publish` issue** (the live gates, e.g. #11, #37) is closed by
+  the human who ran it, on measured evidence recorded in the issue. An agent
+  never closes one of these on the strength of fixture or replay tests.
+- **An issue that turns out to be unnecessary** closes as **not planned**, with
+  the reason — not as completed, and not silently.
+
+Do not reopen a closed issue to add follow-up work; file the follow-up.
 
 ---
 
