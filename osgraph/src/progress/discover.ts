@@ -175,7 +175,12 @@ export interface DiscoverLive {
   openModules(): Promise<Set<string>>;
   /** `runQuery Root { References { Name } }` for one open module. */
   references(module: string): Promise<string[]>;
-  open(module: string): Promise<void>;
+  /**
+   * Opens a module. May answer `{ openedHere: false }` when the module turned out to be open
+   * already (opened after `openModules()` was read): the job then neither owns nor closes it.
+   * `void` means it opened the tab.
+   */
+  open(module: string): Promise<void | { openedHere: boolean }>;
   close(module: string): Promise<void>;
 }
 
@@ -327,8 +332,8 @@ export async function runDiscovery(deps: DiscoverDeps): Promise<DiscoverStatus> 
           if (!openNow.has(target.toLowerCase())) {
             current = { module: row.module, level, step: "opening in Service Studio" };
             report();
-            await live.open(target);
-            openedHere = true;
+            const opened = await live.open(target);
+            openedHere = opened?.openedHere ?? true;
             openNow.add(target.toLowerCase());
           }
           current = { module: row.module, level, step: "runQuery References" };
@@ -412,6 +417,12 @@ function writeAtomic(path: string, body: string): void {
 }
 
 /**
+ * Longest error text discovery stores on a row (status.json / result.json). The structured
+ * failure, untruncated, stays on the thrown `OsopenerOperationError`.
+ */
+export const DISCOVERY_ERROR_MAX = 300;
+
+/**
  * The two osopener operations discovery needs, as `DiscoverLive` expects them: throwing on
  * failure. Built on the shared adapter, so the thrown message carries osopener's code, message,
  * failed step and failure kind, and a close osopener refused (unsaved changes, cancelled prompt)
@@ -425,12 +436,13 @@ export function discoveryOpener(adapter: OsopenerAdapter): Pick<DiscoverLive, "o
   return {
     open: async (module) => {
       const outcome = await adapter.open(module);
-      if (!outcome.ok) throw new OsopenerOperationError("open failed", outcome.failure);
+      if (!outcome.ok) throw new OsopenerOperationError("open failed", outcome.failure, DISCOVERY_ERROR_MAX);
+      return { openedHere: outcome.openedHere };
     },
     close: async (module) => {
       const outcome = await adapter.closeOwned(module);
       if (outcome.ok || outcome.failure.code === "NOT_OWNED") return;
-      throw new OsopenerOperationError("close refused", outcome.failure);
+      throw new OsopenerOperationError("close refused", outcome.failure, DISCOVERY_ERROR_MAX);
     }
   };
 }

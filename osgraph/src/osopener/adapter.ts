@@ -13,8 +13,8 @@
  *     dynamic import, and osopener rejecting its own configuration are three different fixes for a
  *     human, so they are three different `cause`s, each with an actionable message — never one
  *     shared `null`.
- *  2. **Open failures keep osopener's whole error**: its code, its message, the step that failed,
- *     and a classification (`foreground | studio-busy | open-dialog | other`) a retry loop can act
+ *  2. **Open failures keep osopener's whole error**: its code, its message, its `details`, the step
+ *     that failed, and a classification (`foreground | studio-busy | open-dialog | other`) a retry loop can act
  *     on. A real 287-module run lost hours because a driver logged only the code and read
  *     "Studio produced only a transient Progress window" as "a dialog is stuck open".
  *  3. **Close propagates osopener's actual result.** osopener refuses to close a module with
@@ -90,12 +90,13 @@ export interface LoadOsopenerOptions {
 
 /**
  * What a failed open means for whoever retries it:
- *  - `foreground`  : another window owns the foreground; wait for Studio and retry.
+ *  - `foreground`  : another window owns the foreground (`STUDIO_NOT_FOREGROUND`); wait for Studio and retry.
  *  - `studio-busy` : "Open from Environment" never produced a settled dialog, only Studio's
  *                    transient Progress window. Nothing is stuck open, so there is nothing to
  *                    dismiss; Studio has to finish (or be fixed) first.
  *  - `open-dialog` : any other failure naming the open dialog; it may genuinely be stuck open.
- *  - `other`       : not transient; give up on this module.
+ *  - `other`       : not transient; give up on this module. This includes `UNSAVED_CHANGES_DIALOG`:
+ *                    a save prompt only a human can clear, so retrying against it is pointless.
  */
 export type OpenFailureKind = "foreground" | "studio-busy" | "open-dialog" | "other";
 
@@ -113,6 +114,8 @@ export interface OsopenerFailure {
   code: string;
   /** osopener's full error message, untruncated. */
   message: string;
+  /** osopener's `error.details`, verbatim (e.g. `foregroundTitle`, or the `labels` it saw), when it gave any. */
+  details?: unknown;
   /** The last step osopener marked as failed, if any. */
   failedStep?: { step: string; detail?: string };
   /** Every step osopener recorded. */
@@ -166,10 +169,16 @@ export interface OsopenerAdapter {
 /* Failure helpers                                                                               */
 /* -------------------------------------------------------------------------------------------- */
 
-/** Sorts an osopener failure message into what a retry loop can do about it. */
-export function classifyOpenFailure(message: string | undefined): OpenFailureKind {
+/**
+ * Sorts an osopener failure into what a retry loop can do about it: by osopener's error code
+ * first, and only when the code does not decide it, by the message.
+ */
+export function classifyOpenFailure(message: string | undefined, code?: string): OpenFailureKind {
+  // A save prompt needs a human; its message also says "refusing to send input", so the code wins.
+  if (code === "UNSAVED_CHANGES_DIALOG") return "other";
+  if (code === "STUDIO_NOT_FOREGROUND") return "foreground";
   const text = message ?? "";
-  if (/foreground window belongs to pid|refusing to send input/i.test(text)) return "foreground";
+  if (/foreground window belongs to pid/i.test(text)) return "foreground";
   if (/did not produce a settled studio dialog|transient progress window/i.test(text)) return "studio-busy";
   if (/open from environment/i.test(text)) return "open-dialog";
   return "other";
@@ -184,11 +193,16 @@ export function describeOsopenerFailure(failure: OsopenerFailure): string {
   return `${failure.code} (${failure.kind}): ${message}${step}`;
 }
 
-/** An `Error` carrying the structured failure, for callers whose contract is to throw. */
+/**
+ * An `Error` carrying the structured failure, for callers whose contract is to throw. The full
+ * failure stays on `.failure`; `maxMessageLength` only bounds the `message` text, for callers that
+ * store it somewhere size matters.
+ */
 export class OsopenerOperationError extends Error {
   readonly failure: OsopenerFailure;
-  constructor(prefix: string, failure: OsopenerFailure) {
-    super(`${prefix}: ${describeOsopenerFailure(failure)}`);
+  constructor(prefix: string, failure: OsopenerFailure, maxMessageLength?: number) {
+    const full = `${prefix}: ${describeOsopenerFailure(failure)}`;
+    super(maxMessageLength !== undefined && full.length > maxMessageLength ? `${full.slice(0, maxMessageLength - 1)}…` : full);
     this.name = "OsopenerOperationError";
     this.failure = failure;
   }
@@ -203,7 +217,7 @@ interface RawToolResult {
   durationMs?: number;
   steps?: unknown;
   screenshotPath?: string;
-  error?: { code?: unknown; message?: unknown };
+  error?: { code?: unknown; message?: unknown; details?: unknown };
 }
 
 function toSteps(raw: unknown): OsopenerStep[] {
@@ -230,12 +244,14 @@ export function failureFromResult(result: unknown): OsopenerFailure {
       ? raw.error.message
       : "osopener reported failure without an error message";
   const failed = [...steps].reverse().find((s) => !s.ok);
+  const code = typeof raw.error?.code === "string" && raw.error.code.length > 0 ? raw.error.code : "UNKNOWN";
   return {
-    code: typeof raw.error?.code === "string" && raw.error.code.length > 0 ? raw.error.code : "UNKNOWN",
+    code,
     message,
+    ...(raw.error?.details !== undefined ? { details: raw.error.details } : {}),
     ...(failed ? { failedStep: { step: failed.step, ...(failed.detail !== undefined ? { detail: failed.detail } : {}) } } : {}),
     steps,
-    kind: classifyOpenFailure(message),
+    kind: classifyOpenFailure(message, code),
     ...(typeof raw.durationMs === "number" ? { durationMs: raw.durationMs } : {}),
     ...(typeof raw.screenshotPath === "string" ? { screenshotPath: raw.screenshotPath } : {})
   };
