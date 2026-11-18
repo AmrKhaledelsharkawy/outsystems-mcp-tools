@@ -14,8 +14,13 @@ export class OsgraphConfigError extends Error {
 }
 
 export interface OsgraphConfig {
-  /** servicestudio MCP endpoint (OSG-004: required, no default). */
-  serviceStudioUrl: string;
+  /**
+   * servicestudio MCP endpoint, trimmed (OSG-004: no default). Command-scoped (#7): `undefined` when
+   * unset, and **not yet validated** unless `loadConfig` was asked to `requireServiceStudio`. Offline
+   * commands never look at it; anything that talks to Studio goes through `requireServiceStudioUrl`,
+   * which raises the same `CONFIG_MISSING` / `CONFIG_INVALID` errors process start used to.
+   */
+  serviceStudioUrl: string | undefined;
   /** Hook-saved session token file, read-only (ADR-0004). Undefined = interactive token mode. */
   tokenFile: string | undefined;
   /** Where snapshots live: `<graphDir>/<scope>/graph.json`. */
@@ -130,6 +135,40 @@ export interface LoadConfigOptions {
    * Defaults to the directory above this module's own (`dist/` at runtime, `src/` under vitest).
    */
   packageRoot?: string;
+  /**
+   * #7: validate the servicestudio endpoint now and throw if it is missing or not http(s). For a
+   * command that does nothing but drive Studio, so it fails at start with the configuration exit
+   * code. Default `false`: offline commands (and the MCP server, whose live tool checks on
+   * dispatch) start with no endpoint configured.
+   */
+  requireServiceStudio?: boolean;
+}
+
+/**
+ * #7: the one place the servicestudio endpoint is validated. Returns the trimmed URL, or throws
+ * `OsgraphConfigError` — `CONFIG_MISSING` when unset/blank, `CONFIG_INVALID` when not an http(s)
+ * URL — with the messages osgraph has always used. Call it immediately before a live operation is
+ * dispatched, so the user sees this message instead of a downstream connection error.
+ */
+export function requireServiceStudioUrl(config: Pick<OsgraphConfig, "serviceStudioUrl">): string {
+  const serviceStudioUrl = nonEmpty(config.serviceStudioUrl);
+  if (serviceStudioUrl === undefined) {
+    throw new OsgraphConfigError(
+      "CONFIG_MISSING",
+      `${ENV_SERVICESTUDIO_URL} is not set. osgraph has no default servicestudio endpoint; ` +
+        `set it to the servicestudio MCP URL (e.g. http://127.0.0.1:41820/mcp).`
+    );
+  }
+  try {
+    const parsed = new URL(serviceStudioUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");
+  } catch {
+    throw new OsgraphConfigError(
+      "CONFIG_INVALID",
+      `${ENV_SERVICESTUDIO_URL} is not a valid http(s) URL: '${serviceStudioUrl}'.`
+    );
+  }
+  return serviceStudioUrl;
 }
 
 /** `<packageRoot>` for the compiled `dist/config.js` — i.e. the directory holding package.json. */
@@ -147,31 +186,19 @@ function nonEmpty(value: string | undefined): string | undefined {
 
 /**
  * Pure (given `env` + options): builds the runtime configuration from environment variables.
- * Throws `OsgraphConfigError("CONFIG_MISSING")` when `OSGRAPH_SERVICESTUDIO_URL` is unset or empty.
+ *
+ * Command-scoped (#7): a missing or malformed `OSGRAPH_SERVICESTUDIO_URL` is NOT an error here by
+ * default — offline commands never need it. Pass `requireServiceStudio: true` for a command that
+ * only drives Studio; otherwise the live path calls `requireServiceStudioUrl` when it is dispatched.
  */
 export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphConfig {
   const cwd = options.cwd ?? process.cwd();
   const exists = options.existsSync ?? existsSync;
   const packageRoot = options.packageRoot ?? defaultPackageRoot();
 
-  const serviceStudioUrl = nonEmpty(env[ENV_SERVICESTUDIO_URL]);
-  if (serviceStudioUrl === undefined) {
-    throw new OsgraphConfigError(
-      "CONFIG_MISSING",
-      `${ENV_SERVICESTUDIO_URL} is not set. osgraph has no default servicestudio endpoint; ` +
-        `set it to the servicestudio MCP URL (e.g. http://127.0.0.1:41820/mcp).`
-    );
-  }
-
-  try {
-    const parsed = new URL(serviceStudioUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");
-  } catch {
-    throw new OsgraphConfigError(
-      "CONFIG_INVALID",
-      `${ENV_SERVICESTUDIO_URL} is not a valid http(s) URL: '${serviceStudioUrl}'.`
-    );
-  }
+  const rawUrl = nonEmpty(env[ENV_SERVICESTUDIO_URL]);
+  const serviceStudioUrl =
+    options.requireServiceStudio === true ? requireServiceStudioUrl({ serviceStudioUrl: rawUrl }) : rawUrl;
 
   const graphDir = nonEmpty(env[ENV_GRAPH_DIR]) ?? join(cwd, ".osgraph");
 

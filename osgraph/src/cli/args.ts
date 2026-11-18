@@ -46,3 +46,26 @@ export function parseArgs(argv: string[]): { command: string; options: Record<st
   }
   return { command, options };
 }
+
+/**
+ * #7: command-scoped configuration. `true` = the command does nothing but drive Service Studio, so a
+ * missing / invalid `OSGRAPH_SERVICESTUDIO_URL` fails it at start with the config exit code (2).
+ * `false` = the command starts without an endpoint: `reextract` only reads local captures, and
+ * `serve` hosts the offline query tools alongside `rebuild`, which checks the endpoint itself when it
+ * is dispatched. A new live-only CLI command must be listed here as `true`.
+ */
+export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
+  serve: false,
+  reextract: false
+};
+
+/**
+ * Whether `command` needs a valid Service Studio endpoint before it starts. Unknown commands answer
+ * `false` so they reach the usage error instead of a configuration error.
+ */
+export function requiresServiceStudioAtStart(
+  command: string,
+  table: Readonly<Record<string, boolean>> = REQUIRES_SERVICESTUDIO_AT_START
+): boolean {
+  return Object.prototype.hasOwnProperty.call(table, command) && table[command] === true;
+}

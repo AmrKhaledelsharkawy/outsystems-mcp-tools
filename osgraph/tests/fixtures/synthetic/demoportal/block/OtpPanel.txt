@@ -1,0 +1,7 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlowSignature mainFlow) => {
+    // IMobileBlockSignature MOD_DEMO_Portal_CW/MainFlow/OtpPanel
+    var eSpace = mainFlow.GetESpace();
+    var otpPanel = (OutSystems.Model.UI.Mobile.IMobileBlockSignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCbLoCkAaAaAaAa*DeMoOtpPanel000000000000"));
+}
+```

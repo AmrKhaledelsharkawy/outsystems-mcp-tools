@@ -5,10 +5,43 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { assertScopeName } from "../scopes/name.js";
 import { NO_SNAPSHOT_COMPLETENESS, UNKNOWN_COMPLETENESS, type GraphCompleteness } from "../types.js";
 import type { Snapshot, SnapshotMeta } from "./types.js";
 
+export const GRAPH_FILE = "graph.json";
 export const META_FILE = "meta.json";
+export const FLOWS_FILE = "flows.json";
+
+/** Where one scope's artifacts live. Every scope-artifact path in osgraph comes from here. */
+export interface ScopeArtifactPaths {
+  /** `<graphDir>/<scope>` */
+  dir: string;
+  /** `<graphDir>/<scope>/graph.json` — the snapshot. */
+  graph: string;
+  /** `<graphDir>/<scope>/meta.json` — the snapshot's sibling (`metaPath(graph)`). */
+  meta: string;
+  /** `<graphDir>/<scope>/flows.json` — the flow artifact beside the snapshot (`flowsPath(graph)`). */
+  flows: string;
+}
+
+/**
+ * The single seam that decides where a scope's artifacts live (ADR-0005 layout).
+ *
+ * `scope` must be a trusted single path segment: it is validated with the scope store's own rule
+ * (`SCOPE_INVALID` for separators, traversal, `.`/`..` or anything outside `[A-Za-z0-9_.-]`), so no
+ * caller can resolve a path outside `graphDir`.
+ */
+export function resolveScopeArtifactPaths(graphDir: string, scope: string): ScopeArtifactPaths {
+  assertScopeName(scope);
+  const dir = join(graphDir, scope);
+  return { dir, graph: join(dir, GRAPH_FILE), meta: join(dir, META_FILE), flows: join(dir, FLOWS_FILE) };
+}
+
+/** `<graphDir>/<scope>/graph.json` — `resolveScopeArtifactPaths(graphDir, scope).graph`. */
+export function resolveScopeSnapshotPath(graphDir: string, scope: string): string {
+  return resolveScopeArtifactPaths(graphDir, scope).graph;
+}
 
 /** Stable key order, 2-space indent, `\n` line endings, trailing newline. */
 export function canonicalJson(value: unknown): string {

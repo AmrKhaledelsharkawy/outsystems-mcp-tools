@@ -1,0 +1,18 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IClientAction 'ShowToast' ***/
+    var showToast = eSpace.CreateClientAction("ShowToast");
+    showToast.Description = "ShowToast (synthetic)";
+    showToast.Public = false; // default value
+    
+    var startNode = showToast.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var mOD_DEMO_Common_CW = eSpace.References.Named("MOD_DEMO_Common_CW");
+    var showMessage2 = mOD_DEMO_Common_CW.ClientActions.Named("ShowMessage");
+    var showMessage = showToast.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ShowMessage");
+    showMessage.Action = showMessage2;
+    startNode.Target = showMessage;
+    var endNode = showToast.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    showMessage.Target = endNode;
+}
+```

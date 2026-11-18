@@ -1,0 +1,42 @@
+```csharp
+(OutSystems.Model.IReference outSystemsUI) => {
+    // IStaticEntitySignature OutSystemsUI/AccordionIconPosition
+    var eSpace = outSystemsUI.GetESpace();
+    var accordionIconPosition = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000001"));
+    // IStaticEntitySignature OutSystemsUI/BreakColumns
+    var breakColumns = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000002"));
+    // IStaticEntitySignature OutSystemsUI/Color
+    var color = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000003"));
+    // IStaticEntitySignature OutSystemsUI/Direction
+    var direction = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000004"));
+    // IStaticEntitySignature OutSystemsUI/GutterSize
+    var gutterSize = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000005"));
+    // IServerEntitySignature (System)/Activity
+    var activity = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000006"));
+    // IServerEntitySignature (System)/Espace
+    var espace = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000007"));
+    // IServerEntitySignature (System)/Group
+    var group = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000008"));
+    // IStaticEntitySignature MOD_DEMO_Common_CW/AlertType
+    var alertType = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCcOmMoNaAaAaAa*DeMoKeY00000000000009"));
+    // IStaticEntitySignature MOD_DEMO_Common_CW/ButtonType
+    var buttonType = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCcOmMoNaAaAaAa*DeMoKeY00000000000010"));
+    // IStaticEntitySignature MOD_DEMO_Files_CS/LKP_AttachmentType
+    var lKP_AttachmentType = (OutSystems.Model.Data.IStaticEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCfIlEsAaAaAaAa*DeMoKeY00000000000011"));
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+
+    /*** creating IServerEntity 'DemoVisit' ***/
+    var demoVisit = eSpace.CreateEntity("DemoVisit");
+    demoVisit.Description = "One recorded portal visit";
+    var id = demoVisit.CreateAttribute("Id");
+    id.DataType = eSpace.Model.LongIntegerType;
+    var userId = demoVisit.CreateAttribute("UserId");
+    userId.DataType = user.IdentifierType;
+    var legacySource = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCoPaQuEaAaAaAa*DeMoKeY00000000000099"));
+    var sourceId = demoVisit.CreateAttribute("SourceId");
+    sourceId.DataType = legacySource.IdentifierType;
+    var alertTypeId = demoVisit.CreateAttribute("AlertTypeId");
+    alertTypeId.DataType = alertType.IdentifierType;
+}
+```

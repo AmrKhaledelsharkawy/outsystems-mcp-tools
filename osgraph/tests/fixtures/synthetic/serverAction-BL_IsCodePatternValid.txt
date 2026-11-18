@@ -1,0 +1,25 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("uXCIR2Atc0+es3zYuZSnNw*LYIWpF+Ey0aicHD144NUTA"));
+
+    /*** creating IServerAction 'BL_IsCodePatternValid' ***/
+    var bL_IsCodePatternValid = eSpace.CreateServerAction("BL_IsCodePatternValid");
+    bL_IsCodePatternValid.Description = "Validates a code pattern";
+    var position = bL_IsCodePatternValid.CreateInputParameter("Position");
+    position.DataType = eSpace.Model.IntegerType;
+    var startNode = bL_IsCodePatternValid.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var getUser = bL_IsCodePatternValid.CreateNode<OutSystems.Model.Logic.Nodes.IAggregateNode>("GetUser");
+    var userSource = getUser.Aggregate.AddSource(user);
+    var validateNextCharacter = bL_IsCodePatternValid.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("ValidateNextCharacter");
+    validateNextCharacter.Action = bL_IsCodePatternValid;
+    validateNextCharacter.SetArgumentValue(position, "Position + 1");
+    var mOD_DEMO_Configurations_CNF = eSpace.References.Named("MOD_DEMO_Configurations_CNF");
+    var cNF_GetSetting2 = mOD_DEMO_Configurations_CNF.ServerActions.Named("CNF_GetSetting");
+    var cNF_GetSetting = bL_IsCodePatternValid.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("CNF_GetSetting");
+    cNF_GetSetting.Action = cNF_GetSetting2;
+    var lookupDefinition = eSpace.Entities.Named("LookupDefinition");
+    var createLookup = bL_IsCodePatternValid.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("CreateLookupDefinition");
+    createLookup.Action = lookupDefinition.Actions.Named("CreateLookupDefinition");
+}
+```

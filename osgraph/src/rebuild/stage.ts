@@ -16,6 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtractedModule } from "../extract/index.js";
+import { resolveScopeArtifactPaths } from "../graph/io.js";
 import type { RebuildPhase } from "./rebuild.js";
 
 /**
@@ -54,7 +55,7 @@ export interface StageEntry {
 }
 
 export function stageDir(graphDir: string, scope: string): string {
-  return join(graphDir, scope, "stage");
+  return join(resolveScopeArtifactPaths(graphDir, scope).dir, "stage");
 }
 
 /**

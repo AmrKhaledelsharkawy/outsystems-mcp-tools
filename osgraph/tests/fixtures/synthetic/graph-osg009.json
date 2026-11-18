@@ -1,0 +1,18 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {
+    "schema_version": "1.0",
+    "graphify_version": "0.9.91"
+  },
+  "nodes": [
+    {"id": "osgraph://MyModule/Screen/LoginScreen", "label": "LoginScreen", "file_type": "code", "source_file": "MyModule/Screens/LoginScreen.oml"},
+    {"id": "osgraph://MyModule/Action/AuthenticateUser", "label": "AuthenticateUser", "file_type": "code", "source_file": "MyModule/Actions/AuthenticateUser.oml"},
+    {"id": "osgraph://MyModule/Entity/User", "label": "User", "file_type": "code", "source_file": "MyModule/Entities/User.oml"},
+    {"id": "osgraph://MyModule/Entity/Session", "label": "Session", "file_type": "code", "source_file": "MyModule/Entities/Session.oml"}
+  ],
+  "links": [
+    {"source": "osgraph://MyModule/Screen/LoginScreen", "target": "osgraph://MyModule/Action/AuthenticateUser", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "MyModule/Screens/LoginScreen.oml"},
+    {"source": "osgraph://MyModule/Action/AuthenticateUser", "target": "osgraph://MyModule/Entity/User", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "MyModule/Actions/AuthenticateUser.oml"}
+  ]
+}

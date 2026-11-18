@@ -1,0 +1,16 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IClientAction 'ToggleMenu' ***/
+    var toggleMenu = eSpace.CreateClientAction("ToggleMenu");
+    toggleMenu.Description = "ToggleMenu (synthetic)";
+    toggleMenu.Public = false; // default value
+    
+    var startNode = toggleMenu.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var assignNode = toggleMenu.CreateNode<OutSystems.Model.Logic.Nodes.IAssignNode>();
+    var assignment = assignNode.CreateAssignment("MenuOpen", "not MenuOpen");
+    startNode.Target = assignNode;
+    var endNode = toggleMenu.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    assignNode.Target = endNode;
+}
+```

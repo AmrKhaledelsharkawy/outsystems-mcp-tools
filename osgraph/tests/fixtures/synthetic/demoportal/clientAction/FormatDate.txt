@@ -1,0 +1,21 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IClientAction 'FormatDate' ***/
+    var formatDate = eSpace.CreateClientAction("FormatDate");
+    formatDate.Description = "FormatDate (synthetic)";
+    formatDate.Public = false; // default value
+    
+    var startNode = formatDate.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    formatDate.Function = true;
+    var inputDate = formatDate.CreateInputParameter("InputDate");
+    inputDate.DataType = eSpace.DateTimeType;
+    var ifNode = formatDate.CreateNode<OutSystems.Model.Logic.Nodes.IIfNode>().ConnectedBelow(startNode, 2057);
+    ifNode.SetCondition("InputDate = NullDate()");
+    ifNode.Label = "IsEmpty";
+    var endNode = formatDate.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    var endNode2 = formatDate.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    ifNode.TrueTarget = endNode;
+    ifNode.FalseTarget = endNode2;
+}
+```

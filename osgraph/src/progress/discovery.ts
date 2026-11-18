@@ -8,12 +8,14 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveScopeSnapshotPath } from "../graph/io.js";
 import { defineScope, SCOPE_NAME_RE } from "../scopes/store.js";
 import type { DiscoveryRunner, DiscoveryStatus } from "./server.js";
-import { loadOsopener, parseRequest } from "./discover.js";
+import { loadOsopenerAdapter, type OsopenerLoadFailure } from "../osopener/adapter.js";
+import { parseRequest } from "./discover.js";
 
 export interface DiscoveryOptions {
   /** Where job directories and the reference cache live. */
@@ -41,8 +43,17 @@ function readJson<T>(path: string, fallback: T): T {
  * discovery is unavailable instead of failing at the moment they press the button.
  */
 export async function discoveryAvailable(osopenerDist: string): Promise<boolean> {
-  if (!existsSync(osopenerDist)) return false;
-  return (await loadOsopener(osopenerDist)) !== null;
+  return (await discoveryUnavailableReason(osopenerDist)) === null;
+}
+
+/**
+ * Why discovery cannot run, or null when it can. Same check as `discoveryAvailable`, through the
+ * shared osopener adapter, but keeping the cause (absent / import failed / config rejected) and
+ * its actionable message for whoever wants to show it.
+ */
+export async function discoveryUnavailableReason(osopenerDist: string): Promise<OsopenerLoadFailure | null> {
+  const loaded = await loadOsopenerAdapter(osopenerDist);
+  return loaded.ok ? null : loaded.failure;
 }
 
 export class ChildProcessDiscovery implements DiscoveryRunner {
@@ -75,10 +86,26 @@ export class ChildProcessDiscovery implements DiscoveryRunner {
 
     // stdout/stderr go to a file, never to our own stdio: this process speaks MCP on stdout, and
     // one stray child write would corrupt the protocol stream.
-    const child = this.spawnFn(process.execPath, [this.jobScript, dir], {
-      stdio: ["ignore", "ignore", openSync(join(dir, "stderr.log"), "a")],
-      env: { ...this.options.env, OSGRAPH_DISCOVER_STATE_DIR: this.options.stateDir }
-    });
+    //
+    // The fd is ours to close, and we must. `spawn` duplicates a numeric `stdio` entry for the
+    // child — it does not take ownership — so leaving it open leaks one descriptor per discovery
+    // job in this process. `uv_spawn` is synchronous, so by the time `spawn` returns the child
+    // already holds its own copy and closing ours cannot affect it. Closing it in `finally` also
+    // keeps a throwing `spawnFn` from leaking.
+    //
+    // Found by CI, on Windows only: an open handle there blocks `rmdir` on the enclosing directory
+    // outright (`ENOTEMPTY`, un-retryable), while Linux unlinks a file with open descriptors
+    // happily. The symptom was five `progress.discover` tests failing in teardown.
+    const errFd = openSync(join(dir, "stderr.log"), "a");
+    let child;
+    try {
+      child = this.spawnFn(process.execPath, [this.jobScript, dir], {
+        stdio: ["ignore", "ignore", errFd],
+        env: { ...this.options.env, OSGRAPH_DISCOVER_STATE_DIR: this.options.stateDir }
+      });
+    } finally {
+      closeSync(errFd);
+    }
     this.job = { id, dir, child };
     return { id };
   }
@@ -122,8 +149,11 @@ export class ChildProcessDiscovery implements DiscoveryRunner {
     const names = new Set<string>();
     for (const scope of readScopes(this.options.scopesDir)) {
       for (const module of scope.modules) names.add(module);
+      // A stray file such as `demo - Copy.json` is not a scope name and can own no snapshot:
+      // keep its modules (as before) but do not hand its name to the validating resolver.
+      if (!SCOPE_NAME_RE.test(scope.name) || scope.name === "." || scope.name === "..") continue;
       const graph = readJson<{ nodes?: { kind?: string; module?: string }[] }>(
-        join(this.options.graphDir, scope.name, "graph.json"),
+        resolveScopeSnapshotPath(this.options.graphDir, scope.name),
         {}
       );
       for (const node of graph.nodes ?? []) {

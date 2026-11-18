@@ -1,0 +1,14 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IStructureSignature OutSystemsUI/DeviceConfiguration
+    var deviceConfiguration = (OutSystems.Model.Data.IStructureSignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("Kn_hixxDWEm4lMd7mIpycQ*uUnElVRZ7EeykU8Op0Iq9A"));
+
+    /*** creating IStructure 'ST_LookupItem' ***/
+    var sT_LookupItem = eSpace.CreateStructure("ST_LookupItem");
+    sT_LookupItem.Description = "One lookup row";
+    var id = sT_LookupItem.CreateAttribute("Id");
+    id.DataType = eSpace.Model.LongIntegerType;
+    var device = sT_LookupItem.CreateAttribute("Device");
+    device.DataType = deviceConfiguration.RecordType;
+}
+```

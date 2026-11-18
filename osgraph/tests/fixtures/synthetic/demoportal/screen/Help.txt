@@ -1,0 +1,48 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow mainFlow) => {
+    
+    /*** creating IMobileScreen 'Help' ***/
+    var help2 = mainFlow.CreateScreen("Help");
+    var eSpace = mainFlow.GetESpace();
+    var registered = eSpace.SystemRoles.OfType<OutSystems.Model.Logic.ISystemRole>().Named("Registered");
+    help2.Roles.Add(registered);
+    help2.Description = null; // default value
+    help2.PageName = "help";
+    help2.SetTitle("\"Help\"");
+    help2.OnDestroy.Destination = null; // default value
+    help2.OnReady.Destination = null; // default value
+    help2.OnRender.Destination = null; // default value
+    
+    var backToTop = help2.CreateScreenAction("BackToTop");
+    backToTop.Description = null; // default value
+    
+    var startNode = backToTop.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var scrollTop = backToTop.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ScrollTop");
+    var scrollTop2 = eSpace.ClientActions.Named("ScrollTop");
+    scrollTop.Action = scrollTop2;
+    scrollTop.HorizontalPosition = 3200;
+    scrollTop.VerticalPosition = 3200;
+    startNode.Target = scrollTop;
+    
+    var endNode = backToTop.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    scrollTop.Target = endNode;
+    help2.OnInitialize.Destination = null; // default value
+    
+    var layoutMainInstance = help2.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    layoutMainInstance.CustomStyle = null; // default value
+    var mOD_DEMO_Layouts = eSpace.References.Named("MOD_DEMO_Layouts");
+    var demoLayouts = mOD_DEMO_Layouts.MobileFlows.Named("DemoLayouts");
+    var layoutMain = demoLayouts.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlockSignature>().Named("LayoutMain");
+    layoutMainInstance.SourceBlock = layoutMain;
+    var hasFixedHeader = layoutMain.InputParameters.Named("HasFixedHeader");
+    layoutMainInstance.SetArgumentValue(hasFixedHeader, "True");
+    
+    var placeholderContentWidget = layoutMainInstance.PlaceholdersContent.FirstOrDefault(p => p.Placeholder?.Name == "MainContent");
+    var sidebarInstance = placeholderContentWidget.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    sidebarInstance.CustomStyle = null; // default value
+    var commonFlow = eSpace.MobileFlows.Named("Common");
+    var sidebar = commonFlow.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlock>().Named("Sidebar");
+    sidebarInstance.SourceBlock = sidebar;
+}
+```

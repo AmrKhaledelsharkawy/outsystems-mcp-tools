@@ -1,0 +1,17 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IClientAction 'ScrollTop' ***/
+    var scrollTop = eSpace.CreateClientAction("ScrollTop");
+    scrollTop.Description = "ScrollTop (synthetic)";
+    scrollTop.Public = false; // default value
+    
+    var startNode = scrollTop.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var showToast = scrollTop.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ShowToast");
+    var showToast2 = eSpace.ClientActions.Named("ShowToast");
+    showToast.Action = showToast2;
+    startNode.Target = showToast;
+    var endNode = scrollTop.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    showToast.Target = endNode;
+}
+```

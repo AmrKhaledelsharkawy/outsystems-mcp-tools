@@ -31,6 +31,7 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && vitest run",
+    "test:published": "npm run build && vitest run --config vitest.published.config.ts",
     "lint": "eslint src tests",
     "prepack": "npm run build",
     "prepare": "npm run build"

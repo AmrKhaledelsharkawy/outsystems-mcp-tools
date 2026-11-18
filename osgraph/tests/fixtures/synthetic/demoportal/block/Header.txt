@@ -1,0 +1,31 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow common) => {
+    
+    /*** creating IMobileBlock 'Header' ***/
+    var header = common.CreateBlock("Header");
+    header.Description = null; // default value
+    header.Public = false; // default value
+    var eSpace = common.GetESpace();
+    
+    var clicked = header.CreateEvent("Clicked");
+    clicked.IsMandatory = false;
+    
+    var onHeaderClick = header.CreateScreenAction("OnHeaderClick");
+    
+    var startNode = onHeaderClick.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var toggleMenu = onHeaderClick.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ToggleMenu");
+    var toggleMenu2 = eSpace.ClientActions.Named("ToggleMenu");
+    toggleMenu.Action = toggleMenu2;
+    startNode.Target = toggleMenu;
+    
+    var endNode = onHeaderClick.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    toggleMenu.Target = endNode;
+    
+    var container = header.CreateWidget<ServiceStudio.Plugin.NRWidgets.IContainer>();
+    container.SetStyle("\"demo-header\"");
+    var event1 = container.CreateEvent();
+    event1.Event = "onclick";
+    event1.Handler = onHeaderClick;
+}
+```
