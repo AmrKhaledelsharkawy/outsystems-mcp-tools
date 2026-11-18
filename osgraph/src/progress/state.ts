@@ -17,7 +17,7 @@
  */
 
 import { statSync } from "node:fs";
-import { join } from "node:path";
+import { resolveScopeArtifactPaths } from "../graph/io.js";
 import { REBUILD_PHASES, type RebuildPerModule, type RebuildPhase, type RebuildProgressEvent, formatProgress } from "../rebuild/rebuild.js";
 import { readAllTimings } from "./timings.js";
 import type { ModuleCost, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
@@ -78,8 +78,8 @@ export interface ScopeFiles {
 }
 
 export function scopeFiles(graphDir: string, scope: string): ScopeFiles {
-  const dir = join(graphDir, scope);
-  return { graph: join(dir, "graph.json"), meta: join(dir, "meta.json"), flows: join(dir, "flows.json") };
+  const { graph, meta, flows } = resolveScopeArtifactPaths(graphDir, scope);
+  return { graph, meta, flows };
 }
 
 export class RunState {

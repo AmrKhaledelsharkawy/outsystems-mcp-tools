@@ -11,6 +11,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveScopeSnapshotPath } from "../graph/io.js";
 import { defineScope, SCOPE_NAME_RE } from "../scopes/store.js";
 import type { DiscoveryRunner, DiscoveryStatus } from "./server.js";
 import { loadOsopener, parseRequest } from "./discover.js";
@@ -138,8 +139,11 @@ export class ChildProcessDiscovery implements DiscoveryRunner {
     const names = new Set<string>();
     for (const scope of readScopes(this.options.scopesDir)) {
       for (const module of scope.modules) names.add(module);
+      // A stray file such as `demo - Copy.json` is not a scope name and can own no snapshot:
+      // keep its modules (as before) but do not hand its name to the validating resolver.
+      if (!SCOPE_NAME_RE.test(scope.name) || scope.name === "." || scope.name === "..") continue;
       const graph = readJson<{ nodes?: { kind?: string; module?: string }[] }>(
-        join(this.options.graphDir, scope.name, "graph.json"),
+        resolveScopeSnapshotPath(this.options.graphDir, scope.name),
         {}
       );
       for (const node of graph.nodes ?? []) {

@@ -1,8 +1,7 @@
 import { z, type ZodRawShape, type ZodType } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { join } from "node:path";
 import type { OsgraphConfig } from "../config.js";
-import { readGraphCompleteness, readSnapshot, type Snapshot } from "../graph/index.js";
+import { readGraphCompleteness, readSnapshot, resolveScopeSnapshotPath, type Snapshot } from "../graph/index.js";
 import { loadLayerRules, type LayerRules } from "../layers/rules.js";
 import { ScopeStore } from "../scopes/store.js";
 import type { ServiceStudioClient } from "../servicestudio/client.js";
@@ -147,7 +146,7 @@ export function createToolContext(config: OsgraphConfig, overrides: ToolContextO
         if (rules === undefined) rules = loadLayerRules(overrides.layerRulesPath);
         return rules;
       }),
-    snapshotPath: overrides.snapshotPath ?? ((scope: string) => join(config.graphDir, scope, "graph.json")),
+    snapshotPath: overrides.snapshotPath ?? ((scope: string) => resolveScopeSnapshotPath(config.graphDir, scope)),
     scopeStore: overrides.scopeStore ?? new ScopeStore(config.scopesDir),
     log: overrides.log ?? ((line: string) => process.stderr.write(`${line}\n`)),
     createSession: overrides.createSession ?? sharedSession,
@@ -199,8 +198,17 @@ export function notImplemented(toolName: string): ToolResponse<never> {
  */
 export function completenessFor(ctx: ToolContext, scope: string | undefined): GraphCompleteness {
   if (scope === undefined) return NO_SNAPSHOT_COMPLETENESS;
+  let path: string;
   try {
-    return readGraphCompleteness(ctx.snapshotPath(scope));
+    path = ctx.snapshotPath(scope);
+  } catch (err) {
+    // A name that is not a valid scope segment can hold no snapshot: same answer as before the
+    // resolver validated it (the hand-joined path simply did not exist).
+    if (err instanceof OsgraphToolError && err.code === "SCOPE_INVALID") return NO_SNAPSHOT_COMPLETENESS;
+    throw err;
+  }
+  try {
+    return readGraphCompleteness(path);
   } catch {
     return UNKNOWN_COMPLETENESS;
   }
