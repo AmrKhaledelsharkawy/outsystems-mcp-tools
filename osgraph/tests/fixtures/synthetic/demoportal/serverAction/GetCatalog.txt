@@ -1,0 +1,18 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+    
+    /*** creating IServerAction 'GetCatalog' ***/
+    var getCatalog = eSpace.CreateServerAction("GetCatalog");
+    getCatalog.Description = "GetCatalog (synthetic)";
+    
+    var startNode = getCatalog.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var demoVisit = eSpace.Entities.Named("DemoVisit");
+    var getVisits = getCatalog.CreateNode<OutSystems.Model.Logic.Nodes.IAggregateNode>("GetVisits");
+    var visitSource = getVisits.Aggregate.AddSource(demoVisit);
+    startNode.Target = getVisits;
+    var endNode = getCatalog.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    getVisits.Target = endNode;
+}
+```

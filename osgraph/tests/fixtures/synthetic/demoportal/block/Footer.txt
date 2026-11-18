@@ -1,0 +1,31 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow common) => {
+    
+    /*** creating IMobileBlock 'Footer' ***/
+    var footer = common.CreateBlock("Footer");
+    footer.Description = null; // default value
+    footer.Public = false; // default value
+    var eSpace = common.GetESpace();
+    
+    var clicked = footer.CreateEvent("Clicked");
+    clicked.IsMandatory = false;
+    
+    var onFooterClick = footer.CreateScreenAction("OnFooterClick");
+    
+    var startNode = onFooterClick.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var showToast = onFooterClick.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("ShowToast");
+    var showToast2 = eSpace.ClientActions.Named("ShowToast");
+    showToast.Action = showToast2;
+    startNode.Target = showToast;
+    
+    var endNode = onFooterClick.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    showToast.Target = endNode;
+    
+    var container = footer.CreateWidget<ServiceStudio.Plugin.NRWidgets.IContainer>();
+    container.SetStyle("\"demo-footer\"");
+    var event1 = container.CreateEvent();
+    event1.Event = "onclick";
+    event1.Handler = onFooterClick;
+}
+```

@@ -1,0 +1,7 @@
+```csharp
+(OutSystems.Model.IReference outSystemsUI) => {
+    // IStructureSignature OutSystemsUI/DeviceConfiguration
+    var eSpace = outSystemsUI.GetESpace();
+    var deviceConfiguration = (OutSystems.Model.Data.IStructureSignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCuIaAaAaAaAaAa*DeMoKeY00000000000020"));
+}
+```

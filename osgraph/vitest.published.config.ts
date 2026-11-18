@@ -23,11 +23,15 @@ export default defineConfig({
       "tests/progress.discover.test.ts",
       "tests/progress.server.test.ts",
       "tests/progress.state.test.ts",
+      "tests/raw.test.ts",
+      "tests/rebuild.test.ts",
+      "tests/reextract.test.ts",
       "tests/scopes.test.ts",
       "tests/servicestudio.client.test.ts",
       "tests/servicestudio.token.test.ts",
       "tests/servicestudio.unwrap.test.ts",
-      "tests/smoke.test.ts"
+      "tests/smoke.test.ts",
+      "tests/tools.test.ts"
     ]
   }
 });

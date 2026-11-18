@@ -1,0 +1,22 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+    
+    /*** creating IServerAction 'SaveContact' ***/
+    var saveContact = eSpace.CreateServerAction("SaveContact");
+    saveContact.Description = "SaveContact (synthetic)";
+    
+    var startNode = saveContact.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var sendMail2 = eSpace.ServerActions.Named("SendMail");
+    var sendMail = saveContact.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("SendMail");
+    sendMail.Action = sendMail2;
+    startNode.Target = sendMail;
+    var logVisit2 = eSpace.ServerActions.Named("LogVisit");
+    var logVisit = saveContact.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("LogVisit");
+    logVisit.Action = logVisit2;
+    sendMail.Target = logVisit;
+    var endNode = saveContact.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    logVisit.Target = endNode;
+}
+```

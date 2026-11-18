@@ -1,0 +1,7 @@
+```csharp
+(OutSystems.Model.IReference outSystemsUI) => {
+    // IServerEntitySignature (System)/User
+    var eSpace = outSystemsUI.GetESpace();
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+}
+```
