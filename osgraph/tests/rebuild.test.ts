@@ -3,18 +3,28 @@
  * against a fixture-backed fake reader.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadLayerRules } from "../src/layers/rules.js";
-import { rebuildScope, resolveScopeModules, formatProgress, stageModule, type RebuildProgressEvent } from "../src/rebuild/rebuild.js";
+import {
+  extractOpenModule,
+  rebuildScope,
+  resolveScopeModules,
+  formatProgress,
+  stageModule,
+  type RebuildProgressEvent
+} from "../src/rebuild/rebuild.js";
+import { rawManifestPath, rawModuleDir } from "../src/rebuild/raw.js";
+import { readStage } from "../src/rebuild/stage.js";
 import { OsgraphToolError } from "../src/servicestudio/types.js";
 import { readMeta, readSnapshot } from "../src/graph/index.js";
 import {
   app,
   demoPortalModule,
   demoServicesModule,
+  FakeReader,
   fakeSession,
   syntheticWideModule,
   syntheticXModule,
@@ -1019,5 +1029,164 @@ describe("stageModule — staged rebuild (ADR-0005)", () => {
       "TOKEN_EXPIRED"
     );
     expect(session.released).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #5: the single-module extraction primitive `extractOpenModule`, exercised directly against
+// the in-memory `FakeReader` (synthetic modules only — see PROVENANCE.md).
+// ---------------------------------------------------------------------------------------------
+
+const primitiveNow = () => new Date("2026-11-05T12:00:00.000Z");
+const PRIMITIVE_MODULE = "MOD_Demo_X_BL";
+
+function primitiveModule(): FakeModule {
+  return { ...syntheticXModule(), app: app(PRIMITIVE_MODULE, { key: "11111111-2222-3333-4444-555555555555", version: "42" }) };
+}
+
+describe("extractOpenModule — single-module extraction primitive (#5)", () => {
+  it("returns the extraction, timing, raw capture path, and the listing's key and version", async () => {
+    const graphDir = tmp();
+    const mod = primitiveModule();
+    const reader = new FakeReader([mod]);
+    const events: RebuildProgressEvent[] = [];
+    const out = await extractOpenModule({
+      reader,
+      scope: "demo",
+      app: mod.app,
+      retryDelayMs: 0,
+      fetchConcurrency: 1,
+      onProgress: (e) => events.push(e),
+      rawGraphDir: graphDir,
+      now: primitiveNow
+    });
+
+    expect(out.moduleKey).toBe("11111111-2222-3333-4444-555555555555");
+    expect(out.moduleVersion).toBe("42");
+    expect(out.extracted.module).toBe(PRIMITIVE_MODULE);
+    expect(out.extracted.nodes.length).toBeGreaterThan(0);
+    expect(out.timing.module).toBe(PRIMITIVE_MODULE);
+    expect(out.timing.requested).toBe(PRIMITIVE_MODULE);
+    expect(out.timing.concurrency).toBe(1);
+    expect(out.timing.durationMs).toBeGreaterThanOrEqual(0);
+    expect(Object.keys(out.timing.phases)).toContain("extract");
+
+    expect(out.rawCapturePath).toBe(rawModuleDir(graphDir, "demo", PRIMITIVE_MODULE));
+    expect(existsSync(rawManifestPath(graphDir, "demo", PRIMITIVE_MODULE))).toBe(true);
+
+    // It publishes no snapshot and writes no stage file: the only thing under graphDir is raw/.
+    expect(readdirSync(join(graphDir, "demo"))).toEqual(["raw"]);
+
+    // The progress stream is the per-module slice of a rebuild's stream: no session / done events.
+    expect(events[0]).toEqual({ type: "module-start", module: PRIMITIVE_MODULE, index: 1, total: 1, moduleType: "Reactive" });
+    expect(events[events.length - 1]?.type).toBe("module-done");
+    expect(events.some((e) => e.type === "session" || e.type === "done")).toBe(false);
+
+    // It only walks: no listApps, and the drain barrier was awaited with nothing left in flight.
+    expect(reader.calls.some((c) => c.tool === "listApps")).toBe(false);
+    expect(reader.drainCalls).toBe(1);
+    expect(reader.inFlightAtDrain).toEqual([0]);
+    expect(reader.inFlight).toBe(0);
+  });
+
+  it("without rawGraphDir writes no files and reports no raw capture path", async () => {
+    const mod = primitiveModule();
+    const reader = new FakeReader([mod]);
+    const out = await extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0 });
+    expect(out.rawCapturePath).toBeUndefined();
+    expect(out.extracted.module).toBe(PRIMITIVE_MODULE);
+    expect(reader.drainCalls).toBe(1);
+  });
+
+  it("produces the same extraction the staged entry point stages (one copy of the logic)", async () => {
+    const graphDir = tmp();
+    const mod = primitiveModule();
+    const direct = await extractOpenModule({
+      reader: new FakeReader([mod]),
+      scope: "demo",
+      app: mod.app,
+      retryDelayMs: 0,
+      fetchConcurrency: 4,
+      now: primitiveNow
+    });
+
+    const session = fakeSession([mod]);
+    const staged = await stageModule({
+      scope: { name: "demo", modules: [PRIMITIVE_MODULE, "MOD_Demo_Other_BL"] },
+      snapshotPath: join(graphDir, "demo", "graph.json"),
+      session,
+      rules,
+      module: PRIMITIVE_MODULE,
+      graphDir,
+      retryDelayMs: 0,
+      fetchConcurrency: 4,
+      now: primitiveNow
+    });
+    expect(staged.finalized).toBe(false);
+    const [entry] = readStage(graphDir, "demo").entries;
+    expect(JSON.parse(JSON.stringify(direct.extracted))).toEqual(entry?.extracted);
+  });
+
+  it("element-level failure is retried once, then skipped, and the walk continues", async () => {
+    const mod = primitiveModule();
+    const reader = new FakeReader([mod], { failures: { [`getClientAction:${PRIMITIVE_MODULE}:OSM004ToggleFlag`]: Infinity } });
+    const events: RebuildProgressEvent[] = [];
+    const out = await extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, onProgress: (e) => events.push(e) });
+    expect(out.extracted.skipped).toContainEqual({ kind: "ClientAction", name: "OSM004ToggleFlag", reason: "TOOL_ERROR" });
+    expect(reader.calls.filter((c) => c.tool === "getClientAction")).toHaveLength(2);
+    expect(reader.calls.some((c) => c.tool === "getServerAction")).toBe(true);
+    const outcomes = events.filter((e) => e.type === "element" && e.name === "OSM004ToggleFlag").map((e) => (e.type === "element" ? e.outcome : ""));
+    expect(outcomes).toEqual(["retry", "skipped"]);
+    expect(reader.drainCalls).toBe(1);
+  });
+
+  it("kind-level failure aborts with KIND_READ_FAILED, writes no manifest, and still drains", async () => {
+    const graphDir = tmp();
+    const mod = { ...syntheticWideModule(6), app: app("MOD_Demo_Wide_CW") };
+    const reader = new FakeReader([mod], { failures: { "getScreenNames:MOD_Demo_Wide_CW:": Infinity }, delayMs: () => 2 });
+    await expectCode(
+      extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4, rawGraphDir: graphDir }),
+      "KIND_READ_FAILED"
+    );
+    expect(existsSync(rawManifestPath(graphDir, "demo", "MOD_Demo_Wide_CW"))).toBe(false);
+    expect(reader.drainCalls).toBe(1);
+    expect(reader.inFlight).toBe(0);
+  });
+
+  it("a session-level error propagates unchanged and still drains", async () => {
+    const mod = primitiveModule();
+    const reader = new FakeReader([mod], { delayMs: () => 2 });
+    reader.getDataModel = async () => {
+      throw tokenExpiredError();
+    };
+    await expectCode(extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4 }), "TOKEN_EXPIRED");
+    expect(reader.drainCalls).toBe(1);
+    expect(reader.inFlight).toBe(0);
+  });
+
+  it("any thrown exception propagates and still drains", async () => {
+    const mod = primitiveModule();
+    const reader = new FakeReader([mod], { delayMs: () => 2 });
+    const boom = new Error("boom");
+    reader.getStructures = async () => {
+      throw boom;
+    };
+    await expect(extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4 })).rejects.toBe(boom);
+    expect(reader.drainCalls).toBe(1);
+    expect(reader.inFlight).toBe(0);
+  });
+
+  it("drain is awaited before control returns: the caller never sees a read in flight", async () => {
+    const mod = { ...syntheticWideModule(8), app: app("MOD_Demo_Wide_CW") };
+    const reader = new FakeReader([mod], {
+      failures: { "getStructures:MOD_Demo_Wide_CW:": Infinity },
+      delayMs: (c) => (c.tool === "getDataModel" ? 20 : 1)
+    });
+    await expectCode(
+      extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4 }),
+      "KIND_READ_FAILED"
+    );
+    expect(reader.inFlight).toBe(0);
+    expect(reader.drainCalls).toBe(1);
   });
 });
