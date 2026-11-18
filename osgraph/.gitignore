@@ -7,3 +7,9 @@ token.txt
 # F0 raw element-text captures (<graphDir>/<scope>/raw/). Reproducible from Service Studio,
 # large, and never reviewed: .osgraph/ already covers the default graphDir, this covers a relocated one.
 raw/
+
+# Published test files added after the root allowlist (repository root .gitignore, `osgraph/tests/*`)
+# was last edited. Lower-level .gitignore patterns override higher ones, so a negation here
+# re-admits a file the root list ignores; keep this list in step with vitest.published.config.ts.
+# Only tests over synthetic or in-memory inputs belong here (see tests/PROVENANCE.md).
+!tests/run.test.ts

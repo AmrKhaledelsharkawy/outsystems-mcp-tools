@@ -1091,6 +1091,94 @@ export interface StageOutcome {
   stagePath: string;
 }
 
+export interface FinalizeStageOptions {
+  scope: ScopeDefinition;
+  graphDir: string;
+  snapshotPath: string;
+  rules: LayerRules;
+  now?: () => Date;
+  /** Epoch ms the caller's work started; `result.durationMs` is measured from it. Defaults to now. */
+  startedAt?: number;
+  fetchConcurrency?: number;
+  rawGraphDir?: string;
+}
+
+export interface FinalizeStageResult {
+  stagedModules: string[];
+  missingModules: string[];
+  unreadableStageFiles: string[];
+  stageAge: StageOutcome["stageAge"];
+  /** Present only when every scope module was staged and `graph.json` + `flows.json` were written. */
+  outcome?: RebuildOutcome;
+}
+
+/**
+ * The finalize half of `stageModule`, with no Service Studio involved: when every scope module has a
+ * stage entry, builds the snapshot from them in scope order (the same `buildOutcome` as
+ * `rebuildScope`), writes it, and clears the stage. Otherwise reports what is still missing and
+ * writes nothing. Exported so a resumed `osgraph run` whose stage is already complete (a finalize
+ * that threw, or a kill between the last stage write and the finalize) can finish without re-reading.
+ */
+export function finalizeStage(options: FinalizeStageOptions): FinalizeStageResult {
+  const { scope, graphDir, snapshotPath, rules } = options;
+  const now = options.now ?? (() => new Date());
+  const startedAt = options.startedAt ?? Date.now();
+  const fetchConcurrency = resolveFetchConcurrency(options.fetchConcurrency);
+  const { entries, unreadable } = readStage(graphDir, scope.name);
+  const missingModules = missingFromStage(scope.modules, entries);
+  const stagedTimes = entries.map((e) => Date.parse(e.stagedAt)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+  const stageAge =
+    stagedTimes.length > 0
+      ? {
+          oldest: new Date(stagedTimes[0]).toISOString(),
+          newest: new Date(stagedTimes[stagedTimes.length - 1]).toISOString(),
+          spanMs: stagedTimes[stagedTimes.length - 1] - stagedTimes[0]
+        }
+      : null;
+  const base: FinalizeStageResult = {
+    stagedModules: entries.map((e) => e.module),
+    missingModules,
+    unreadableStageFiles: unreadable,
+    stageAge
+  };
+  if (missingModules.length > 0) return base;
+
+  // Scope complete: finalize in scope order so the snapshot matches the all-at-once one.
+  const byName = new Map(entries.map((e) => [e.module.toLowerCase(), e]));
+  const ordered: StageEntry[] = [];
+  for (const m of scope.modules) {
+    const e = byName.get(m.toLowerCase());
+    if (e && !ordered.includes(e)) ordered.push(e);
+  }
+  const outcome = buildOutcome({
+    scopeName: scope.name,
+    snapshotPath,
+    rules,
+    now: now(),
+    extracted: ordered.map((e) => e.extracted),
+    perModuleTiming: ordered.map((e) => ({
+      module: e.module,
+      requested: e.requestedAs ?? e.module,
+      durationMs: e.durationMs,
+      referencedOnlyCount: e.referencedOnlyCount,
+      phases: e.phaseDurationsMs,
+      concurrency: e.concurrency ?? fetchConcurrency
+    })),
+    startedAt,
+    fetchConcurrency,
+    stageAge,
+    flows: { graphDir: options.rawGraphDir ?? graphDir, modules: scope.modules }
+  });
+  // The snapshot is already published; a stage file we cannot delete (locked, scanned, read-only)
+  // must not turn a successful rebuild into INTERNAL_ERROR. Worst case it is re-read next time.
+  try {
+    clearStage(graphDir, scope.name);
+  } catch {
+    /* best effort */
+  }
+  return { ...base, outcome };
+}
+
 /**
  * ADR-0005's staged path: read **one** scope module, persist its extraction, and finalize once every
  * module of the scope is staged. Only the named module has to be open, so the caller can run
@@ -1158,17 +1246,16 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     if (walked.timing.requested !== resolved.app.name) entry.requestedAs = walked.timing.requested;
     const stagePathWritten = writeStageEntry(graphDir, entry);
 
-    const { entries, unreadable } = readStage(graphDir, scope.name);
-    const missingModules = missingFromStage(scope.modules, entries);
-    const stagedTimes = entries.map((e) => Date.parse(e.stagedAt)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
-    const stageAge =
-      stagedTimes.length > 0
-        ? {
-            oldest: new Date(stagedTimes[0]).toISOString(),
-            newest: new Date(stagedTimes[stagedTimes.length - 1]).toISOString(),
-            spanMs: stagedTimes[stagedTimes.length - 1] - stagedTimes[0]
-          }
-        : null;
+    const fin = finalizeStage({
+      scope,
+      graphDir,
+      snapshotPath,
+      rules,
+      now,
+      startedAt,
+      fetchConcurrency,
+      ...(options.rawGraphDir !== undefined ? { rawGraphDir: options.rawGraphDir } : {})
+    });
     const staged: StagedModuleSummary = {
       module: entry.module,
       nodeCount: entry.extracted.nodes.length,
@@ -1184,50 +1271,16 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     const base: StageOutcome = {
       mode: "staged",
       staged,
-      stagedModules: entries.map((e) => e.module),
-      missingModules,
-      unreadableStageFiles: unreadable,
-      stageAge,
+      stagedModules: fin.stagedModules,
+      missingModules: fin.missingModules,
+      unreadableStageFiles: fin.unreadableStageFiles,
+      stageAge: fin.stageAge,
       finalized: false,
       stagePath: stagePathWritten
     };
-    if (missingModules.length > 0) return base;
-
-    // Scope complete: finalize in scope order so the snapshot matches the all-at-once one.
-    const byName = new Map(entries.map((e) => [e.module.toLowerCase(), e]));
-    const ordered: StageEntry[] = [];
-    for (const m of scope.modules) {
-      const e = byName.get(m.toLowerCase());
-      if (e && !ordered.includes(e)) ordered.push(e);
-    }
-    const outcome = buildOutcome({
-      scopeName: scope.name,
-      snapshotPath,
-      rules,
-      now: now(),
-      extracted: ordered.map((e) => e.extracted),
-      perModuleTiming: ordered.map((e) => ({
-        module: e.module,
-        requested: e.requestedAs ?? e.module,
-        durationMs: e.durationMs,
-        referencedOnlyCount: e.referencedOnlyCount,
-        phases: e.phaseDurationsMs,
-        concurrency: e.concurrency ?? fetchConcurrency
-      })),
-      startedAt,
-      fetchConcurrency,
-      stageAge,
-      flows: { graphDir: options.rawGraphDir ?? graphDir, modules: scope.modules }
-    });
-    // The snapshot is already published; a stage file we cannot delete (locked, scanned, read-only)
-    // must not turn a successful rebuild into INTERNAL_ERROR. Worst case it is re-read next time.
-    try {
-      clearStage(graphDir, scope.name);
-    } catch {
-      /* best effort */
-    }
-    emit({ type: "done", durationMs: outcome.result.durationMs, snapshotPath });
-    return { ...base, finalized: true, outcome };
+    if (fin.outcome === undefined) return base;
+    emit({ type: "done", durationMs: fin.outcome.result.durationMs, snapshotPath });
+    return { ...base, finalized: true, outcome: fin.outcome };
   } finally {
     // Same barrier as `rebuildScope`, and it matters more here: the staged loop's whole shape is
     // open → stage → close, so a `closeModule` follows this return within seconds (OSG-016 §B1).

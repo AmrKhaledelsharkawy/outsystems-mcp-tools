@@ -139,3 +139,15 @@ What is **not** decided here — and why the assertion is still untouched — is
 right: assert a five-call listing phase (4 + 1 at width 4), or stop issuing the service listing for
 modules that cannot have service actions so the wave is four again. That is a behaviour decision
 about `rebuild.ts`, outside a test-publishing change.
+
+## Published after the root allowlist: `osgraph/.gitignore`
+
+`run.test.ts` (#48, `osgraph run`) is published. It drives the run loop against the real #6 osopener
+adapter over fake tool handlers and fake UI probes, and osgraph's fixture-backed `FakeReader`
+serving `syntheticWideModule` modules (`alpha`, `beta`, `gamma`, `delta`: arbitrary identifiers). Its
+CLI cases spawn `dist/cli.js` with a loopback-only progress site and an osopener location that does
+not exist, so nothing reaches Service Studio, osopener or the network.
+
+It is re-admitted by a negation in **`osgraph/.gitignore`** rather than in the repository-root list,
+so the change stays inside the `osgraph/` package. Lower-level `.gitignore` files override higher
+ones; the effect is the same as a root `!osgraph/tests/run.test.ts` line.

@@ -185,11 +185,16 @@ describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start wi
     loadConfig2({}, { cwd: "C:/w", existsSync: () => false, requireServiceStudio: requiresServiceStudioAtStart(command, table) });
 
   it2("serve and reextract start without an endpoint", () => {
-    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false });
+    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, run: true });
     expect2(requiresServiceStudioAtStart("serve")).toBe(false);
     expect2(requiresServiceStudioAtStart("reextract")).toBe(false);
     expect2(load("serve").serviceStudioUrl).toBeUndefined();
     expect2(load("reextract").serviceStudioUrl).toBeUndefined();
+  });
+
+  it2("run (#48) drives Studio, so it fails at start with CONFIG_MISSING when no endpoint is set", () => {
+    expect2(requiresServiceStudioAtStart("run")).toBe(true);
+    expect2(() => load("run")).toThrow(ConfigError2);
   });
 
   it2("unknown commands and Object.prototype keys answer false, so they reach the usage error", () => {
