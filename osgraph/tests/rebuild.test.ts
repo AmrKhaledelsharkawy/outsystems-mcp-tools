@@ -1177,16 +1177,22 @@ describe("extractOpenModule — single-module extraction primitive (#5)", () => 
   });
 
   it("drain is awaited before control returns: the caller never sees a read in flight", async () => {
+    // The walker's own pool awaits every sibling before it rethrows, so a read can only outlive the
+    // walk when the reader holds one the walk did not await — the real client's queued-request case.
+    // Simulate exactly that: getStructures leaves an orphaned 20 ms read in flight and then fails
+    // with a session error. drain() must be entered with that read outstanding (proving the barrier
+    // is load-bearing, not a no-op on a settled pool) and the rejection must not reach the caller
+    // until it has settled.
     const mod = { ...syntheticWideModule(8), app: app("MOD_Demo_Wide_CW") };
-    const reader = new FakeReader([mod], {
-      failures: { "getStructures:MOD_Demo_Wide_CW:": Infinity },
-      delayMs: (c) => (c.tool === "getDataModel" ? 20 : 1)
-    });
-    await expectCode(
-      extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4 }),
-      "KIND_READ_FAILED"
-    );
-    expect(reader.inFlight).toBe(0);
+    const reader = new FakeReader([mod], { delayMs: (c) => (c.tool === "getScreen" ? 20 : 0) });
+    reader.getStructures = async (m: string) => {
+      void reader.getScreen(m, "orphan").catch(() => undefined);
+      throw tokenExpiredError();
+    };
+    await expectCode(extractOpenModule({ reader, scope: "demo", app: mod.app, retryDelayMs: 0, fetchConcurrency: 4 }), "TOKEN_EXPIRED");
     expect(reader.drainCalls).toBe(1);
+    expect(reader.inFlightAtDrain[0]).toBeGreaterThan(0);
+    expect(reader.inFlight).toBe(0);
+    expect(reader.completions.some((c) => c.tool === "getScreen" && c.name === "orphan")).toBe(true);
   });
 });
