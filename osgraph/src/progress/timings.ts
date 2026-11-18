@@ -15,14 +15,16 @@
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { resolveScopeArtifactPaths } from "../graph/io.js";
 import type { RebuildPhase } from "../rebuild/rebuild.js";
+import { SCOPE_NAME_RE } from "../scopes/name.js";
 import type { ModuleCost, TimingsFile } from "./types.js";
 
 export const TIMINGS_FILENAME = "timings.json";
 
 /** `<graphDir>/<scope>/timings.json`. */
 export function timingsPath(graphDir: string, scope: string): string {
-  return join(graphDir, scope, TIMINGS_FILENAME);
+  return join(resolveScopeArtifactPaths(graphDir, scope).dir, TIMINGS_FILENAME);
 }
 
 function readJson<T>(path: string): T | null {
@@ -55,7 +57,10 @@ export function readAllTimings(graphDir: string): Map<string, ModuleCost> {
   try {
     scopes = readdirSync(graphDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
-      .map((e) => e.name);
+      .map((e) => e.name)
+      // Only a valid scope name can be a scope dir osgraph wrote timings into; anything else
+      // (a hand-made `x (1)` folder) is skipped rather than failing the whole ETA read.
+      .filter((name) => SCOPE_NAME_RE.test(name) && name !== "." && name !== "..");
   } catch {
     return merged;
   }

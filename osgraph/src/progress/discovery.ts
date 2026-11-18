@@ -139,6 +139,9 @@ export class ChildProcessDiscovery implements DiscoveryRunner {
     const names = new Set<string>();
     for (const scope of readScopes(this.options.scopesDir)) {
       for (const module of scope.modules) names.add(module);
+      // A stray file such as `demo - Copy.json` is not a scope name and can own no snapshot:
+      // keep its modules (as before) but do not hand its name to the validating resolver.
+      if (!SCOPE_NAME_RE.test(scope.name) || scope.name === "." || scope.name === "..") continue;
       const graph = readJson<{ nodes?: { kind?: string; module?: string }[] }>(
         resolveScopeSnapshotPath(this.options.graphDir, scope.name),
         {}

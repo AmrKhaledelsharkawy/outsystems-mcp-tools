@@ -411,4 +411,12 @@ describe("ChildProcessDiscovery", () => {
 
     expect(runner.knownModules()).toEqual(["MOD_FromCache_SL", "MOD_FromGraph_CW", "MOD_FromScope_BL"]);
   });
+
+  it("tolerates a stray scope file whose name is not a scope name, still listing its modules", () => {
+    writeFileSync(join(root, "scopes", "one.json"), JSON.stringify({ name: "one", modules: ["MOD_FromScope_BL"] }));
+    writeFileSync(join(root, "scopes", "one - Copy.json"), JSON.stringify({ modules: ["MOD_FromCopy_BL"] }));
+    writeFileSync(join(root, "scopes", "x (1).json"), JSON.stringify({ modules: ["MOD_FromDup_BL"] }));
+
+    expect(runner.knownModules()).toEqual(["MOD_FromCopy_BL", "MOD_FromDup_BL", "MOD_FromScope_BL"]);
+  });
 });

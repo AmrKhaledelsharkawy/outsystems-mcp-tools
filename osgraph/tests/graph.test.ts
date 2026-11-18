@@ -5,6 +5,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flowsPath } from "../src/flows/io.js";
 import { scopeFiles } from "../src/progress/state.js";
+import { readAllTimings, timingsPath } from "../src/progress/timings.js";
+import { rawDir } from "../src/rebuild/raw.js";
+import { stageDir } from "../src/rebuild/stage.js";
+import { tools } from "../src/tools/index.js";
 import { completenessFor, createToolContext } from "../src/tools/tool.js";
 import type { OsgraphConfig } from "../src/config.js";
 import type { ExtractedModule } from "../src/extract/index.js";
@@ -534,5 +538,65 @@ describe("resolveScopeArtifactPaths: the one scope-artifact path seam (issue #4)
   it("an invalid scope name still reports a never-rebuilt graphCompleteness, as before the seam", () => {
     const config = { graphDir, scopesDir: join(graphDir, "scopes") } as unknown as OsgraphConfig;
     expect(completenessFor(createToolContext(config), "a/b")).toEqual({ skippedCount: 0, lastRebuildAt: null });
+  });
+
+  it("an injected snapshotPath override receives the raw scope string, unvalidated", () => {
+    const config = { graphDir, scopesDir: join(graphDir, "scopes") } as unknown as OsgraphConfig;
+    const seen: string[] = [];
+    const ctx = createToolContext(config, {
+      snapshotPath: (scope) => {
+        seen.push(scope);
+        return `/elsewhere/${scope}.json`;
+      }
+    });
+    expect(ctx.snapshotPath("a/b")).toBe("/elsewhere/a/b.json");
+    expect(seen).toEqual(["a/b"]);
+  });
+
+  it("timings, stage and raw dirs sit under the resolver's scope dir and reject a bad name", () => {
+    expect(timingsPath(graphDir, "demo")).toBe(join(graphDir, "demo", "timings.json"));
+    expect(stageDir(graphDir, "demo")).toBe(join(graphDir, "demo", "stage"));
+    expect(rawDir(graphDir, "demo")).toBe(join(graphDir, "demo", "raw"));
+    for (const fn of [timingsPath, stageDir, rawDir]) {
+      expect(() => fn(graphDir, "../x")).toThrow(expect.objectContaining({ code: "SCOPE_INVALID" }));
+    }
+  });
+
+  it("readAllTimings skips a graph-dir folder that is not a scope name instead of throwing", () => {
+    const root = mkdtempSync(join(tmpdir(), "osgraph-timings-"));
+    try {
+      mkdirSync(join(root, "x (1)"), { recursive: true });
+      mkdirSync(join(root, "demo"), { recursive: true });
+      writeFileSync(join(root, "x (1)", "timings.json"), JSON.stringify({ modules: {} }));
+      expect(() => readAllTimings(root)).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  describe("offline tools answer SCOPE_INVALID for a scope that is not a single safe segment", () => {
+    const cases: { tool: string; args: Record<string, unknown> }[] = [
+      { tool: "getFlow", args: { element: "Foo" } },
+      { tool: "searchFlows", args: { pattern: "x" } },
+      { tool: "queryPath", args: { from: "osgraph://a/Entity/B", to: "osgraph://a/Entity/C" } },
+      { tool: "queryImpact", args: { nodeId: "osgraph://a/Entity/B", direction: "dependents" } },
+      { tool: "listViolations", args: {} }
+    ];
+    for (const { tool, args } of cases) {
+      it.each(["a b", "a/b", "../x"])(`${tool} with scope %j`, async (scope) => {
+        const root = mkdtempSync(join(tmpdir(), "osgraph-seam-"));
+        try {
+          const config = { graphDir: join(root, "g"), scopesDir: join(root, "s") } as unknown as OsgraphConfig;
+          const ctx = createToolContext(config, { env: {}, log: () => undefined });
+          const handler = tools.find((t) => t.name === tool)?.handler;
+          if (handler === undefined) throw new Error(`no tool ${tool}`);
+          const res = (await handler({ scope, ...args }, ctx)) as { result?: unknown; error?: { code: string } };
+          expect(res.result).toBeUndefined();
+          expect(res.error?.code).toBe("SCOPE_INVALID");
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
   });
 });
