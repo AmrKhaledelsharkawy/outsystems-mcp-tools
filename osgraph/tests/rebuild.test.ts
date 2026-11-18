@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadLayerRules } from "../src/layers/rules.js";
 import { rebuildScope, resolveScopeModules, formatProgress, stageModule, type RebuildProgressEvent } from "../src/rebuild/rebuild.js";
 import { OsgraphToolError } from "../src/servicestudio/types.js";
@@ -170,6 +171,50 @@ describe("rebuildScope", () => {
     expect(events.filter((e) => e.type === "module-start")).toHaveLength(2);
     expect(events.at(-1)?.type).toBe("done");
     for (const e of events) expect(typeof formatProgress(e)).toBe("string");
+  });
+
+  it("demoportal alone: commented externals resolve, the opaque AddDependency is the one AMBIGUOUS edge, the unread target is a placeholder", async () => {
+    const snapshotPath = join(tmp(), "demo", "graph.json");
+    const out = await rebuildScope({
+      scope: { name: "demo", modules: ["demoportal"] },
+      snapshotPath,
+      session: fakeSession([demoPortalModule()]),
+      rules,
+      now: fixedNow,
+      retryDelayMs: 0
+    });
+    const snapshot = readSnapshot(snapshotPath);
+    const ids = snapshot.nodes.map((n) => n.id);
+
+    // (a) ADR-0006: every `// I…EntitySignature <Module>/<Name>` comment becomes an external Entity
+    // node — counted off the fixture text, not copied from a run.
+    const dataModel = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "fixtures", "synthetic", "demoportal", "module", "dataModel.txt"),
+      "utf8"
+    );
+    const commented = dataModel.split(/\r?\n/).filter((l) => /^\s*\/\/ I\w*EntitySignature /.test(l)).length;
+    expect(commented).toBe(12);
+    // the first one sits behind `var eSpace = …`, as Studio writes it
+    expect(ids).toContain("osgraph://OutSystemsUI/Entity/AccordionIconPosition");
+    expect(ids).toContain("osgraph://System/Entity/User");
+    expect(ids).toContain("osgraph://MOD_DEMO_Common_CW/Entity/AlertType");
+    const externalEntities = snapshot.nodes.filter(
+      (n) => n.external === true && n.kind === "Entity" && !n.id.startsWith("osgraph://external/")
+    );
+    expect(externalEntities).toHaveLength(commented);
+
+    // (b) the uncommented, opaque `legacySource` AddDependency is the single AMBIGUOUS edge
+    const ambiguous = snapshot.links.filter((l) => l.confidence === "AMBIGUOUS");
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0]?.source).toBe("osgraph://demoportal/Entity/DemoVisit");
+    expect(ambiguous[0]?.target.startsWith("osgraph://external/")).toBe(true);
+
+    // (c) ...and therefore exactly one unresolved external for this module alone
+    expect(out.result.unresolvedExternalCount).toBe(1);
+
+    // (d) ADR-0009: `SignIn` navigates to `MainFlow/Dashboard`, which the listing does not contain
+    expect(snapshot.nodes.find((n) => n.id === "osgraph://demoportal/Screen/MainFlow/Dashboard")?.placeholder).toBe(true);
+    expect(snapshot.nodes.find((n) => n.id === "osgraph://demoportal/Block/DemoPatterns/Card")?.placeholder).toBe(true);
   });
 
   it("is byte-identical across two rebuilds (graph.json), meta differs only by timestamp", async () => {
@@ -551,7 +596,7 @@ describe("OSG-016 — concurrent element fetches", () => {
         fetchConcurrency: width,
         delayMs: () => 2
       });
-      // 10 client actions and a 4-call listing wave: there is always enough work to fill the pool.
+      // 10 client actions and a 5-call listing wave: there is always enough work to fill the pool.
       expect(session.reader.maxInFlight).toBe(Math.min(width, 10));
     }
   });
@@ -572,11 +617,13 @@ describe("OSG-016 — concurrent element fetches", () => {
       fetchConcurrency: 4
     });
     expect(session.reader.maxInFlight).toBe(4);
-    // ...and it is the ELEMENT phase that fills it, not just the listing wave: each fetched kind has
-    // more than four entries, so for every one of them there is a moment four of its texts are out.
+    // ...and it is the ELEMENT phase that fills it, not just the listing wave. Premise: each fetched
+    // kind has more than four entries...
     const fetched = (tool: string): number => session.reader.calls.filter((c) => c.tool === tool).length;
     for (const tool of ["getScreen", "getWebBlock", "getClientAction", "getServerAction"]) {
       expect(fetched(tool), tool).toBeGreaterThan(4);
+      // ...and for every one of them there was a moment four of its own texts were out at once.
+      expect(session.reader.maxInFlightByTool.get(tool), tool).toBe(4);
     }
     expect(out.result.perModule[0]?.concurrency).toBe(4);
   });

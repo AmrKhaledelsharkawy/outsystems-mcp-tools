@@ -212,6 +212,9 @@ export class FakeReader implements ServiceStudioReader {
   private readonly failures: Map<string, number>;
   inFlight = 0;
   maxInFlight = 0;
+  /** Per tool: calls of that tool in flight right now, and the most there ever were at once. */
+  readonly inFlightByTool = new Map<string, number>();
+  readonly maxInFlightByTool = new Map<string, number>();
   /** How many times `drain()` was awaited (OSG-016 §B1). */
   drainCalls = 0;
   /** `inFlight` at the moment `drain()` was last entered — must be 0 by the time it resolves. */
@@ -226,6 +229,9 @@ export class FakeReader implements ServiceStudioReader {
     this.calls.push({ tool, module, ...(name !== undefined ? { name } : {}) });
     this.inFlight++;
     this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    const toolInFlight = (this.inFlightByTool.get(tool) ?? 0) + 1;
+    this.inFlightByTool.set(tool, toolInFlight);
+    this.maxInFlightByTool.set(tool, Math.max(this.maxInFlightByTool.get(tool) ?? 0, toolInFlight));
     try {
       await Promise.resolve();
       const delay = this.options.delayMs?.({ tool, module, ...(name !== undefined ? { name } : {}) }) ?? 0;
@@ -241,6 +247,7 @@ export class FakeReader implements ServiceStudioReader {
       return produce(m);
     } finally {
       this.inFlight--;
+      this.inFlightByTool.set(tool, (this.inFlightByTool.get(tool) ?? 1) - 1);
       this.completions.push({ tool, module, ...(name !== undefined ? { name } : {}) });
     }
   }
