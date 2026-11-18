@@ -1,0 +1,19 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    // IServerEntitySignature (System)/User
+    var user = (OutSystems.Model.Data.IServerEntitySignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCsYsTeMaAaAaAa*DeMoKeY00000000000012"));
+    
+    /*** creating IServerAction 'LogVisit' ***/
+    var logVisit = eSpace.CreateServerAction("LogVisit");
+    logVisit.Description = "LogVisit (synthetic)";
+    
+    var startNode = logVisit.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var demoVisit = eSpace.Entities.Named("DemoVisit");
+    var createDemoVisit2 = demoVisit.Actions.Named("CreateDemoVisit");
+    var createDemoVisit = logVisit.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("CreateDemoVisit");
+    createDemoVisit.Action = createDemoVisit2;
+    startNode.Target = createDemoVisit;
+    var endNode = logVisit.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    createDemoVisit.Target = endNode;
+}
+```

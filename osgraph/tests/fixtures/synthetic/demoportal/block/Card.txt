@@ -1,0 +1,7 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlowSignature demoPatterns) => {
+    // IMobileBlockSignature MOD_DEMO_Common_CW/DemoPatterns/Card
+    var eSpace = demoPatterns.GetESpace();
+    var card = (OutSystems.Model.UI.Mobile.IMobileBlockSignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("SyNtHeTiCbLoCkAaAaAaAa*DeMoCard000000000000"));
+}
+```

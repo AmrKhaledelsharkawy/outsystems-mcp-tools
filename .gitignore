@@ -31,12 +31,18 @@ osgraph/tests/*
 !osgraph/tests/progress.discover.test.ts
 !osgraph/tests/progress.server.test.ts
 !osgraph/tests/progress.state.test.ts
+!osgraph/tests/raw.test.ts
+!osgraph/tests/rebuild.fake.ts
+!osgraph/tests/rebuild.test.ts
+!osgraph/tests/reextract.test.ts
 !osgraph/tests/scopes.test.ts
 !osgraph/tests/servicestudio.client.test.ts
 !osgraph/tests/servicestudio.fake.ts
 !osgraph/tests/servicestudio.token.test.ts
 !osgraph/tests/servicestudio.unwrap.test.ts
 !osgraph/tests/smoke.test.ts
+!osgraph/tests/tools.helpers.ts
+!osgraph/tests/tools.test.ts
 # Only the hand-written fixtures are published. `fixtures/*` re-ignores everything
 # inside the re-admitted directory, so the real-capture fixture directories and the
 # provenance README stay local — and, unlike a denylist, this file never has to name

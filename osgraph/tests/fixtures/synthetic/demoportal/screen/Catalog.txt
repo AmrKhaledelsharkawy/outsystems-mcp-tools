@@ -1,0 +1,62 @@
+```csharp
+(OutSystems.Model.UI.Mobile.IMobileFlow mainFlow) => {
+    
+    /*** creating IMobileScreen 'Catalog' ***/
+    var catalog2 = mainFlow.CreateScreen("Catalog");
+    var eSpace = mainFlow.GetESpace();
+    var registered = eSpace.SystemRoles.OfType<OutSystems.Model.Logic.ISystemRole>().Named("Registered");
+    catalog2.Roles.Add(registered);
+    catalog2.Description = null; // default value
+    catalog2.PageName = "catalog";
+    catalog2.SetTitle("\"Catalog\"");
+    catalog2.OnDestroy.Destination = null; // default value
+    catalog2.OnReady.Destination = null; // default value
+    catalog2.OnRender.Destination = null; // default value
+    
+    var openItem = catalog2.CreateScreenAction("OpenItem");
+    openItem.Description = null; // default value
+    
+    var startNode = openItem.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    
+    var getCatalog = openItem.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("GetCatalog");
+    var getCatalog2 = eSpace.ServerActions.Named("GetCatalog");
+    getCatalog.Action = getCatalog2;
+    getCatalog.HorizontalPosition = 3200;
+    getCatalog.VerticalPosition = 3200;
+    startNode.Target = getCatalog;
+    
+    var formatDate = openItem.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("FormatDate");
+    var formatDate2 = eSpace.ClientActions.Named("FormatDate");
+    formatDate.Action = formatDate2;
+    formatDate.HorizontalPosition = 3200;
+    formatDate.VerticalPosition = 4100;
+    getCatalog.Target = formatDate;
+    
+    var endNode = openItem.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    formatDate.Target = endNode;
+    catalog2.OnInitialize.Destination = null; // default value
+    
+    var layoutMainInstance = catalog2.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    layoutMainInstance.CustomStyle = null; // default value
+    var mOD_DEMO_Layouts = eSpace.References.Named("MOD_DEMO_Layouts");
+    var demoLayouts = mOD_DEMO_Layouts.MobileFlows.Named("DemoLayouts");
+    var layoutMain = demoLayouts.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlockSignature>().Named("LayoutMain");
+    layoutMainInstance.SourceBlock = layoutMain;
+    var hasFixedHeader = layoutMain.InputParameters.Named("HasFixedHeader");
+    layoutMainInstance.SetArgumentValue(hasFixedHeader, "True");
+    
+    var placeholderContentWidget = layoutMainInstance.PlaceholdersContent.FirstOrDefault(p => p.Placeholder?.Name == "MainContent");
+    var tileInstance = placeholderContentWidget.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    tileInstance.CustomStyle = null; // default value
+    var commonFlow = eSpace.MobileFlows.Named("Common");
+    var tile = commonFlow.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlock>().Named("Tile");
+    tileInstance.SourceBlock = tile;
+    var eventHandler1 = tileInstance.EventHandlers.FirstOrDefault(e => e.Event.Name == "Clicked");
+    eventHandler1.Handler = openItem;
+    var cardInstance = placeholderContentWidget.CreateWidget<OutSystems.Model.UI.Mobile.Widgets.IMobileBlockInstanceWidget>();
+    cardInstance.CustomStyle = null; // default value
+    var demoPatternsFlow = eSpace.MobileFlows.Named("DemoPatterns");
+    var card = demoPatternsFlow.Nodes.OfType<OutSystems.Model.UI.Mobile.IMobileBlock>().Named("Card");
+    cardInstance.SourceBlock = card;
+}
+```

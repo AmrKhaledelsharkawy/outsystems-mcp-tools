@@ -1,0 +1,11 @@
+{
+  "screens": [],
+  "blocks": [],
+  "cacts": [],
+  "sacts": [],
+  "services": [
+    { "Name": "SL_GetCatalog", "Description": "", "IsReferenced": true },
+    { "Name": "SL_LogVisit", "Description": "", "IsReferenced": true },
+    { "Name": "SL_SaveContact", "Description": "", "IsReferenced": true }
+  ]
+}

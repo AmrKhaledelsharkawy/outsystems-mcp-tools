@@ -1,0 +1,24 @@
+```csharp
+(OutSystems.Model.IESpace eSpace) => {
+    
+    /*** creating IClientAction 'ValidateEmail' ***/
+    var validateEmail = eSpace.CreateClientAction("ValidateEmail");
+    validateEmail.Description = "ValidateEmail (synthetic)";
+    validateEmail.Public = false; // default value
+    
+    var startNode = validateEmail.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    validateEmail.Function = true;
+    var email = validateEmail.CreateInputParameter("Email");
+    email.DataType = eSpace.EmailType;
+    var ifNode = validateEmail.CreateNode<OutSystems.Model.Logic.Nodes.IIfNode>().ConnectedBelow(startNode, 2057);
+    ifNode.SetCondition("Index(Email, \"@\") > 0");
+    var endNode = validateEmail.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    var formatDate = validateEmail.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteClientActionNode>("FormatDate");
+    var formatDate2 = eSpace.ClientActions.Named("FormatDate");
+    formatDate.Action = formatDate2;
+    var endNode2 = validateEmail.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>();
+    ifNode.TrueTarget = endNode;
+    ifNode.FalseTarget = formatDate;
+    formatDate.Target = endNode2;
+}
+```
