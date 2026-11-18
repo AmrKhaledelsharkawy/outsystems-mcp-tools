@@ -163,6 +163,124 @@ export interface OsopenerAdapter {
   owns(module: string): boolean;
   /** Modules this process opened and has not yet closed, in the order they were opened. */
   ownedModules(): string[];
+  /**
+   * Read-mostly probes of Studio's UI (foreground, the open dialog, a screenshot), for a caller that
+   * retries opens (#48 `osgraph run`). Absent when the adapter was built without osopener's helper.
+   */
+  readonly ui?: StudioUi;
+}
+
+/** What osopener's foreground probe reports. */
+export interface StudioForeground {
+  /** True when Service Studio's process owns the foreground window. */
+  isStudio: boolean;
+  /** Title of the foreground window, whoever owns it. */
+  title: string;
+}
+
+/**
+ * The few UI probes a retrying open loop needs, over osopener's UI helper. Each one is a single
+ * helper step; none of them opens or closes a module. `dismissOpenDialog` is the only one that sends
+ * input, it is scoped to the "Open from Environment" dialog by name, and it does NOT report whether
+ * it worked: the caller must check `openDialogPresent()` before and after, so a "dismissed" log line
+ * is never written for a dialog that was never up.
+ */
+export interface StudioUi {
+  foreground(): Promise<StudioForeground>;
+  /** Asks Studio to take the foreground. The next `foreground()` is the verdict, not this call. */
+  focus(): Promise<void>;
+  /** True when an "Open from Environment" window is up right now. */
+  openDialogPresent(): Promise<boolean>;
+  /** Clicks into the "Open from Environment" dialog, then sends Esc. Never touches a save prompt. */
+  dismissOpenDialog(): Promise<void>;
+  /** Captures the screen to `outPath`; resolves the written path, or null when no capture was taken. */
+  screenshot(outPath: string): Promise<string | null>;
+}
+
+/** The title osopener's open step drives; the only dialog `dismissOpenDialog` may touch. */
+export const OPEN_DIALOG_TITLE = "Open from Environment";
+
+/** osopener's helper, structurally (`osopener/src/helper.ts` `HelperRunner`). */
+export interface OsopenerHelper {
+  run(command: string, args?: Record<string, string | number | boolean>, timeoutMs?: number): Promise<Record<string, unknown>>;
+}
+
+/** Thrown by the helper-backed UI when osopener's helper resolves `{ ok: false, error }` instead of throwing. */
+export class StudioUiError extends Error {
+  readonly code: string;
+  readonly command: string;
+  constructor(command: string, code: string, message: string) {
+    super(`helper ${command} failed: ${code}: ${message}`);
+    this.name = "StudioUiError";
+    this.code = code;
+    this.command = command;
+  }
+}
+
+/**
+ * Runs one helper command and throws when the helper reports failure. osopener's helper RESOLVES
+ * `{ ok: false, error }` for most failures (Studio not found, UIA errors, not foreground, a save
+ * prompt), so a probe that ignored `ok` would read a failed dump as "no dialog" and log a recovery
+ * that never happened.
+ */
+async function runChecked(
+  helper: OsopenerHelper,
+  command: string,
+  args?: Record<string, string | number | boolean>
+): Promise<Record<string, unknown>> {
+  const r = await helper.run(command, args);
+  if (r["ok"] === false) {
+    const error = (r["error"] ?? {}) as { code?: unknown; message?: unknown };
+    throw new StudioUiError(
+      command,
+      typeof error.code === "string" && error.code.length > 0 ? error.code : "HELPER_FAILED",
+      typeof error.message === "string" && error.message.length > 0 ? error.message : "helper reported ok:false"
+    );
+  }
+  return r;
+}
+
+/**
+ * Builds the UI probes over osopener's helper. Exported so the mapping is testable without Studio.
+ * Every probe except `screenshot` throws `StudioUiError` on a helper `ok: false`; callers
+ * (`dismissOpenDialogHonestly`, the foreground gate) already treat a throw as "not observed".
+ */
+export function createHelperStudioUi(helper: OsopenerHelper, sleep: (ms: number) => Promise<void> = defaultSleep): StudioUi {
+  // UNVERIFIED LIVE (#48): osopener treats this dialog as its own foreground window, while this probe
+  // searches a depth-2 dump rooted at Studio's main window. Whether the dialog appears in that tree
+  // on the installed build is checked only by the human-attended live run; if it does not, this
+  // always answers false and recovery reports `absent`.
+  const present = async (): Promise<boolean> => {
+    const dump = await runChecked(helper, "uia-dump", { Depth: 2 });
+    return JSON.stringify(dump["nodes"] ?? []).includes(OPEN_DIALOG_TITLE);
+  };
+  return {
+    async foreground() {
+      const r = await runChecked(helper, "foreground-title");
+      return { isStudio: r["isStudio"] === true, title: String(r["title"] ?? "") };
+    },
+    async focus() {
+      await runChecked(helper, "focus");
+    },
+    openDialogPresent: present,
+    async dismissOpenDialog() {
+      // The dialog's content is a webview: Esc only lands once the dialog itself has been clicked.
+      // A refused click throws here, so no Esc goes to whatever window does have focus.
+      await runChecked(helper, "uia-click", { Name: `^${OPEN_DIALOG_TITLE}$`, Depth: 3 });
+      await sleep(400);
+      await runChecked(helper, "send-keys", { Keys: "{ESC}" });
+      await sleep(1200);
+    },
+    async screenshot(outPath) {
+      const r = await helper.run("screenshot", { Out: outPath });
+      if (r["ok"] === false) return null;
+      return typeof r["path"] === "string" ? r["path"] : outPath;
+    }
+  };
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -273,7 +391,7 @@ export interface OsopenerTools {
 }
 
 /** Wraps osopener's raw tool handlers. Exported so the result handling is testable on its own. */
-export function createOsopenerAdapter(tools: OsopenerTools, dist: string): OsopenerAdapter {
+export function createOsopenerAdapter(tools: OsopenerTools, dist: string, ui?: StudioUi): OsopenerAdapter {
   // Exact names, as osopener matches them (it compares against listApps verbatim).
   const owned = new Set<string>();
 
@@ -300,6 +418,7 @@ export function createOsopenerAdapter(tools: OsopenerTools, dist: string): Osope
 
   return {
     dist,
+    ...(ui !== undefined ? { ui } : {}),
     async open(module) {
       let result: unknown;
       try {
@@ -431,7 +550,7 @@ export async function loadOsopenerAdapter(dist: string, options: LoadOsopenerOpt
     });
   }
 
-  let ctx: unknown;
+  let ctx: { config: Record<string, unknown>; client: unknown; helper: unknown };
   try {
     ctx = {
       config: cfg,
@@ -453,7 +572,8 @@ export async function loadOsopenerAdapter(dist: string, options: LoadOsopenerOpt
         open: (input) => openTool.handler(input, ctx),
         close: (input) => closeTool.handler(input, ctx)
       },
-      dist
+      dist,
+      createHelperStudioUi(ctx.helper as OsopenerHelper)
     )
   };
 }

@@ -49,6 +49,16 @@ export type OsgraphErrorCode =
   | "GRAPHIFY_NOT_FOUND"
   /** `queryPath`: graphify exited non-zero for a reason other than an unknown node. */
   | "GRAPHIFY_FAILED"
+  /**
+   * #48 `osgraph run --module M`: another scope module has no `raw/` capture, so the scope cannot be
+   * re-extracted offline around a one-module refresh. `details.missing` names them; a full
+   * `osgraph run --scope S` captures them.
+   */
+  | "RUN_CAPTURES_MISSING"
+  /** #48 `osgraph run`: osopener could not open a module after its retries; the real osopener error is in `details`. */
+  | "MODULE_OPEN_FAILED"
+  /** #48 `osgraph run`: osopener could not be loaded (absent, failed import, rejected configuration). */
+  | "OSOPENER_UNAVAILABLE"
   /** Unexpected exception inside a tool handler (message passes through the client's redaction). */
   | "INTERNAL_ERROR";
 

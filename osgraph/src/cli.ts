@@ -6,7 +6,11 @@ import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
-import { ensureSite } from "./progress/site.js";
+import { closeSite, ensureSite } from "./progress/site.js";
+import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js";
+import { createServiceStudioClient } from "./servicestudio/token.js";
+import { createSharedSessionFactory } from "./tools/tool.js";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, runScope } from "./run/run.js";
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
@@ -86,6 +90,125 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+/** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
+function intFlag(value: string | undefined, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  // Plain decimal digits only: `Number("")`/`Number(" ")` is 0 (which would silently disable the
+  // circuit breaker), and `0x10` / `1e2` are not what anyone means on a command line.
+  if (!/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
+ * #48 `osgraph run`. The progress site is raised and its URL printed before anything else happens;
+ * osopener is loaded next (a run cannot open a single module without it), and only then does the
+ * first Service Studio call go out.
+ */
+async function runRun(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `run needs --scope <name>.\n${USAGE}`);
+    return;
+  }
+  if (options.module === "true") {
+    fail(EXIT_USAGE, `--module needs a module name.\n${USAGE}`);
+    return;
+  }
+  const maxOpen = intFlag(options["max-open"], DEFAULT_MAX_OPEN);
+  const maxFailures = intFlag(options["max-consecutive-failures"], DEFAULT_MAX_CONSECUTIVE_FAILURES);
+  if (maxOpen === null || maxOpen < 1 || maxFailures === null) {
+    fail(EXIT_USAGE, `--max-open must be an integer >= 1 and --max-consecutive-failures an integer >= 0.\n${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const log = (line: string): void => {
+    process.stderr.write(`${line}\n`);
+  };
+
+  // The URL is printed before any other work: a multi-hour run must never be unobservable.
+  const site = await ensureSite({ ...config, graphDir });
+  for (const line of site.banner.split("\n")) log(line);
+
+  const loaded = await loadOsopenerAdapter(config.site.osopenerDist, { env: process.env });
+  if (!loaded.ok) {
+    site.state.failRun("OSOPENER_UNAVAILABLE", describeLoadFailure(loaded.failure));
+    await closeSite();
+    fail(EXIT_FATAL, `OSOPENER_UNAVAILABLE: ${describeLoadFailure(loaded.failure)}`);
+    return;
+  }
+
+  const createSession = createSharedSessionFactory(() => {
+    const built = createServiceStudioClient(config);
+    return { reader: built.client, tokenProvider: built.tokenProvider };
+  });
+  const common = {
+    scope,
+    graphDir,
+    rules: loadLayerRules(),
+    createSession,
+    opener: loaded.adapter,
+    state: site.state,
+    log,
+    fetchConcurrency: config.fetchConcurrency,
+    fetchReferencedElements: process.env.OSGRAPH_FETCH_REFERENCED_ELEMENTS === "1"
+  };
+
+  let exitCode = 0;
+  let payload: unknown;
+  const lines: string[] = [];
+  if (options.module !== undefined) {
+    const result = await refreshModule({ ...common, module: options.module });
+    payload = result;
+    lines.push(
+      `scope '${result.scope}': refreshed '${result.module}' (nodes ${result.staged.nodeCount}, edges ${result.staged.edgeCount}), ` +
+        `re-extracted ${result.reextract.modules.length} module(s) offline`,
+      `  graph.json  ${result.reextract.nodeCount} nodes, ${result.reextract.edgeCount} edges, ${result.reextract.violationCount} violation(s)`,
+      `  flows.json  ${result.reextract.flowActionCount} actions, ${result.reextract.flowNodeCount} flow nodes`,
+      `  the rest of the graph is only as fresh as each module's last capture:`
+    );
+    for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
+  } else {
+    const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures });
+    payload = result;
+    const staged = result.rows.filter((r) => r.outcome === "staged").length;
+    lines.push(
+      `scope '${result.scope}': ${staged} staged this run, ${result.alreadyStaged} already staged, ` +
+        `${result.failures} failure(s), ${result.total} module(s) in scope`
+    );
+    if (result.rebuild !== undefined) {
+      lines.push(
+        `  graph.json  ${result.rebuild.nodeCount} nodes, ${result.rebuild.edgeCount} edges, ${result.rebuild.violationCount} violation(s)`
+      );
+    } else {
+      lines.push("  not finalized: run the same command again to continue (staged modules are skipped)");
+    }
+    for (const r of result.rows.filter((x) => x.error !== undefined)) {
+      lines.push(`  FAILED  ${r.module}: ${r.error?.code}: ${r.error?.message}${r.screenshotPath ? ` (screenshot ${r.screenshotPath})` : ""}`);
+    }
+    if (result.stoppedEarly !== undefined) lines.push(`  STOPPED: ${result.stoppedEarly}`);
+    lines.push(`  log ${result.logPath}`);
+    if (result.incomplete !== undefined) lines.push(`  INCOMPLETE: ${result.incomplete}`);
+    // Anything short of a written graph.json is not success, whatever the reason.
+    if (!result.finalized) exitCode = 1;
+  }
+
+  if (options.json === "true") {
+    process.stdout.write(`${JSON.stringify({ ...(payload as object), progressSite: { url: site.url, urls: site.urls } }, null, 2)}\n`);
+  } else {
+    if (site.url !== null) lines.push(`  progress site: ${site.url}`);
+    process.stdout.write(`${lines.join("\n")}\n`);
+  }
+  if (options.serve === "true" && site.url !== null) {
+    log("  (progress site serving until Ctrl+C)");
+    process.exitCode = exitCode;
+    return;
+  }
+  await closeSite();
+  process.exitCode = exitCode;
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 
 if (options.help === "true" || command === "help") {
@@ -102,6 +225,21 @@ if (options.help === "true" || command === "help") {
     if (command === "reextract") {
       runReextract(config, options).catch((err: unknown) => {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      });
+    } else if (command === "run") {
+      runRun(config, options).catch((err: unknown) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        const message = err instanceof Error ? err.message : String(err);
+        const text = `${typeof code === "string" ? `${code}: ` : ""}${message}`;
+        if (options.json === "true") {
+          // A --json consumer reads stdout only: give it the error there too, then fail as usual.
+          const details = (err as { details?: unknown } | null)?.details;
+          const payload = { error: { code: typeof code === "string" ? code : "INTERNAL_ERROR", message, ...(details !== undefined ? { details } : {}) } };
+          process.stdout.write(`${JSON.stringify(payload, null, 2)}
+`, () => fail(EXIT_FATAL, text));
+          return;
+        }
+        fail(EXIT_FATAL, text);
       });
     } else if (command === "serve") {
       noteMissingEndpoint(config);
