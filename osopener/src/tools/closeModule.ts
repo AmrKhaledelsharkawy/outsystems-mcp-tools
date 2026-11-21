@@ -22,16 +22,27 @@ const closeModuleInput = z.object(closeModuleShape);
  * A module tab's UIA label is `<Module> (<Application>)` (live 2026-10-30). Matching on the module
  * part alone would make `MOD_EX_Demo_Portal_CW` also match a hypothetical `MOD_EX_Demo_Portal_CW2`, so
  * the regex anchors on the ` (` that starts the application name — or on the end of the label: live 2026-11-20, a
- * module without an application (e.g. a theme module) shows a bare `<Module>` label.
+ * module without an application (e.g. a theme module) shows a bare `<Module>` label. It deliberately does NOT
+ * match a modified tab (`* <Module> ...`): closeModule refuses those before calling `tab-close`, and if a module
+ * became modified in between, the helper finds no tab rather than clicking close on unsaved work.
  */
 export function tabLabelRegex(module: string): string {
   return `^${module.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}( \\(|$)`;
 }
 
-/** Splits `<Module> (<Application>)` into its parts; `application` is undefined when absent. */
-export function parseTabLabel(label: string): { module: string; application?: string } {
-  const m = /^(.+?) \((.+)\)\s*$/.exec(label);
-  return m ? { module: m[1], application: m[2] } : { module: label };
+/** Service Studio's prefix on the tab label of a module with unsaved changes (live 2026-11-21). */
+const MODIFIED_PREFIX = "* ";
+
+/**
+ * Splits `<Module> (<Application>)` into its parts; `application` is undefined when absent. A leading
+ * `* ` is Studio's unsaved-changes marker: it is stripped from `module` and reported as `modified: true`.
+ */
+export function parseTabLabel(label: string): { module: string; application?: string; modified?: true } {
+  const modified = label.startsWith(MODIFIED_PREFIX);
+  const rest = modified ? label.slice(MODIFIED_PREFIX.length) : label;
+  const m = /^(.+?) \((.+)\)\s*$/.exec(rest);
+  const parts: { module: string; application?: string } = m ? { module: m[1], application: m[2] } : { module: rest };
+  return modified ? { ...parts, modified: true } : parts;
 }
 
 /**
@@ -59,6 +70,7 @@ export async function listModuleTabs(ctx: ToolContext): Promise<ModuleTab[]> {
       const parsed = parseTabLabel(t.label);
       const tab: ModuleTab = { module: parsed.module, label: t.label, windowHwnd: hwnd, offscreen: t.offscreen === true };
       if (parsed.application !== undefined) tab.application = parsed.application;
+      if (parsed.modified === true) tab.modified = true;
       tabs.push(tab);
     }
   }
@@ -71,7 +83,7 @@ export const closeModule: OsopenerTool<typeof closeModuleShape> = {
     "Close one module's tab in Service Studio, so a caller can run open -> rebuild({scope,module}) -> close and keep " +
     "Studio small (past ~30 open modules it splits across windows and slows sharply). " +
     "SAFETY, enforced in code and not negotiable: it never closes Service Studio, never closes a module with unsaved " +
-    "changes, and never answers a save prompt — if one appears the close is cancelled with Esc, the module stays open " +
+    "changes (a tab labelled '* <Module> ...' is refused before any click), and never answers a save prompt — if one appears the close is cancelled with Esc, the module stays open " +
     "and the call fails with UNSAVED_CHANGES_DIALOG. WHICH module to close is the caller's decision, not osopener's: " +
     "use listOpenModules (it reports every open module, its application and which window holds it) and close only what " +
     "your task no longer needs. Returns alreadyClosed=true with no UI action when the module is not open. " +
@@ -111,6 +123,14 @@ export const closeModule: OsopenerTool<typeof closeModuleShape> = {
           "UIA_ELEMENT_NOT_FOUND",
           `module '${name}' is open per listApps but no tab is labelled '${name} (<application>)'; refusing to guess which tab to close`,
           { labels: tabs.map((t) => t.label) }
+        );
+      }
+      if (tab.modified === true) {
+        // Unsaved changes: never click close, so no save prompt can appear and none is ever answered.
+        throw new HelperError(
+          "UNSAVED_CHANGES_DIALOG",
+          `module '${name}' has unsaved changes (its tab is labelled '${tab.label}'); it was left open and nothing was clicked`,
+          { label: tab.label }
         );
       }
 

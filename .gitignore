@@ -11,6 +11,7 @@ osgraph/scopes/
 # names are re-admitted; everything else under tests/ stays local.
 osopener/tests/*
 !osopener/tests/openModule.source.test.ts
+!osopener/tests/closeModule.modified.test.ts
 osopener/docs/
 osopener/screenshots/
 osopener/tracks/
