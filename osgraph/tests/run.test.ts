@@ -925,7 +925,10 @@ describe("osgraph run opens through Open from Environment", () => {
     const s = fakeStudio(mods());
     await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
     expect(s.openInputs.length).toBeGreaterThan(0);
-    for (const input of s.openInputs) expect(input.source).toBe("environment");
+    for (const input of s.openInputs) {
+      expect(input.source).toBe("environment");
+      expect(input.cancelSavePrompt).toBe(true);
+    }
   });
 
   it("refreshModules (--changed) passes source 'environment' on every open", async () => {
@@ -956,8 +959,12 @@ describe("osgraph run opens through Open from Environment", () => {
     );
     await adapter.open("alpha");
     await adapter.open("beta", { source: "environment" });
+    await adapter.open("gamma", { source: "environment", cancelSavePrompt: true });
     expect("source" in inputs[0]).toBe(false);
+    expect("cancelSavePrompt" in inputs[0]).toBe(false);
     expect(inputs[1].source).toBe("environment");
+    expect("cancelSavePrompt" in inputs[1]).toBe(false);
+    expect(inputs[2]).toMatchObject({ name: "gamma", source: "environment", cancelSavePrompt: true });
   });
 });
 
@@ -966,7 +973,10 @@ describe("osgraph run opens through Open from Environment", () => {
     const s = fakeStudio(mods());
     await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
     expect(s.openInputs.length).toBeGreaterThan(0);
-    for (const input of s.openInputs) expect(input.source).toBe("environment");
+    for (const input of s.openInputs) {
+      expect(input.source).toBe("environment");
+      expect(input.cancelSavePrompt).toBe(true);
+    }
   });
 
   it("refreshModules (--changed) passes source 'environment' on every open", async () => {
