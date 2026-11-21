@@ -273,6 +273,14 @@ function resolveFetchConcurrency(value: number | undefined): number {
   return Math.min(MAX_FETCH_CONCURRENCY, Math.max(MIN_FETCH_CONCURRENCY, Math.trunc(value)));
 }
 
+/**
+ * Only a Service module publishes `SL_*` service actions (#59). Matched like `isTraditional`, so a
+ * decorated spelling of the type still counts; a module whose type is not Service never asks.
+ */
+function isServiceModule(moduleType: string): boolean {
+  return /service/i.test(moduleType);
+}
+
 function isTraditional(moduleType: string): boolean {
   return /traditional/i.test(moduleType);
 }
@@ -357,6 +365,8 @@ class ModuleWalker {
     private readonly scope: string,
     private readonly module: string,
     private readonly traditional: boolean,
+    /** Service module: the only kind that can have service actions, hence the only one that lists them (#59). */
+    private readonly service: boolean,
     private readonly retryDelayMs: number,
     private readonly fetchReferenced: boolean,
     /** Element fetches in flight at once (OSG-016 §C1); 1 is the pre-OSG-016 serial walk. */
@@ -599,7 +609,7 @@ class ModuleWalker {
     //
     // The phase boundary is kept: every listing must be complete before any element fetch starts,
     // because `elements()` consumes `listings.*`.
-    const listingWave = [
+    const listingWave: ReadonlyArray<{ kind: string; call: string; run: () => Promise<ServiceStudioElementName[]> }> = [
       {
         kind: "Screen",
         call: t ? "getScreenNamesTraditional" : "getScreenNames",
@@ -615,9 +625,14 @@ class ModuleWalker {
       // A Service module publishes `SL_*` service actions, which the "server" listing does not
       // return. Without this the whole SL layer reads as empty — 38 of 38 `_SL` modules yielded no
       // actions at all, and the layer became a terminal wall with 46 edges in and 0 out.
-      { kind: "ServiceAction", call: "getActionNames(service)", run: () => r.getActionNames(m, "service") }
-    ] as const;
-    const [screenNames, blockNames, clientActionNames, serverActionNames, serviceActionNames] = await this.phase(
+      // Any other module cannot have service actions, so the call is not issued (#59): its listing
+      // wave stays four calls, and its service-action set is empty because it is *not applicable*,
+      // which is neither a skipped nor a failed read and never touches snapshot completeness.
+      ...(this.service
+        ? [{ kind: "ServiceAction", call: "getActionNames(service)", run: () => r.getActionNames(m, "service") }]
+        : [])
+    ];
+    const [screenNames, blockNames, clientActionNames, serverActionNames, serviceActionNames = []] = await this.phase(
       "listing",
       listingWave.length,
       () => mapPool(listingWave, this.fetchConcurrency, (spec) => this.listing(spec.kind, spec.call, spec.run))
@@ -791,6 +806,7 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
     scope,
     app.name,
     isTraditional(app.moduleType),
+    isServiceModule(app.moduleType),
     retryDelayMs,
     fetchReferenced,
     fetchConcurrency,
