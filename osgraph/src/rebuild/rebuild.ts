@@ -829,6 +829,8 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
     requestedAs: requested,
     moduleType: app.moduleType,
     capturedAt: now().toISOString(),
+    moduleKey: app.key,
+    moduleVersion: app.version,
     referencedOnlyCount: walker.referencedOnlyCount,
     skipped: walker.skipped.map((s) => ({ kind: s.kind, name: s.name, reason: s.reason }))
   });
