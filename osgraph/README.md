@@ -114,7 +114,7 @@ osgraph does not work alone"** above.
 **What exists today:** stages 3, 4 (as `raw/` captures) and 5 (as a single snapshot) ship
 in the caller-triggered [`rebuild`](#tools) tool, which is **not** being removed — it stays
 the way to build a baseline and to force a re-read. Stages 1, 2, 6 and 7, immutable
-generations and the `watch` / `sync` / `status` commands are being built across
+generations and the `watch` / `sync` commands and the remote `status` are being built across
 milestones M0–M4; the issue tracker is the authority on what has landed.
 
 ---
