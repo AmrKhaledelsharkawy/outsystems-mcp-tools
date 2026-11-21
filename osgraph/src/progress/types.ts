@@ -115,8 +115,23 @@ export interface StatusLogLine {
   text: string;
 }
 
+/** `osgraph run`'s start gate / pause / cancel state (`RunControl.snapshot()`). */
+export interface StatusControl {
+  state: "waiting" | "running" | "paused" | "cancelling" | "done";
+  since: string;
+  can: { start: boolean; pause: boolean; resume: boolean; cancel: boolean };
+}
+
+/** What the site needs from a run's control object (kept structural: progress does not import run). */
+export interface RunControlHandle {
+  snapshot(): StatusControl;
+  act(action: "start" | "pause" | "resume" | "cancel"): boolean;
+}
+
 /** The whole `/api/status` body. */
 export interface Status {
+  /** Present while an `osgraph run` with a control object is attached to the site (active scope only). */
+  control?: StatusControl;
   now: number;
   scope: string;
   run: StatusRun;

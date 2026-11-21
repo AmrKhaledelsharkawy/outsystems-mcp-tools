@@ -259,6 +259,34 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     return send(res, 404, JSON.stringify({ error: "not found" }));
   };
 
+  /**
+   * `osgraph run`'s Start / Pause / Resume / Cancel. Same guard as discovery: anyone may watch, only the
+   * PC running the site may act (these drive Service Studio on that PC).
+   */
+  const runControlRoute = (req: IncomingMessage, res: ServerResponse, url: URL): void => {
+    const control = options.state.runControl;
+    if (url.pathname === "/api/run/control") {
+      return send(res, 200, JSON.stringify(control !== null ? control.snapshot() : null));
+    }
+    const action = url.pathname.slice("/api/run/".length);
+    if (action !== "start" && action !== "pause" && action !== "resume" && action !== "cancel") {
+      return send(res, 404, JSON.stringify({ error: "not found" }));
+    }
+    if (req.method !== "POST") return send(res, 405, JSON.stringify({ error: "POST only" }));
+    if (!isLocal(req)) {
+      return send(res, 403, JSON.stringify({ error: "Controlling the run is only allowed from the PC running it." }));
+    }
+    if (control === null) return send(res, 409, JSON.stringify({ error: "No osgraph run is attached to this site." }));
+    if (!control.act(action)) {
+      return send(
+        res,
+        409,
+        JSON.stringify({ error: `'${action}' is not possible while the run is ${control.snapshot().state}.`, control: control.snapshot() })
+      );
+    }
+    return send(res, 200, JSON.stringify({ ok: true, control: control.snapshot() }));
+  };
+
   const server = createServer((req, res) => {
     void (async (): Promise<void> => {
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -307,6 +335,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           return send(res, 200, JSON.stringify({ default: scopeOf(url), scopes }));
         }
         if (url.pathname === "/api/status") return send(res, 200, JSON.stringify(statusFor(scopeOf(url))));
+        if (url.pathname.startsWith("/api/run/")) return runControlRoute(req, res, url);
         if (url.pathname.startsWith("/api/discover/")) return await discoveryRoute(req, res, url);
         if (url.pathname === "/api/graph") {
           const scope = scopeOf(url);

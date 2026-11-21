@@ -97,6 +97,16 @@
   .chip.leaf, .chip.listed, .chip.skipped, .chip.queued { background: var(--line); color: var(--muted); }
   code { font-family: var(--mono); font-size: 12px; }
   [hidden] { display: none !important; }
+  /* run control (osgraph run: Start / Pause / Resume / Cancel) */
+  .ctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; background: var(--panel); border: 1px solid var(--line); }
+  .ctl .state { font-weight: 650; }
+  .ctl .state.waiting { color: var(--warn); }
+  .ctl .state.running { color: var(--ok); }
+  .ctl .state.paused { color: var(--warn); }
+  .ctl .state.cancelling, .ctl .state.done { color: var(--muted); }
+  .ctl .hint { color: var(--muted); font-size: 12px; flex: 1 1 260px; }
+  .ctl .btns { display: flex; gap: 8px; }
+  .btn.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
 </style>
 </head>
 <body>
@@ -107,6 +117,16 @@
 </header>
 
 <main id="runView">
+  <div class="ctl" id="ctl" hidden>
+    <span>Run: <span class="state" id="ctlState">–</span></span>
+    <span class="hint" id="ctlHint"></span>
+    <span class="btns">
+      <button class="btn" id="ctlStart" hidden>Start</button>
+      <button class="btn ghost" id="ctlPause" hidden>Pause</button>
+      <button class="btn" id="ctlResume" hidden>Resume</button>
+      <button class="btn danger" id="ctlCancel" hidden>Cancel</button>
+    </span>
+  </div>
   <div id="banner"></div>
   <div class="grid kpis">
     <div class="card hero" style="grid-column: span 2">
@@ -283,7 +303,45 @@ async function refresh() {
     $('liveDot').className = 'dot bad'; $('liveText').textContent = 'server unreachable';
   }
 }
+const CTL_HINT = {
+  waiting: 'Nothing has touched Service Studio yet. Press Start when you are ready to leave the PC to it.',
+  running: 'Opening and closing modules takes the foreground for about a second each. Pause to use the PC.',
+  paused: 'No module is opened or closed while paused, so nothing takes the foreground. Reads of modules already open continue.',
+  cancelling: 'Opening nothing more. Modules already started finish, drain and close, then the report is written.',
+  done: 'The run has finished.'
+};
+function renderControl(c) {
+  $('ctl').hidden = !c;
+  if (!c) return;
+  $('ctlState').textContent = c.state;
+  $('ctlState').className = 'state ' + c.state;
+  $('ctlHint').textContent = CTL_HINT[c.state] ?? '';
+  $('ctlStart').hidden = !c.can.start;
+  $('ctlPause').hidden = !c.can.pause;
+  $('ctlResume').hidden = !c.can.resume;
+  $('ctlCancel').hidden = !c.can.cancel;
+}
+async function control(action) {
+  if (action === 'cancel' && !confirm('Cancel the run? Modules already started finish and close; the rest stay for the next run.')) return;
+  for (const id of ['ctlStart', 'ctlPause', 'ctlResume', 'ctlCancel']) $(id).disabled = true;
+  try {
+    const r = await fetch('/api/run/' + action, { method: 'POST' });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) alert(body.error ?? `${action} failed (${r.status})`);
+    if (body.control) renderControl(body.control);
+  } catch {
+    alert('The run is not reachable.');
+  } finally {
+    for (const id of ['ctlStart', 'ctlPause', 'ctlResume', 'ctlCancel']) $(id).disabled = false;
+    refresh();
+  }
+}
+$('ctlStart').onclick = () => control('start');
+$('ctlPause').onclick = () => control('pause');
+$('ctlResume').onclick = () => control('resume');
+$('ctlCancel').onclick = () => control('cancel');
 function renderRun(s) {
+  renderControl(s.control);
   const p = s.progress;
   const pct = p.pctByTime;
   $('pct').textContent = `${(pct * 100).toFixed(1)}%`;

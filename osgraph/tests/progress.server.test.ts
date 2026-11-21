@@ -294,3 +294,38 @@ describe("binding", () => {
     expect(siteBanner(site)).toContain("OSGRAPH_PROGRESS_HOST=0.0.0.0");
   });
 });
+
+describe("run control routes (/api/run/*)", () => {
+  it("answer 409 when no run is attached, and status has no control", async () => {
+    const site = await serve();
+    expect((await post(site, "/api/run/start", {})).status).toBe(409);
+    const status = JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body) as Record<string, unknown>;
+    expect(status.control).toBeUndefined();
+  });
+
+  it("Start / Pause / Resume / Cancel drive the attached control; invalid actions are 409; GET is 405", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+
+    const status = JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body) as { control?: { state: string } };
+    expect(status.control?.state).toBe("waiting");
+    expect((await get(site, "/api/run/start")).status).toBe(405);
+    expect((await post(site, "/api/run/pause", {})).status).toBe(409);
+
+    const started = await post(site, "/api/run/start", {});
+    expect(started.status).toBe(200);
+    expect((started.json.control as { state: string }).state).toBe("running");
+    expect((await post(site, "/api/run/pause", {})).status).toBe(200);
+    expect(control.state).toBe("paused");
+    expect((await post(site, "/api/run/resume", {})).status).toBe(200);
+    expect((await post(site, "/api/run/cancel", {})).status).toBe(200);
+    expect(control.signal.aborted).toBe(true);
+    expect((await post(site, "/api/run/cancel", {})).status).toBe(409);
+    expect((await post(site, "/api/run/bogus", {})).status).toBe(404);
+    expect(JSON.parse((await get(site, "/api/run/control")).body).state).toBe("cancelling");
+  });
+});
