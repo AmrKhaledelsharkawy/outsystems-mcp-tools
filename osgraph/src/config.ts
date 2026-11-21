@@ -70,10 +70,11 @@ export interface SiteConfig {
   /** `false` disables the site entirely (`OSGRAPH_PROGRESS_SITE=off`). Headless/CI escape hatch. */
   enabled: boolean;
   /**
-   * Bind address. Defaults to loopback **on purpose**: the site serves module names, the graph
-   * and the live log with no authentication, and a published default of `0.0.0.0` would put a
-   * stranger's proprietary module names on their office network the first time they ran a
-   * rebuild. `OSGRAPH_PROGRESS_HOST=0.0.0.0` opts in to reading it from a phone.
+   * Bind address. Defaults to `0.0.0.0` so a long run can be watched from a phone or another PC on
+   * the same network (decided 2026-11-22). Viewing is unauthenticated: anyone on that network can
+   * read module names, the graph and the live log. Acting is not: every route that drives Service
+   * Studio (run Start/Pause/Resume/Cancel, discovery) answers only to the PC running the site.
+   * `OSGRAPH_PROGRESS_HOST=127.0.0.1` keeps the site on this PC only (shared or untrusted networks).
    */
   host: string;
   /** First port tried; a busy port is stepped past (see `SITE_PORT_SCAN`). */
@@ -98,8 +99,8 @@ export const ENV_PROGRESS_HOST = "OSGRAPH_PROGRESS_HOST";
 export const ENV_PROGRESS_PORT = "OSGRAPH_PROGRESS_PORT";
 export const ENV_OSOPENER_DIST = "OSGRAPH_OSOPENER_DIST";
 
-/** Loopback by default — see `SiteConfig.host` for why this is not `0.0.0.0`. */
-export const DEFAULT_SITE_HOST = "127.0.0.1";
+/** Every interface by default, so the site opens from a phone — see `SiteConfig.host`. */
+export const DEFAULT_SITE_HOST = "0.0.0.0";
 export const DEFAULT_SITE_PORT = 7473;
 /** Consecutive ports tried when the first is taken, so two scopes can be watched at once. */
 export const SITE_PORT_SCAN = 20;

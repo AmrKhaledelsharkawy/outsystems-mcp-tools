@@ -445,7 +445,8 @@ async function runRunLocked(
     if (control.state === "waiting") {
       log(
         `READY: ${scope.modules.length} module(s), pipeline depth ${pipelineDepth}. Nothing touches Service Studio until you ` +
-          `press Start${site.url !== null ? ` on ${site.url}` : ""} or Enter here.`
+          `press Start${site.url !== null ? ` on ${site.url} (this PC)` : ""} or Enter here.` +
+          (site.urls[1] !== undefined ? ` Watch from a phone: ${site.urls[1]}` : "")
       );
     }
     let result: Awaited<ReturnType<typeof runScope>>;

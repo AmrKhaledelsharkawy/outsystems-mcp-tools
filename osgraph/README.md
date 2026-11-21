@@ -164,22 +164,35 @@ no stop command, no orphaned process holding a port.
 For the offline `reextract` command the site is **opt-in** (`--serve`), because that command is a
 one-shot process: a site raised there would die the instant it printed its own URL.
 
-### It binds to loopback by default
+### It opens from your phone by default
 
-The page serves your module names, your graph and your live log **with no authentication**. The
-shipped default is therefore `127.0.0.1`. To read it from your phone:
+The site binds to every interface (`0.0.0.0`), so a long run can be watched from a phone or another
+PC on the same network. The banner puts the address to type on the phone first:
 
 ```
-OSGRAPH_PROGRESS_HOST=0.0.0.0
+osgraph live progress site on 0.0.0.0:7473
+  phone / other PCs: http://192.168.1.18:7473   (Ethernet 3, same network)
+  this PC:           http://127.0.0.1:7473
+  also:              http://172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)
+  controls (Start / Pause / Cancel) work only on this PC; other devices can watch
 ```
 
-The banner then lists every address the site is genuinely reachable on — only adapters that are
-actually up, so it can never print a stale IP from a disconnected adapter.
+Real Ethernet / Wi-Fi adapters come first; WSL, Hyper-V, Docker and VPN adapters are listed last and
+marked, and only adapters that are actually up are shown. A laptop on Ethernet and a phone on Wi-Fi
+reach each other when both are on the same router network (same `192.168.x.y` prefix) and the router
+does not isolate Wi-Fi clients (guest networks usually do).
+
+The page serves your module names, your graph and your live log **with no authentication** to
+anyone on that network. On a shared or untrusted network keep it on this PC:
+
+```
+OSGRAPH_PROGRESS_HOST=127.0.0.1
+```
 
 **Mutating routes stay loopback-only regardless of the bind address.** Viewing the page is a
-convenience worth sharing; starting a discovery that opens modules in your live Service Studio, or
-writing a scope file, is not something a device across the network gets to do. Those return `403`
-to any non-loopback peer.
+convenience worth sharing; starting a discovery or a run, pausing or cancelling one, or writing a
+scope file, is not something a device across the network gets to do. Those return `403` to any
+non-loopback peer, so press Start on `http://127.0.0.1:7473` on the PC itself.
 
 ### Turning it off
 
@@ -478,7 +491,7 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 
 ## Configuration
 
-| Variable | Required | Default | Meaning |
+| `OSGRAPH_PROGRESS_HOST` | no | `0.0.0.0` | Bind address. Every interface by default so a phone on the same network can watch; `127.0.0.1` keeps it on this PC — see [the site's section](#the-live-progress-site) |
 |---|---|---|---|
 | `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
 | `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file. Unset (or naming a missing file): every command — `run`, `rebuild`, `doctor`, discovery — uses the nearest `token.txt` at or above the working directory, by the one rule `doctor` and osopener share, and logs one stderr line naming the file (never its contents). Only when no file is found does osgraph fall back to interactive mode (`createSessionToken`, which raises a human approval dialog). A found file that Studio rejects fails `TOKEN_EXPIRED`; it never falls back to interactive |

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RunState } from "../src/progress/state.js";
-import { type DiscoveryRunner, type LiveSite, isLocal, reachableUrls, siteBanner, startSite } from "../src/progress/server.js";
+import { type DiscoveryRunner, type LiveSite, isLocal, lanAddresses, reachableUrls, siteBanner, startSite } from "../src/progress/server.js";
 import { defineScope } from "../src/scopes/store.js";
 
 let graphDir: string;
@@ -291,7 +291,39 @@ describe("binding", () => {
 
   it("tells you how to open it up when bound to loopback", async () => {
     const site = await serve();
-    expect(siteBanner(site)).toContain("OSGRAPH_PROGRESS_HOST=0.0.0.0");
+    expect(siteBanner(site)).toContain("unset OSGRAPH_PROGRESS_HOST");
+  });
+
+  // A laptop on Ethernet with WSL installed: the phone line must be the Ethernet address, never WSL's.
+  const IFACES = {
+    "vEthernet (WSL (Hyper-V firewall))": [{ address: "172.23.32.1", family: "IPv4", internal: false }],
+    "Ethernet 3": [{ address: "192.168.1.18", family: "IPv4", internal: false }],
+    "Wi-Fi 3": [{ address: "169.254.10.2", family: "IPv4", internal: false }],
+    Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    "Ethernet 9": [{ address: "fe80::1", family: "IPv6", internal: false }]
+  } as unknown as ReturnType<typeof import("node:os").networkInterfaces>;
+
+  it("lists real adapters before virtual ones, skipping loopback, link-local and IPv6", () => {
+    expect(lanAddresses(IFACES)).toEqual([
+      { address: "192.168.1.18", adapter: "Ethernet 3", virtual: false },
+      { address: "172.23.32.1", adapter: "vEthernet (WSL (Hyper-V firewall))", virtual: true }
+    ]);
+    expect(reachableUrls("0.0.0.0", 7473, IFACES)).toEqual([
+      "http://127.0.0.1:7473",
+      "http://192.168.1.18:7473",
+      "http://172.23.32.1:7473"
+    ]);
+  });
+
+  it("the banner names the phone address first and marks virtual adapters", () => {
+    const fake = { host: "0.0.0.0", port: 7473, urls: reachableUrls("0.0.0.0", 7473, IFACES) } as unknown as LiveSite;
+    const banner = siteBanner(fake, IFACES);
+    const lines = banner.split("\n");
+    expect(lines[1]).toContain("phone / other PCs: http://192.168.1.18:7473");
+    expect(lines[1]).toContain("Ethernet 3");
+    expect(banner).toContain("this PC:           http://127.0.0.1:7473");
+    expect(banner).toContain("172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)");
+    expect(banner).toContain("controls (Start / Pause / Cancel) work only on this PC");
   });
 });
 

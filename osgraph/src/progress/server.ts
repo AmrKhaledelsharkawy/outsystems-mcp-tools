@@ -16,7 +16,8 @@
  * Security posture, unchanged from the kit and load-bearing: **every mutating route is
  * loopback-only.** Reading the page from a phone is a convenience; starting a job that drives
  * your Service Studio, or writing a scope file, is not something a device across the network gets
- * to do. The bind address additionally defaults to loopback (see `SiteConfig.host`).
+ * to do. The bind address defaults to every interface so the page opens from a phone; set
+ * `OSGRAPH_PROGRESS_HOST=127.0.0.1` to keep it on this PC (see `SiteConfig.host`).
  */
 
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
@@ -70,7 +71,10 @@ export interface LiveSite {
   server: Server;
   host: string;
   port: number;
-  /** The URL to hand a human: loopback when bound to loopback, else the first real LAN address. */
+  /**
+   * The URL for this PC: always loopback, because the control routes (Start / Pause / Cancel) answer
+   * only to loopback peers. The phone address is `urls[1]` (real adapters first, see `lanAddresses`).
+   */
   url: string;
   /** Every address this is genuinely reachable on. */
   urls: string[];
@@ -412,28 +416,75 @@ export async function listenWithScan(server: Server, host: string, port: number,
  * adapter still holding a stale IP, while the live address was elsewhere. `networkInterfaces()`
  * reports only live adapters, so a banner built from it cannot name a dead address.
  */
-export function reachableUrls(host: string, port: number): string[] {
-  const urls = [`http://127.0.0.1:${port}`];
-  if (host !== "0.0.0.0" && host !== "::") return urls;
-  for (const addrs of Object.values(networkInterfaces())) {
+/**
+ * Adapters a phone on the same network can never reach: WSL / Hyper-V / Docker / VirtualBox / VMware
+ * virtual switches and VPN tunnels. They are still listed, but after the real Ethernet / Wi-Fi ones.
+ */
+const VIRTUAL_ADAPTER = /vethernet|wsl|hyper-v|docker|virtualbox|vmware|vbox|loopback|tailscale|zerotier|vpn|tap-|tun|utun|bridge|br-|virbr/i;
+
+/** One reachable IPv4 address of this PC. */
+export interface LanAddress {
+  address: string;
+  /** The OS adapter name, e.g. "Ethernet 3", "Wi-Fi", "vEthernet (WSL)". */
+  adapter: string;
+  /** A virtual switch or tunnel: usually not reachable from a phone. */
+  virtual: boolean;
+}
+
+/** The private-range rank used to put a home/office LAN address first. */
+function privateRank(address: string): number {
+  if (address.startsWith("192.168.")) return 0;
+  if (address.startsWith("10.")) return 1;
+  const m = /^172\.(\d+)\./.exec(address);
+  if (m !== null && Number(m[1]) >= 16 && Number(m[1]) <= 31) return 2;
+  return 3;
+}
+
+/**
+ * Every non-loopback IPv4 address, real adapters before virtual ones, then by private range. The
+ * first entry is the address to type on a phone.
+ */
+export function lanAddresses(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): LanAddress[] {
+  const out: LanAddress[] = [];
+  for (const [adapter, addrs] of Object.entries(interfaces)) {
     for (const addr of addrs ?? []) {
       // IPv4, non-loopback, and not a 169.254.x link-local autoconfig address (no router, no peers).
       if (addr.family !== "IPv4" || addr.internal || addr.address.startsWith("169.254.")) continue;
-      urls.push(`http://${addr.address}:${port}`);
+      out.push({ address: addr.address, adapter, virtual: VIRTUAL_ADAPTER.test(adapter) });
     }
   }
+  return out.sort(
+    (a, b) => Number(a.virtual) - Number(b.virtual) || privateRank(a.address) - privateRank(b.address) || a.adapter.localeCompare(b.adapter)
+  );
+}
+
+export function reachableUrls(host: string, port: number, interfaces?: ReturnType<typeof networkInterfaces>): string[] {
+  const urls = [`http://127.0.0.1:${port}`];
+  if (host !== "0.0.0.0" && host !== "::") return urls;
+  for (const a of lanAddresses(interfaces)) urls.push(`http://${a.address}:${port}`);
   return urls;
 }
 
-/** The stderr banner. Names only addresses that work, and says so when the LAN has none. */
-export function siteBanner(site: LiveSite): string {
-  const lines = [`osgraph live progress site on ${site.host}:${site.port}`, `  local: ${site.urls[0] ?? "-"}`];
+/**
+ * The stderr banner. The first line after the bind address is the one to open on a phone; virtual
+ * adapters are marked so nobody types a WSL address into a phone.
+ */
+export function siteBanner(site: LiveSite, interfaces?: ReturnType<typeof networkInterfaces>): string {
+  const lines = [`osgraph live progress site on ${site.host}:${site.port}`];
   if (site.host === "0.0.0.0" || site.host === "::") {
-    const lan = site.urls.slice(1);
-    if (lan.length === 0) lines.push("  LAN:   none — no connected non-loopback IPv4 interface");
-    for (const url of lan) lines.push(`  LAN:   ${url}`);
+    const lan = lanAddresses(interfaces);
+    const phone = lan.find((a) => !a.virtual);
+    if (phone !== undefined) lines.push(`  phone / other PCs: http://${phone.address}:${site.port}   (${phone.adapter}, same network)`);
+    else lines.push("  phone / other PCs: none — no connected Ethernet or Wi-Fi IPv4 address");
+    lines.push(`  this PC:           ${site.urls[0] ?? "-"}`);
+    for (const a of lan) {
+      if (a === phone) continue;
+      lines.push(`  also:              http://${a.address}:${site.port}   (${a.adapter}${a.virtual ? ", virtual: not for a phone" : ""})`);
+    }
+    lines.push("  controls (Start / Pause / Cancel) work only on this PC; other devices can watch");
   } else {
-    lines.push(`  bound to ${site.host} only; set OSGRAPH_PROGRESS_HOST=0.0.0.0 to reach it from other devices`);
+    lines.push(`  this PC: ${site.urls[0] ?? "-"}`);
+    lines.push(`  bound to ${site.host} only; unset OSGRAPH_PROGRESS_HOST (or set it to 0.0.0.0) to open it from a phone`);
   }
   return lines.join("\n");
 }
