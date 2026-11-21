@@ -33,6 +33,8 @@ export default defineConfig({
       "tests/servicestudio.token.test.ts",
       "tests/servicestudio.unwrap.test.ts",
       "tests/smoke.test.ts",
+      "tests/status.test.ts",
+      "tests/studioLock.test.ts",
       "tests/tools.test.ts"
     ]
   }
