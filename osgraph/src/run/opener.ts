@@ -24,6 +24,7 @@ import {
   describeOsopenerFailure,
   type OsopenerAdapter,
   type OsopenerFailure,
+  type OpenSource,
   type StudioUi
 } from "../osopener/adapter.js";
 
@@ -49,6 +50,8 @@ export interface OpenLoopOptions {
   sleep?: Sleep;
   /** Clock for the screenshot file name; default `new Date()`. */
   now?: () => Date;
+  /** osopener's `source` for every open; omitted = osopener's default (`recent`). */
+  source?: OpenSource;
 }
 
 /** Outcome of the honest dismiss: what was actually observed, never what was hoped. */
@@ -218,7 +221,7 @@ export function makeOpenWithRetry(
         break;
       }
       made = attempt;
-      const outcome = await opener.open(module);
+      const outcome = options.source !== undefined ? await opener.open(module, { source: options.source }) : await opener.open(module);
       if (outcome.ok) return { ok: true, openedHere: outcome.openedHere, alreadyOpen: outcome.alreadyOpen, attempts: attempt };
       last = outcome.failure;
       log(`   open ${module} attempt ${attempt}/${attempts} FAILED ${describeOsopenerFailure(last)}`);

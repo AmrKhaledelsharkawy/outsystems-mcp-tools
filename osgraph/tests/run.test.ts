@@ -104,10 +104,13 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
   const openScript = new Map(Object.entries(options.openScript ?? {}).map(([k, v]) => [k, [...v]]));
   const closeScript = new Map(Object.entries(options.closeScript ?? {}).map(([k, v]) => [k, [...v]]));
   let maxRunOwned = 0;
+  /** Every raw input osopener's `openModule` handler received. */
+  const openInputs: Record<string, unknown>[] = [];
 
   const tools = {
     async open(input: Record<string, unknown>): Promise<unknown> {
       const name = String(input.name);
+      openInputs.push(input);
       events.push(`open:${name}`);
       const scripted = openScript.get(name)?.shift();
       if (scripted !== undefined) return scripted;
@@ -155,8 +158,8 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
   // Track the most tabs this process ever owned at once.
   const opener: OsopenerAdapter = {
     ...adapter,
-    open: async (m) => {
-      const r = await adapter.open(m);
+    open: async (m, o) => {
+      const r = await adapter.open(m, o);
       maxRunOwned = Math.max(maxRunOwned, adapter.ownedModules().length);
       return r;
     },
@@ -176,6 +179,7 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
     studio,
     reader,
     events,
+    openInputs,
     inFlightAtClose,
     screenshots,
     opener,
@@ -907,6 +911,47 @@ describe("decideChange: the one comparison behind --changed", () => {
   });
   it("no capture is a read", () => {
     expect(decideChange({ exists: false, version: null }, "1.0")).toMatchObject({ read: true, reason: "no capture" });
+  });
+});
+
+describe("osgraph run opens through Open from Environment", () => {
+  it("runScope passes source 'environment' on every open", async () => {
+    const s = fakeStudio(mods());
+    await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
+    expect(s.openInputs.length).toBeGreaterThan(0);
+    for (const input of s.openInputs) expect(input.source).toBe("environment");
+  });
+
+  it("refreshModules (--changed) passes source 'environment' on every open", async () => {
+    const graphDir = tmp();
+    const scope = { name: "demo", modules: ["alpha", "beta"] };
+    await runScope({ ...common(graphDir, fakeStudio(mods().slice(0, 2)), []), scope });
+    const s = fakeStudio(mods().slice(0, 2));
+    await refreshModules({ ...common(graphDir, s, [], T1), scope, changed: true });
+    expect(s.openInputs.map((i) => [i.name, i.source])).toEqual([
+      ["alpha", "environment"],
+      ["beta", "environment"]
+    ]);
+  });
+
+  it("the adapter omits source when the caller gives none (osopener's default applies)", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const adapter = createOsopenerAdapter(
+      {
+        async open(input) {
+          inputs.push(input);
+          return { opened: true, alreadyOpen: false };
+        },
+        async close() {
+          return { closed: true };
+        }
+      },
+      "fake-dist"
+    );
+    await adapter.open("alpha");
+    await adapter.open("beta", { source: "environment" });
+    expect("source" in inputs[0]).toBe(false);
+    expect(inputs[1].source).toBe("environment");
   });
 });
 

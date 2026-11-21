@@ -76,7 +76,7 @@ export interface RunCommonOptions {
   /** Pause between Studio actions; default 1.5 s, tests pass 0. */
   gapMs?: number;
   /** Retry / gate tuning for opens (tests shrink every wait to zero). */
-  openLoop?: Omit<OpenLoopOptions, "screenshotDir" | "sleep" | "now">;
+  openLoop?: Omit<OpenLoopOptions, "screenshotDir" | "sleep" | "now" | "source">;
   /** Element retry back-off forwarded to the walk; tests pass 0. */
   retryDelayMs?: number;
 }
@@ -227,7 +227,10 @@ function setup(options: RunCommonOptions): {
     ...options.openLoop,
     sleep,
     now,
-    screenshotDir: join(runDir, "screenshots")
+    screenshotDir: join(runDir, "screenshots"),
+    // Always Open from Environment: a recent-list open makes Studio list the module's version as "0",
+    // which `--changed` cannot compare (it reads it as unknown, so the module is always re-read).
+    source: "environment"
   });
   const onProgress = (event: RebuildProgressEvent): void => options.state?.handle(event);
   const listApps = (): Promise<ServiceStudioApp[]> => session.reader.listApps();

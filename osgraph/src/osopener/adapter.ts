@@ -146,11 +146,24 @@ export type CloseOutcome =
     }
   | { ok: false; failure: OsopenerFailure };
 
+/**
+ * How osopener opens a module that is not open yet (its `openModule` `source` input). `recent` (osopener's
+ * default) clicks the recent-list entry when there is one; `environment` always uses Open from Environment.
+ * Only an environment open makes Service Studio's listing report the module's real server version: a
+ * recent-list open reports version "0".
+ */
+export type OpenSource = "recent" | "environment";
+
+export interface OpenOptions {
+  /** Omitted: osopener's own default (`recent`). */
+  source?: OpenSource;
+}
+
 export interface OsopenerAdapter {
   /** The `dist` directory this adapter was loaded from. */
   readonly dist: string;
   /** Opens a module. Never throws: osopener's failure — or a thrown handler — comes back as `ok: false`. */
-  open(module: string): Promise<OpenOutcome>;
+  open(module: string, options?: OpenOptions): Promise<OpenOutcome>;
   /**
    * Closes a module, reporting osopener's actual result: a refusal (unsaved changes, cancelled
    * save prompt, close not confirmed) is `ok: false`. Never throws. Closes regardless of ownership;
@@ -419,10 +432,14 @@ export function createOsopenerAdapter(tools: OsopenerTools, dist: string, ui?: S
   return {
     dist,
     ...(ui !== undefined ? { ui } : {}),
-    async open(module) {
+    async open(module, options) {
       let result: unknown;
       try {
-        result = await tools.open({ name: module, timeoutMs: OPEN_TIMEOUT_MS });
+        result = await tools.open({
+          name: module,
+          timeoutMs: OPEN_TIMEOUT_MS,
+          ...(options?.source !== undefined ? { source: options.source } : {})
+        });
       } catch (err) {
         return { ok: false, failure: thrownFailure(err) };
       }
