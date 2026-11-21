@@ -367,6 +367,15 @@ node dist/cli.js reextract --scope <name> --json   # full result as JSON
 node dist/cli.js --help
 ```
 
+### Accuracy audit
+
+`osgraph audit --scope <name> [--k 20] [--seed 1] [--json]` samples K edges and K absent pairs per
+consumer layer and producer kind from the snapshot, checks each against the consumer element's raw
+text, and reports precision, recall and every disagreement. It reads only the snapshot and `raw/` that
+an earlier `run` produced (so, like every osgraph command that builds data, it depends on osopener and
+the token manager having produced them), and needs no Service Studio itself. The human half, comparing
+sampled module pairs with Studio's dependency list, is written up in [`LIVE-AUDIT.md`](LIVE-AUDIT.md).
+
 ---
 
 ## Configuration

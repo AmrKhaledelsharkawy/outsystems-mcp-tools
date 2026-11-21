@@ -8,6 +8,8 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph                                 start the MCP server on stdio (default)
   osgraph reextract --scope <name>        rebuild graph.json + flows.json from <graphDir>/<scope>/raw/
                                           with NO Service Studio and no session token
+  osgraph audit --scope <name>            sample edges and absent pairs, check them against the raw texts,
+                                          report precision and recall (offline; see LIVE-AUDIT.md)
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
@@ -19,6 +21,13 @@ reextract options:
   --json             print the full result as JSON instead of a summary
   --quiet            no per-module progress on stderr
   --serve            keep a live progress / graph-explorer site running afterwards
+
+audit options:
+  --scope <name>     required; the scope whose snapshot and raw/ captures are audited
+  --k <n>            edges and absent pairs drawn per layer/kind (default 20)
+  --seed <text>      sampling seed; the same snapshot, k and seed draw the same pairs (default 1)
+  --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
+  --json             print the full report as JSON instead of Markdown
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -65,13 +74,14 @@ export function parseArgs(argv: string[]): { command: string; options: Record<st
 /**
  * #7: command-scoped configuration. `true` = the command does nothing but drive Service Studio, so a
  * missing / invalid `OSGRAPH_SERVICESTUDIO_URL` fails it at start with the config exit code (2).
- * `false` = the command starts without an endpoint: `reextract` only reads local captures, and
+ * `false` = the command starts without an endpoint: `reextract` and `audit` only read local captures, and
  * `serve` hosts the offline query tools alongside `rebuild`, which checks the endpoint itself when it
  * is dispatched; `run` (#48) does nothing but drive Studio, so it needs the endpoint at start. A new live-only CLI command must be listed here as `true`.
  */
 export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
   serve: false,
   reextract: false,
+  audit: false,
   run: true
 };
 
