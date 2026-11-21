@@ -114,7 +114,7 @@ osgraph does not work alone"** above.
 **What exists today:** stages 3, 4 (as `raw/` captures) and 5 (as a single snapshot) ship
 in the caller-triggered [`rebuild`](#tools) tool, which is **not** being removed — it stays
 the way to build a baseline and to force a re-read. Stages 1, 2, 6 and 7, immutable
-generations and the `watch` / `sync` / `status` / `doctor` commands are being built across
+generations and the `watch` / `sync` / `status` commands are being built across
 milestones M0–M4; the issue tracker is the authority on what has landed.
 
 ---
@@ -355,6 +355,45 @@ other module: the rest of the graph is only as fresh as its last full read.
 
 The live progress site is raised and its URL printed before any work starts; add
 `--serve` to keep it up after the run ends.
+
+### `osgraph doctor` — why a rebuild or run cannot work here
+
+One **read-only** command that explains, before anything fails halfway, whether this machine can
+rebuild or `run` a scope:
+
+```bash
+node dist/cli.js doctor --scope <name>
+node dist/cli.js doctor --scope <name> --json   # the report as JSON on stdout
+```
+
+| Check | Fails when |
+|---|---|
+| `token` | no `token.txt` at or above the working directory (the same search osopener uses), the file is empty, or Studio's `listApps` rejects it. The remedy is always a **human approving a new session through the token manager**; the doctor never calls `createSessionToken` and never prints the token. |
+| `endpoint` | `OSGRAPH_SERVICESTUDIO_URL` is unset/invalid, or Studio's MCP endpoint cannot be reached. A reachable endpoint that rejects the token is reported as a `token` failure, not an `endpoint` one. |
+| `osopener` | the shared adapter cannot load osopener; its failure cause is shown verbatim. |
+| `scope` | a module in the scope does not match a listed name **case-exactly**. Near misses (different case, typo) are reported with a suggestion. A listed-but-closed module is a warning. |
+| `graphDir` | the graph directory is not writable. Also reports whether a snapshot exists and how old it is. |
+
+`scope` and the snapshot age need `--scope`. Exit code is `1` when any check fails, `0` otherwise.
+It writes nothing and opens or closes no module; its one Studio call is `listApps`.
+
+**"No module is currently open in Service Studio"** means *that name is not an open module* — a
+closed, misspelled or wrongly-cased name — even while other modules are open. It does not mean
+Studio is empty or unreachable. The `scope` check says which of your names it is.
+
+This is the **local** doctor. Source / DEV-environment preflight (issue #9) is deferred and will
+extend this command rather than replace it. As everywhere, osgraph is not standalone: the doctor
+checks the two things it depends on — the human-approved session token and osopener.
+
+#### Live verification procedure (human, Service Studio open)
+
+Run each case and confirm the named check fails with the right cause, then restore the setup:
+
+1. **Expired token** — keep Studio open, put a stale value in the workspace's `token.txt`
+   (or let the session lapse). Expect `token` FAIL ("rejected the token") and `endpoint` PASS.
+2. **Studio closed** — quit Service Studio. Expect `endpoint` FAIL ("unreachable"), `token` SKIP.
+3. **Wrong-case scope name** — open the scope's modules, change one module name's case in the
+   scope file. Expect `scope` FAIL with `did you mean '<correct name>' (different case)`.
 
 ### Offline re-extract
 
