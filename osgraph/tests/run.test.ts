@@ -218,6 +218,21 @@ const OPEN_DIALOG_STUCK =
 const TRANSIENT_PROGRESS =
   "'Open from Environment' did not produce a settled Studio dialog: only the transient Progress window appeared";
 
+describe("safe Save-dialog recovery in osgraph run", () => {
+  it("stops after one unresolvable Save prompt, leaving later modules unopened", async () => {
+    const s = fakeStudio(mods(), {
+      openScript: {
+        alpha: [{ opened: false, error: { code: "UNSAVED_CHANGES_DIALOG", message: "the dialog has no usable Cancel button" } }]
+      }
+    });
+    const result = await runScope({ ...common(tmp(), s, []), maxConsecutiveFailures: 3 });
+    expect(result.finalized).toBe(false);
+    expect(result.stoppedEarly).toContain("Cannot safely dismiss");
+    expect(s.openInputs.map((i) => i.name)).toEqual(["alpha"]);
+    expect(s.openInputs[0]?.cancelSavePrompt).toBe(true);
+  });
+});
+
 /* -------------------------------------------------------------------------------------------- */
 /* Full staged build                                                                             */
 /* -------------------------------------------------------------------------------------------- */
