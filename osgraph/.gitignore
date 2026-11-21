@@ -14,3 +14,4 @@ raw/
 # Only tests over synthetic or in-memory inputs belong here (see tests/PROVENANCE.md).
 !tests/run.test.ts
 !tests/config.tokenDiscovery.test.ts
+!tests/flows.serviceAction.test.ts

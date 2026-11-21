@@ -22,6 +22,7 @@ export default defineConfig({
       "tests/config.tokenDiscovery.test.ts",
       "tests/doctor.test.ts",
       "tests/extractor.nodeOrder.test.ts",
+      "tests/flows.serviceAction.test.ts",
       "tests/graph.test.ts",
       "tests/graphify.test.ts",
       "tests/layers.test.ts",
