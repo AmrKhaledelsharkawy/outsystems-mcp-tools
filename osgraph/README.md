@@ -344,7 +344,11 @@ offline re-extract; the unnamed modules need a `raw/` capture. `--changed` opens
 module, compares the version Service Studio lists for it with the `moduleVersion` in its capture
 manifest, and re-reads only those that differ; then one re-extract. Every module is reported with
 its reason: `unchanged`, `changed`, `unknown` (the capture or the listing carries no version,
-e.g. a schema-1 manifest) or `no capture`. An unknown version is never treated as unchanged. The two
+e.g. a schema-1 manifest, or version `"0"`) or `no capture`. An unknown version is never treated as
+unchanged; the run ends with one `WARNING:` line counting the modules re-read for that reason. Service
+Studio lists a module's real server version only when it was opened through *Open from Environment*
+(a recent-list open lists `"0"`), so every `osgraph run` mode opens modules with osopener's
+`source: "environment"`. The two
 flags combine (`--modules` limits the candidates). Opening, `--max-open` and drain-before-close are
 the same as a full run. The comparison is one function (`decideChange` in `src/run/changed.ts`) so a
 stronger change signal can replace it later. Like every `osgraph run` mode this needs osopener and the
@@ -352,7 +356,8 @@ token manager's session token. A failed module skips the re-extract and exits 1.
 
 **Verifying `--changed` (human, live Service Studio required).** The listed version is trusted only
 after this probe passes: (1) publish a throwaway module and confirm the version `listApps` reports for
-it changes; (2) close and reopen an unchanged module and confirm its version does not change; (3) after
+it changes; (2) close and reopen an unchanged module (through *Open from Environment*) and confirm its
+version does not change; (3) after
 publishing one module of a small scope, run `osgraph run --scope <scope> --changed` and confirm only
 that module is read (see the run log and timings). If (1) or (2) fails, set
 `OSGRAPH_DISABLE_CHANGED=1`: `--changed` then refuses with `CHANGED_DISABLED`; use `--modules` instead.
