@@ -1,5 +1,6 @@
 /**
- * Token-file discovery for `osgraph doctor` (#63).
+ * Token-file discovery - the ONE rule shared by `loadConfig` (which picks file vs interactive token
+ * mode for every command that talks to Studio) and `osgraph doctor` (#63), so the two always agree.
  *
  * This deliberately mirrors the rule osopener uses (`osopener/src/config.ts`: `resolveTokenFile`),
  * so the doctor looks at the same `token.txt` osopener would read: an explicitly configured file

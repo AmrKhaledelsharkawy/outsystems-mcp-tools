@@ -13,3 +13,4 @@ raw/
 # re-admits a file the root list ignores; keep this list in step with vitest.published.config.ts.
 # Only tests over synthetic or in-memory inputs belong here (see tests/PROVENANCE.md).
 !tests/run.test.ts
+!tests/config.tokenDiscovery.test.ts

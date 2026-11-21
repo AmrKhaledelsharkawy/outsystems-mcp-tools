@@ -19,6 +19,7 @@ export default defineConfig({
       "tests/accuracy.gate.test.ts",
       "tests/audit.test.ts",
       "tests/config.test.ts",
+      "tests/config.tokenDiscovery.test.ts",
       "tests/doctor.test.ts",
       "tests/extractor.nodeOrder.test.ts",
       "tests/graph.test.ts",

@@ -481,7 +481,7 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
-| `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file |
+| `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file. Unset (or naming a missing file): every command — `run`, `rebuild`, `doctor`, discovery — uses the nearest `token.txt` at or above the working directory, by the one rule `doctor` and osopener share, and logs one stderr line naming the file (never its contents). Only when no file is found does osgraph fall back to interactive mode (`createSessionToken`, which raises a human approval dialog). A found file that Studio rejects fails `TOKEN_EXPIRED`; it never falls back to interactive |
 | `OSGRAPH_GRAPH_DIR` | no | `<cwd>/.osgraph` | Where snapshots are written |
 | `OSGRAPH_SCOPES_DIR` | no | `<package>/scopes` | Where scope files live |
 | `OSGRAPH_GRAPHIFY_BIN` | no | `graphify` | The pinned graphify executable used by `queryPath` |

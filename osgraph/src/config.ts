@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveTokenFile } from "./doctor/token.js";
 import { parseSkipKinds, PRUNABLE_KINDS, type PrunableKind } from "./rebuild/readKinds.js";
 import type { OsgraphErrorCode } from "./types.js";
 
@@ -22,7 +23,12 @@ export interface OsgraphConfig {
    * which raises the same `CONFIG_MISSING` / `CONFIG_INVALID` errors process start used to.
    */
   serviceStudioUrl: string | undefined;
-  /** Hook-saved session token file, read-only (ADR-0004). Undefined = interactive token mode. */
+  /**
+   * Hook-saved session token file, read-only (ADR-0004). `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` when it
+   * names an existing file; otherwise the nearest `token.txt` at or above the working directory (the
+   * same `resolveTokenFile` rule `osgraph doctor` and osopener use). Undefined only when neither is
+   * found = interactive token mode.
+   */
   tokenFile: string | undefined;
   /** Where snapshots live: `<graphDir>/<scope>/graph.json`. */
   graphDir: string;
@@ -228,7 +234,9 @@ export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphCo
 
   return {
     serviceStudioUrl,
-    tokenFile: nonEmpty(env[ENV_SERVICESTUDIO_TOKEN_FILE]),
+    // One discovery rule for config and doctor: explicit existing file > nearest token.txt above cwd >
+    // the explicit (missing) path, which then fails TOKEN_EXPIRED > none (interactive).
+    tokenFile: resolveTokenFile(env, { cwd, exists }).path,
     graphDir,
     scopesDir,
     graphifyBin: nonEmpty(env[ENV_GRAPHIFY_BIN]) ?? "graphify",
