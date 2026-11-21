@@ -32,7 +32,7 @@ keyboard), because Service Studio exposes no API for opening a module.
 | Tool | Input | Does |
 |---|---|---|
 | `listOpenModules` | — | Lists every open module, plus a `tabs[]` row per module giving its **application** name, which Studio window holds its tab, and `modified: true` when the tab carries Studio's `* ` unsaved-changes marker |
-| `openModule` | `name`, `focusPolicy?`, `source?` | Opens a module by exact name; returns once `listApps` confirms it |
+| `openModule` | `name`, `focusPolicy?`, `source?`, `cancelSavePrompt?` | Opens a module by exact name; returns once `listApps` confirms it. Optional Cancel-only save-dialog recovery (off by default) |
 | `closeModule` | `name` | Closes a module's tab |
 | `focusStudio` | — | Brings Service Studio to the front. Opens nothing |
 
