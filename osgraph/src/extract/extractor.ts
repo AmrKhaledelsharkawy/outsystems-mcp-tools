@@ -339,10 +339,18 @@ export function extractText(text: string, ctx: TextContext): TextResult {
   };
 
   // Collect passes run to a fixpoint (a lookup may chain through a var declared later in the text).
+  // The table is compared by content, not size: a later declaration may overwrite an earlier entry
+  // with a different value without growing the map. The cap bounds pathological self-referential
+  // texts; real chains settle in 2-3 passes, and hitting the cap only means the emit pass resolves
+  // against the table as far as it got (never worse than the old single-pass behaviour).
+  const MAX_COLLECT_PASSES = 8;
+  const tableKey = (): string => JSON.stringify([...vars]);
   collecting = true;
-  for (let pass = 0, size = -1; pass < 8 && vars.size !== size; pass++) {
-    size = vars.size;
+  for (let pass = 0, key = ""; pass < MAX_COLLECT_PASSES; pass++) {
     scan();
+    const next = tableKey();
+    if (next === key) break;
+    key = next;
   }
   collecting = false;
   lambdaFlowVar = undefined;
