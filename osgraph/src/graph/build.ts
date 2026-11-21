@@ -181,6 +181,10 @@ export function buildSnapshot(options: BuildSnapshotOptions): BuildResult {
     if (nodes.has(node.id)) continue;
     const resolved = resolveInScope(node.id);
     if (resolved && "unmatched" in resolved) {
+      // ADR-0009: an element whose read was skipped is recorded in `skipped`, never stubbed. Without
+      // this, the consumer's reference node re-creates it as a placeholder that reads as "the
+      // producer has this element" when the truth is "we could not read it".
+      if (isSkippedTarget(node.id)) continue;
       // A declared dependency on an element its in-scope module does not have (historical / renamed
       // name): a counted placeholder, never a silent `external` and never silently dropped.
       const { external: _external, globalKey: _globalKey, ...rest } = toSnapshotNode(node);
