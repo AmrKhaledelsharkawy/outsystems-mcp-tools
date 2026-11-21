@@ -3,14 +3,14 @@
  *
  * osgraph v1 recorded only *which* elements an action touched. This records the logic inside it: the
  * flow nodes, the connectors between them, and every expression as text. Expressions are opaque
- * strings on purpose — there is no expression parser and no data-flow analysis (osmodel's "no
+ * strings on purpose — there is no expression parser and no data-flow analysis ("no
  * semantic parsing of expressions" rule), and `searchFlows`' regex is the query over them.
  *
  * Two invariants the parser is tested against:
  *
  *  - **Creation order is the node order.** `FlowNode.id` ends in `/n<k>` where `k` is the 1-based
  *    position of the node's `CreateNode<…>` in the text. Studio's text keeps node creation order
- *    stable (it does NOT keep call-argument order stable — see the sort in `parse.ts`); the live `IAction.Nodes` order is **not** (osmodel OSM-013 found it returning
+ *    stable (it does NOT keep call-argument order stable — see the sort in `parse.ts`); the live `IAction.Nodes` order is **not** (found it returning
  *    Assign, Start, End), so node order is never read from anywhere else.
  *  - **Nothing is dropped.** Every `CreateNode<…>` becomes a node, and one whose interface is not in
  *    the known vocabulary becomes `type: "Unknown:I…Node"` carrying its statements in `raw`. A
@@ -111,7 +111,7 @@ export interface FlowNode {
  * Where a connector leaves its source node.
  *
  * On an `IForEachNode`, `Cycle` is the **loop body** entry and `Target` is the **exit**
- * continuation — live-confirmed by osmodel on 2026-10-17 and easy to get backwards.
+ * continuation — live-confirmed on 2026-10-17 and easy to get backwards.
  */
 export type ConnectorPort = "Target" | "True" | "False" | "Cycle" | "Otherwise" | "Comment" | `Case[${number}]`;
 

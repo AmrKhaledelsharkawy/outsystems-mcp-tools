@@ -169,10 +169,10 @@ fields (`rebuiltAt`, the duration figures) may differ, because they time the run
 ## The IR, confirmed as proposed, with four refinements
 
 The goal's Design 3 is accepted: `FlowAction` / `FlowNode` / `Connector` / `Binding`, expressions as
-opaque strings, no expression parser, no data-flow tracing (osmodel's rule). Ids are
+opaque strings, no expression parser, no data-flow tracing (a deliberate rule). Ids are
 `<owner element id>#<ActionName>` for a local action, the element id for a module-level one, and
 `<action id>/n<k>` for a node where `k` is **creation order in the text**. Creation order, never the
-live `IAction.Nodes` order, which osmodel found returning `Assign, Start, End`.
+live `IAction.Nodes` order, which was observed returning `Assign, Start, End`.
 
 Four refinements the parser forced:
 
