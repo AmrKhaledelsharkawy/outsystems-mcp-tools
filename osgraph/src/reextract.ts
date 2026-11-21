@@ -171,6 +171,10 @@ export function reextractScope(options: ReextractOptions): ReextractResult {
     layerAssign: (m) => assignLayer(m, rules),
     now: now()
   });
+  // #69: a capture taken with a kind switched off says so in its manifest; the snapshot built from it
+  // must carry the same note a live rebuild would have written, so partial never looks complete.
+  const skippedKinds = [...new Set([...captures.values()].flatMap((c) => c.manifest.skippedKinds ?? []))].sort();
+  if (skippedKinds.length > 0) built.meta.skippedKinds = skippedKinds;
   mkdirSync(dirname(snapshotPath), { recursive: true });
   writeSnapshot(snapshotPath, built.snapshot, built.meta);
 

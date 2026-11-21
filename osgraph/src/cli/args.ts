@@ -12,6 +12,9 @@ export const USAGE = `osgraph — MCP server and offline tools
                                           (offline, read-only; no Service Studio, no token)
   osgraph audit --scope <name>            sample edges and absent pairs, check them against the raw texts,
                                           report precision and recall (offline; see LIVE-AUDIT.md)
+  osgraph kinds --scope <name>            read-cost report: per element kind, read time against the edges
+                                          and flows it yielded (offline: reads timings.json, graph.json,
+                                          flows.json; no Service Studio, no session token)
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
@@ -46,6 +49,13 @@ audit options:
   --seed <text>      sampling seed; the same snapshot, k and seed draw the same pairs (default 1)
   --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
   --json             print the full report as JSON instead of Markdown
+
+kinds options:
+  --scope <name>     required
+  --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
+  --json             print the report as JSON
+  A kind with read time and zero edges and zero flows is a candidate for OSGRAPH_SKIP_KINDS
+  (Entity, Structure, ClientAction, ServerAction; Screen and Block cannot be switched off).
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -107,6 +117,7 @@ export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> 
   doctor: false,
   status: false,
   audit: false,
+  kinds: false,
   run: true
 };
 

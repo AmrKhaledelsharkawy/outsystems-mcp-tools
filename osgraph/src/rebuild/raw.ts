@@ -124,6 +124,11 @@ export interface RawManifest {
   referencedOnlyCount: number;
   /** Element reads that failed twice and were skipped (OSG-011). Their texts are not on disk. */
   skipped: RawManifestSkip[];
+  /**
+   * Kinds deliberately not read (#69; OSGRAPH_SKIP_KINDS). Absent when everything was read, so a
+   * default capture's manifest is unchanged. `reextract` copies it into `meta.json`.
+   */
+  skippedKinds?: string[];
   /** One entry per file actually written, in capture order. */
   texts: RawManifestEntry[];
 }
@@ -285,6 +290,7 @@ export class RawModuleWriter {
     moduleVersion?: string | null;
     referencedOnlyCount: number;
     skipped: RawManifestSkip[];
+    skippedKinds?: readonly string[];
   }): string {
     const key = typeof options.moduleKey === "string" && options.moduleKey !== "" ? options.moduleKey : null;
     const version =
@@ -304,6 +310,9 @@ export class RawModuleWriter {
     };
     if (options.requestedAs !== undefined && options.requestedAs !== this.module) {
       manifest.requestedAs = options.requestedAs;
+    }
+    if (options.skippedKinds !== undefined && options.skippedKinds.length > 0) {
+      manifest.skippedKinds = [...options.skippedKinds];
     }
     try {
       verifyTexts(this.stagingDir, this.scope, this.module, manifest.texts);

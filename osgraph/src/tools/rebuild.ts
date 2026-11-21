@@ -161,7 +161,8 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
             now: ctx.now,
             onProgress,
             fetchReferencedElements: fetchReferencedElements(ctx),
-            fetchConcurrency: ctx.config.fetchConcurrency
+            fetchConcurrency: ctx.config.fetchConcurrency,
+            skipKinds: ctx.config.skipKinds
           });
           // The snapshot and meta stay on disk: a tool response must never carry the whole graph.
           const { outcome: finalized, ...rest } = staged;
@@ -186,6 +187,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
           fetchReferencedElements: fetchReferencedElements(ctx),
           // OSG-016 §C1: the same width the client's gate is set to, from one config field.
           fetchConcurrency: ctx.config.fetchConcurrency,
+          skipKinds: ctx.config.skipKinds,
           // F0: capture every element text under `<graphDir>/<scope>/raw/`, so flow extraction can be
           // re-run offline (`reextract`) instead of re-reading the scope live.
           rawGraphDir: ctx.config.graphDir

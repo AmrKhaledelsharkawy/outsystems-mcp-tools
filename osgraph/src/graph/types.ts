@@ -91,4 +91,9 @@ export interface SnapshotMeta {
    */
   stagedFrom?: string;
   stagedTo?: string;
+  /**
+   * Kinds that were deliberately not read by at least one module (#69, OSGRAPH_SKIP_KINDS). Present
+   * only when non-empty: a snapshot built with the default configuration has no such key.
+   */
+  skippedKinds?: string[];
 }

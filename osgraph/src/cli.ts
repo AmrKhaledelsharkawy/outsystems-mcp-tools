@@ -5,6 +5,7 @@ import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { computeGraphStatus, formatGraphStatus } from "./status/graphStatus.js";
 import { auditScope, DEFAULT_K, DEFAULT_SEED, formatReport } from "./audit/index.js";
+import { buildKindReport, formatKindReport } from "./report/kinds.js";
 import { readScope } from "./scopes/index.js";
 import { renderDoctorReport, runDoctor } from "./doctor/doctor.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
@@ -108,6 +109,23 @@ ${USAGE}`);
   process.stdout.write(options.json === "true" ? `${JSON.stringify(result, null, 2)}
 ` : `${formatGraphStatus(result)}
 `);
+}
+
+/** #69 `osgraph kinds`: the offline read-cost report. */
+async function runKinds(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `kinds needs --scope <name>.\n${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const report = buildKindReport({
+    graphDir,
+    scope: scope.name,
+    snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name)
+  });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}\n` : `${formatKindReport(report)}\n`);
 }
 
 /** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
@@ -265,6 +283,7 @@ async function runRunLocked(
     state: site.state,
     log,
     fetchConcurrency: config.fetchConcurrency,
+    skipKinds: config.skipKinds,
     fetchReferencedElements: process.env.OSGRAPH_FETCH_REFERENCED_ELEMENTS === "1"
   };
 
@@ -405,6 +424,11 @@ if (options.help === "true" || command === "help") {
       } catch (err) {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       }
+    } else if (command === "kinds") {
+      runKinds(config, options).catch((err: unknown) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+      });
     } else if (command === "run") {
       runRun(config, options).catch((err: unknown) => {
         const code = (err as { code?: unknown } | null)?.code;
