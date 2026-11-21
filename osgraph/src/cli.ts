@@ -4,6 +4,7 @@ import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { computeGraphStatus, formatGraphStatus } from "./status/graphStatus.js";
+import { auditScope, DEFAULT_K, DEFAULT_SEED, formatReport } from "./audit/index.js";
 import { readScope } from "./scopes/index.js";
 import { renderDoctorReport, runDoctor } from "./doctor/doctor.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
@@ -117,6 +118,32 @@ function intFlag(value: string | undefined, fallback: number): number | null {
   if (!/^\d+$/.test(value)) return null;
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
+}
+
+/** #67 `osgraph audit`: offline accuracy audit of a scope's snapshot against its raw texts. */
+function runAudit(config: OsgraphConfig, options: Record<string, string>): void {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `audit needs --scope <name>.
+${USAGE}`);
+    return;
+  }
+  const k = intFlag(options.k, DEFAULT_K);
+  if (k === null || k < 1) {
+    fail(EXIT_USAGE, `--k must be an integer >= 1.
+${USAGE}`);
+    return;
+  }
+  if (options.seed === "true") {
+    fail(EXIT_USAGE, `--seed needs a value.
+${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const report = auditScope({ graphDir, scope: scope.name, k, seed: options.seed ?? DEFAULT_SEED });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}
+` : formatReport(report));
 }
 
 /**
@@ -371,6 +398,12 @@ if (options.help === "true" || command === "help") {
       } catch (err) {
         const code = (err as { code?: unknown } | null)?.code;
         fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (command === "audit") {
+      try {
+        runAudit(config, options);
+      } catch (err) {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       }
     } else if (command === "run") {
       runRun(config, options).catch((err: unknown) => {

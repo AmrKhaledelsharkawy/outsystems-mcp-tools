@@ -16,6 +16,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: [
+      "tests/audit.test.ts",
       "tests/config.test.ts",
       "tests/doctor.test.ts",
       "tests/graph.test.ts",

@@ -435,6 +435,15 @@ node dist/cli.js --help
 
 Live check (human, with Service Studio open): after a real `osgraph run --scope <name>`, compare `osgraph status --scope <name> --json` with each `<graphDir>/<scope>/raw/<module>/manifest.json` (`capturedAt`, `moduleVersion`, `skipped.length`, `referencedOnlyCount`); they must match exactly.
 
+### Accuracy audit
+
+`osgraph audit --scope <name> [--k 20] [--seed 1] [--json]` samples K edges and K absent pairs per
+consumer layer and producer kind from the snapshot, checks each against the consumer element's raw
+text, and reports precision, recall and every disagreement. It reads only the snapshot and `raw/` that
+an earlier `run` produced (so, like every osgraph command that builds data, it depends on osopener and
+the token manager having produced them), and needs no Service Studio itself. The human half, comparing
+sampled module pairs with Studio's dependency list, is written up in [`LIVE-AUDIT.md`](LIVE-AUDIT.md).
+
 ---
 
 ## Configuration
