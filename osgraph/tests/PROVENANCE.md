@@ -50,6 +50,10 @@ Two consequences worth stating, because both have already bitten:
 | `rebuild.capture.test.ts` | the real-capture rebuild cases kept after the port (see below) |
 | `servicestudio.live.test.ts` | needs a live Service Studio MCP endpoint and an approved token |
 
+## `query.ergonomics.test.ts`: published, synthetic only (#70)
+
+Covers the suggestion, result-limit and offline-CLI query behaviour. It builds its snapshots in memory from arbitrary identifiers, reads no capture, and needs no Service Studio, osopener, token or network, so it is published and listed in `vitest.published.config.ts`.
+
 ## The `rebuild.fake.ts` family: published on a synthetic module, with the real-capture cases kept
 
 `rebuild.test.ts`, `tools.test.ts`, `raw.test.ts`, `reextract.test.ts`, `rebuild.fake.ts` and

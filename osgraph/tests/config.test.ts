@@ -184,14 +184,26 @@ describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start wi
   const load = (command: string, table?: Readonly<Record<string, boolean>>) =>
     loadConfig2({}, { cwd: "C:/w", existsSync: () => false, requireServiceStudio: requiresServiceStudioAtStart(command, table) });
 
-  it2("serve, reextract, doctor (#63), status (#66), audit (#67) and kinds (#69) start without an endpoint", () => {
-    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, doctor: false, status: false, audit: false, kinds: false, run: true });
+  it2("serve, reextract and the offline commands (doctor #63, status #66, audit #67, kinds #69, impact/flow/path #70) start without an endpoint", () => {
+    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({
+      serve: false,
+      reextract: false,
+      doctor: false,
+      status: false,
+      audit: false,
+      kinds: false,
+      impact: false,
+      flow: false,
+      path: false,
+      run: true
+    });
     expect2(requiresServiceStudioAtStart("serve")).toBe(false);
     expect2(requiresServiceStudioAtStart("reextract")).toBe(false);
     expect2(requiresServiceStudioAtStart("doctor")).toBe(false);
     expect2(requiresServiceStudioAtStart("status")).toBe(false);
     expect2(requiresServiceStudioAtStart("audit")).toBe(false);
     expect2(requiresServiceStudioAtStart("kinds")).toBe(false);
+    for (const c of ["impact", "flow", "path"]) expect2(requiresServiceStudioAtStart(c)).toBe(false);
     expect2(load("serve").serviceStudioUrl).toBeUndefined();
     expect2(load("reextract").serviceStudioUrl).toBeUndefined();
   });

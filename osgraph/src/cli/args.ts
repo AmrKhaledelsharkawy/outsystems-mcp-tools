@@ -15,6 +15,12 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph kinds --scope <name>            read-cost report: per element kind, read time against the edges
                                           and flows it yielded (offline: reads timings.json, graph.json,
                                           flows.json; no Service Studio, no session token)
+  osgraph impact --scope <name> --node <id> --direction dependents|dependencies
+                                          what depends on / is depended on by a node (offline, reads graph.json)
+  osgraph flow --scope <name> --element <id|name>
+                                          the logic inside one element (offline, reads flows.json)
+  osgraph path --scope <name> --from <id> --to <id>
+                                          shortest path between two nodes (offline; needs the pinned graphify)
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
@@ -56,6 +62,17 @@ kinds options:
   --json             print the report as JSON
   A kind with read time and zero edges and zero flows is a candidate for OSGRAPH_SKIP_KINDS
   (Entity, Structure, ClientAction, ServerAction; Screen and Block cannot be switched off).
+
+impact / flow / path options (offline mirrors of queryImpact / getFlow / queryPath: same results, no
+Service Studio, no osopener, no token; they only read a snapshot an earlier run or rebuild produced):
+  --scope <name>     required
+  --json             print the MCP tool's response envelope as JSON (identical to the tool's answer)
+  --limit <n>        impact: max nodes (default 500); path: max steps (default 200). Output reports total + truncated
+  impact:  --node <osgraph:// id> --direction dependents|dependencies [--max-depth <n>]
+  flow:    --element <id|name> [--action <name>] [--module <name>] [--include-ir false]
+  path:    --from <id> --to <id> [--undirected]
+  An unknown node or scope answers with ranked did-you-mean suggestions; the exact name is still required.
+  Exit code 1 when the response is an error.
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -118,6 +135,9 @@ export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> 
   status: false,
   audit: false,
   kinds: false,
+  impact: false,
+  flow: false,
+  path: false,
   run: true
 };
 

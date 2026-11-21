@@ -10,11 +10,12 @@ import { readScope } from "./scopes/index.js";
 import { renderDoctorReport, runDoctor } from "./doctor/doctor.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
+import { CliUsageError, formatQueryResponse, isQueryCommand, runQueryCommand, type QueryCommand } from "./cli/query.js";
 import { defaultStudioLockPath, createFileStudioLock } from "./lock/studioLock.js";
 import { closeSite, ensureSite } from "./progress/site.js";
 import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js";
 import { createServiceStudioClient } from "./servicestudio/token.js";
-import { createSharedSessionFactory } from "./tools/tool.js";
+import { createSharedSessionFactory, createToolContext } from "./tools/tool.js";
 import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, refreshModules, runScope } from "./run/run.js";
 
 const EXIT_CONFIG = 2;
@@ -126,6 +127,25 @@ async function runKinds(config: OsgraphConfig, options: Record<string, string>):
     snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name)
   });
   process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}\n` : `${formatKindReport(report)}\n`);
+}
+
+/** #70 `osgraph impact | flow | path`: offline mirrors of the MCP query tools. */
+async function runQuery(command: QueryCommand, config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const ctx = createToolContext(options["graph-dir"] !== undefined ? { ...config, graphDir: options["graph-dir"] } : config);
+  let response;
+  try {
+    response = await runQueryCommand(command, options, ctx);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      fail(EXIT_USAGE, `${err.message}\n${USAGE}`);
+      return;
+    }
+    throw err;
+  }
+  process.stdout.write(
+    options.json === "true" ? `${JSON.stringify(response, null, 2)}\n` : `${formatQueryResponse(command, response)}\n`
+  );
+  if (response.error) process.exitCode = EXIT_FATAL;
 }
 
 /** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
@@ -428,6 +448,10 @@ if (options.help === "true" || command === "help") {
       runKinds(config, options).catch((err: unknown) => {
         const code = (err as { code?: unknown } | null)?.code;
         fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+      });
+    } else if (isQueryCommand(command)) {
+      runQuery(command, config, options).catch((err: unknown) => {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       });
     } else if (command === "run") {
       runRun(config, options).catch((err: unknown) => {

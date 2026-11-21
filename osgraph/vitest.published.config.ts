@@ -26,6 +26,7 @@ export default defineConfig({
       "tests/progress.discover.test.ts",
       "tests/progress.server.test.ts",
       "tests/progress.state.test.ts",
+      "tests/query.ergonomics.test.ts",
       "tests/raw.test.ts",
       "tests/readKinds.test.ts",
       "tests/rebuild.test.ts",
