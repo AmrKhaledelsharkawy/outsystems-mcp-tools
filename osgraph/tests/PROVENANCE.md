@@ -40,7 +40,7 @@ Two consequences worth stating, because both have already bitten:
 |---|---|
 | `fixtures/<captured-module>/` | verbatim read-only captures of one real Reactive module — its screens, blocks and data model, named as they are named in production. The directory is named after that module, which is why this file does not spell it out |
 | `fixtures/flows/` | real `*_CW` block and screen captures (the flow-parser corpus), plus the syntax table that cites them |
-| `fixtures/osmodel-replays/` | `getServerAction` replays from a real environment's scratch module |
+| `fixtures/replays/` | `getServerAction` replays from a real environment's scratch module |
 | `fixtures/README.md` | the provenance table itself — it is a list of real element names |
 | `live/` | records of live rebuild runs against a named 30-module scope |
 | `extract.test.ts` | reads the captured module's texts directly |

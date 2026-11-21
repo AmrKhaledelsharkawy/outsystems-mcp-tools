@@ -69,7 +69,7 @@ export function isUnknownNodeType(type: string): boolean {
 /**
  * Property name → connector port. A property not listed here is an ordinary node property, never a
  * connector: `ForEach.CycleTarget` is the loop **body** and `ForEach.Target` the **exit**, which is
- * the one pairing in this table that is routinely assumed backwards (osmodel, live 2026-10-17).
+ * the one pairing in this table that is routinely assumed backwards (live 2026-10-17).
  */
 export function portForProperty(property: string): ConnectorPort | undefined {
   switch (property) {

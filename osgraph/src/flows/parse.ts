@@ -29,7 +29,7 @@
  *    created `.ToTheRightOf(ifNode)` is wired by a separate `ifNode.FalseTarget = forEachNode`, so
  *    treating the positioning call as a connector would invent an edge and double the real one.
  *  - On `IForEachNode`, `CycleTarget` is the loop **body** and `Target` is the **exit**
- *    (osmodel, live-confirmed 2026-10-17). `portForProperty` is the single place that mapping lives.
+ *    (live-confirmed 2026-10-17). `portForProperty` is the single place that mapping lives.
  */
 import { buildId, normalizeModuleName } from "../extract/ids.js";
 import { collectionKind, isFlowQualified, normalizeKind } from "../extract/kinds.js";

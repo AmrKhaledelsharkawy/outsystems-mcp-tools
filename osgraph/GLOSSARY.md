@@ -57,7 +57,7 @@ The logic inside one action — a screen action, block action, client action, se
 _Avoid_: Logic, action body, diagram, graph (a flow is not a Graphify graph)
 
 **Flow node**:
-One step of a Flow: `Start`, `Assign`, `If`, `Switch`, `ForEach`, a call (`ExecuteServerAction` / `ExecuteClientAction`), `Destination`, `RaiseException`, `ExceptionHandler`, `End`, and the rest of the 32 `I*Node` interfaces. Id `<flow id>/n<k>`, where `k` is the node's **creation order in Studio's text** — never the live `IAction.Nodes` order, which is not creation order (osmodel OSM-013). A node whose interface is outside the known vocabulary is kept as type `Unknown:<Interface>` with its raw statements, and counted in `unknownNodeCount`; it is never dropped.
+One step of a Flow: `Start`, `Assign`, `If`, `Switch`, `ForEach`, a call (`ExecuteServerAction` / `ExecuteClientAction`), `Destination`, `RaiseException`, `ExceptionHandler`, `End`, and the rest of the 32 `I*Node` interfaces. Id `<flow id>/n<k>`, where `k` is the node's **creation order in Studio's text** — never the live `IAction.Nodes` order, which is not creation order (live-observed). A node whose interface is outside the known vocabulary is kept as type `Unknown:<Interface>` with its raw statements, and counted in `unknownNodeCount`; it is never dropped.
 _Avoid_: Step, instruction, statement, shape
 
 **Connector**:
