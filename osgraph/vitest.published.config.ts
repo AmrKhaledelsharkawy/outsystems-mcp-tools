@@ -20,6 +20,7 @@ export default defineConfig({
       "tests/audit.test.ts",
       "tests/config.test.ts",
       "tests/doctor.test.ts",
+      "tests/extractor.nodeOrder.test.ts",
       "tests/graph.test.ts",
       "tests/graphify.test.ts",
       "tests/layers.test.ts",

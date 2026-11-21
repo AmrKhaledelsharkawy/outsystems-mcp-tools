@@ -24,7 +24,11 @@ osopener/tracks/
 # Keep this list and vitest.published.config.ts's `include` in step.
 osgraph/tests/*
 !osgraph/tests/PROVENANCE.md
+!osgraph/tests/accuracy.gate.test.ts
+!osgraph/tests/audit.test.ts
 !osgraph/tests/config.test.ts
+!osgraph/tests/doctor.test.ts
+!osgraph/tests/extractor.nodeOrder.test.ts
 !osgraph/tests/graph.test.ts
 !osgraph/tests/graphify.test.ts
 !osgraph/tests/layers.test.ts
@@ -33,15 +37,19 @@ osgraph/tests/*
 !osgraph/tests/progress.state.test.ts
 !osgraph/tests/query.ergonomics.test.ts
 !osgraph/tests/raw.test.ts
+!osgraph/tests/readKinds.test.ts
 !osgraph/tests/rebuild.fake.ts
 !osgraph/tests/rebuild.test.ts
 !osgraph/tests/reextract.test.ts
+!osgraph/tests/run.test.ts
 !osgraph/tests/scopes.test.ts
 !osgraph/tests/servicestudio.client.test.ts
 !osgraph/tests/servicestudio.fake.ts
 !osgraph/tests/servicestudio.token.test.ts
 !osgraph/tests/servicestudio.unwrap.test.ts
 !osgraph/tests/smoke.test.ts
+!osgraph/tests/status.test.ts
+!osgraph/tests/studioLock.test.ts
 !osgraph/tests/tools.helpers.ts
 !osgraph/tests/tools.test.ts
 # Only the hand-written fixtures are published. `fixtures/*` re-ignores everything
