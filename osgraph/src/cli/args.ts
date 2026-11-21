@@ -85,6 +85,9 @@ read needs the human-approved session token the token manager keeps in token.txt
                                     moduleVersion; unknown version or no capture is always read. Combine with
                                     --modules to limit the candidates. Needs the live version probe (README).
   --max-open <n>                    tabs open before the run closes its own staged ones (default 12)
+  --pipeline-depth <n>              modules open and read at once (default 1 = one at a time; 2+ is the experimental
+                                    pipeline: opens/closes stay serial, reads of open modules overlap). Never exceeds
+                                    --max-open, which still bounds ALL open tabs, yours included
   --max-consecutive-failures <n>    stop after n modules in a row fail to open (default 3, 0 = never)
   --graph-dir <dir>                 override OSGRAPH_GRAPH_DIR
   --json                            print the result as JSON on stdout (log lines stay on stderr)

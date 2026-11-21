@@ -228,6 +228,11 @@ ${USAGE}`);
     fail(EXIT_USAGE, `--max-open must be an integer >= 1 and --max-consecutive-failures an integer >= 0.\n${USAGE}`);
     return;
   }
+  const pipelineDepth = intFlag(options["pipeline-depth"], 1);
+  if (pipelineDepth === null || pipelineDepth < 1) {
+    fail(EXIT_USAGE, `--pipeline-depth must be an integer >= 1.\n${USAGE}`);
+    return;
+  }
   const graphDir = options["graph-dir"] ?? config.graphDir;
   const scope = readScope(config.scopesDir, scopeName);
   const log = (line: string): void => {
@@ -255,7 +260,7 @@ ${USAGE}`);
     process.off("SIGTERM", onSignal);
   };
   try {
-    await runRunLocked(config, options, { scopeName, graphDir, scope, log, maxOpen, maxFailures }, releaseStudio);
+    await runRunLocked(config, options, { scopeName, graphDir, scope, log, maxOpen, maxFailures, pipelineDepth }, releaseStudio);
   } finally {
     releaseStudio();
   }
@@ -268,6 +273,7 @@ interface RunLockedArgs {
   log: (line: string) => void;
   maxOpen: number;
   maxFailures: number;
+  pipelineDepth: number;
 }
 
 /** The Studio-touching body of `run`; `releaseStudio` is called the moment the Studio work is over. */
@@ -277,7 +283,7 @@ async function runRunLocked(
   args: RunLockedArgs,
   releaseStudio: () => void
 ): Promise<void> {
-  const { graphDir, scope, log, maxOpen, maxFailures } = args;
+  const { graphDir, scope, log, maxOpen, maxFailures, pipelineDepth } = args;
   // The URL is printed before any other work: a multi-hour run must never be unobservable.
   const site = await ensureSite({ ...config, graphDir });
   for (const line of site.banner.split("\n")) log(line);
@@ -351,7 +357,7 @@ async function runRunLocked(
     );
     for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
   } else {
-    const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures });
+    const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures, pipelineDepth });
     releaseStudio();
     payload = result;
     const staged = result.rows.filter((r) => r.outcome === "staged").length;

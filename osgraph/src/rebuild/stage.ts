@@ -13,7 +13,7 @@
  * from the stage entries exactly as the all-at-once path would and writes `graph.json` atomically.
  * The stage is never read by the query tools — only `graph.json` is.
  */
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtractedModule } from "../extract/index.js";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
@@ -72,10 +72,21 @@ export function stagePath(graphDir: string, scope: string, module: string): stri
   return join(stageDir(graphDir, scope), `${encodeURIComponent(module)}.json`);
 }
 
+let tmpCounter = 0;
+
 export function writeStageEntry(graphDir: string, entry: StageEntry): string {
   const path = stagePath(graphDir, entry.scope, entry.module);
   mkdirSync(stageDir(graphDir, entry.scope), { recursive: true });
-  writeFileSync(path, `${JSON.stringify({ schemaVersion: STAGE_SCHEMA_VERSION, ...entry }, null, 2)}\n`, "utf8");
+  const json = `${JSON.stringify({ schemaVersion: STAGE_SCHEMA_VERSION, ...entry }, null, 2)}\n`;
+  // Atomic: a unique `.tmp` sibling (skipped by readStage's `.json` filter) renamed over the target.
+  const tmp = `${path}.${process.pid}.${tmpCounter++}.tmp`;
+  try {
+    writeFileSync(tmp, json, "utf8");
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   return path;
 }
 

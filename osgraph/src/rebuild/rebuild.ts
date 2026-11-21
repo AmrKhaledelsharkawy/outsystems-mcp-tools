@@ -1183,6 +1183,13 @@ export interface StageModuleOptions extends RebuildOptions {
   module: string;
   /** Where the stage lives: `<graphDir>/<scope>/stage/`. */
   graphDir: string;
+  /**
+   * Pipeline mode (plan v3 section 5). `false` captures and writes the stage entry only: no
+   * `finalizeStage`, and the closing barrier is `reader.drainModule(module)` instead of the global
+   * `drain()`, so another module can keep reading while this one's tab closes. Fails closed with
+   * `INTERNAL_ERROR` when the reader has no `drainModule`. Default `true` = the sequential behaviour.
+   */
+  finalize?: boolean;
 }
 
 export interface StagedModuleSummary {
@@ -1246,6 +1253,25 @@ export interface FinalizeStageResult {
   outcome?: RebuildOutcome;
 }
 
+/** What the stage holds, without finalizing: shared by `finalizeStage` and pipeline-mode `stageModule`. */
+function describeStage(scopeModules: string[], entries: StageEntry[], unreadable: string[]): FinalizeStageResult {
+  const stagedTimes = entries.map((e) => Date.parse(e.stagedAt)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+  const stageAge =
+    stagedTimes.length > 0
+      ? {
+          oldest: new Date(stagedTimes[0]).toISOString(),
+          newest: new Date(stagedTimes[stagedTimes.length - 1]).toISOString(),
+          spanMs: stagedTimes[stagedTimes.length - 1] - stagedTimes[0]
+        }
+      : null;
+  return {
+    stagedModules: entries.map((e) => e.module),
+    missingModules: missingFromStage(scopeModules, entries),
+    unreadableStageFiles: unreadable,
+    stageAge
+  };
+}
+
 /**
  * The finalize half of `stageModule`, with no Service Studio involved: when every scope module has a
  * stage entry, builds the snapshot from them in scope order (the same `buildOutcome` as
@@ -1259,22 +1285,8 @@ export function finalizeStage(options: FinalizeStageOptions): FinalizeStageResul
   const startedAt = options.startedAt ?? Date.now();
   const fetchConcurrency = resolveFetchConcurrency(options.fetchConcurrency);
   const { entries, unreadable } = readStage(graphDir, scope.name);
-  const missingModules = missingFromStage(scope.modules, entries);
-  const stagedTimes = entries.map((e) => Date.parse(e.stagedAt)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
-  const stageAge =
-    stagedTimes.length > 0
-      ? {
-          oldest: new Date(stagedTimes[0]).toISOString(),
-          newest: new Date(stagedTimes[stagedTimes.length - 1]).toISOString(),
-          spanMs: stagedTimes[stagedTimes.length - 1] - stagedTimes[0]
-        }
-      : null;
-  const base: FinalizeStageResult = {
-    stagedModules: entries.map((e) => e.module),
-    missingModules,
-    unreadableStageFiles: unreadable,
-    stageAge
-  };
+  const base = describeStage(scope.modules, entries, unreadable);
+  const { missingModules } = base;
   if (missingModules.length > 0) return base;
 
   // Scope complete: finalize in scope order so the snapshot matches the all-at-once one.
@@ -1302,7 +1314,7 @@ export function finalizeStage(options: FinalizeStageOptions): FinalizeStageResul
     })),
     startedAt,
     fetchConcurrency,
-    stageAge,
+    stageAge: base.stageAge,
     flows: { graphDir: options.rawGraphDir ?? graphDir, modules: scope.modules }
   });
   // The snapshot is already published; a stage file we cannot delete (locked, scanned, read-only)
@@ -1332,6 +1344,7 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
   const fetchReferenced = options.fetchReferencedElements === true;
   const fetchConcurrency = resolveFetchConcurrency(options.fetchConcurrency);
   const startedAt = Date.now();
+  const pipeline = options.finalize === false;
 
   const inScope = scope.modules.find((m) => m.toLowerCase() === module.toLowerCase());
   if (inScope === undefined) {
@@ -1343,6 +1356,17 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     );
   }
 
+  const drainModule = session.reader.drainModule?.bind(session.reader);
+  if (pipeline && drainModule === undefined) {
+    throw new OsgraphToolError(
+      "INTERNAL_ERROR",
+      "pipeline staging (finalize: false) needs a reader with drainModule(); refusing to fall back to a " +
+        "global drain, which would stall every other module's reads.",
+      { scope: scope.name, module }
+    );
+  }
+
+  let drainName = module;
   try {
     emit({ type: "session", message: "acquiring session token" });
     await session.acquire();
@@ -1350,6 +1374,7 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     const apps = await listOpenApps(session.reader, scope.name);
     // Only this module must be open — that is the whole point of staging.
     const [resolved] = resolveScopeModules({ name: scope.name, modules: [inScope] }, apps);
+    drainName = resolved.app.name;
 
     const walked = await walkAndExtract({
       reader: session.reader,
@@ -1385,16 +1410,22 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
     if (walked.timing.requested !== resolved.app.name) entry.requestedAs = walked.timing.requested;
     const stagePathWritten = writeStageEntry(graphDir, entry);
 
-    const fin = finalizeStage({
-      scope,
-      graphDir,
-      snapshotPath,
-      rules,
-      now,
-      startedAt,
-      fetchConcurrency,
-      ...(options.rawGraphDir !== undefined ? { rawGraphDir: options.rawGraphDir } : {})
-    });
+    // Pipeline mode stops here: finalizing is the pipeline's own single, serial last step.
+    const fin = pipeline
+      ? (() => {
+          const { entries, unreadable } = readStage(graphDir, scope.name);
+          return describeStage(scope.modules, entries, unreadable);
+        })()
+      : finalizeStage({
+          scope,
+          graphDir,
+          snapshotPath,
+          rules,
+          now,
+          startedAt,
+          fetchConcurrency,
+          ...(options.rawGraphDir !== undefined ? { rawGraphDir: options.rawGraphDir } : {})
+        });
     const staged: StagedModuleSummary = {
       module: entry.module,
       nodeCount: entry.extracted.nodes.length,
@@ -1423,7 +1454,8 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
   } finally {
     // Same barrier as `rebuildScope`, and it matters more here: the staged loop's whole shape is
     // open → stage → close, so a `closeModule` follows this return within seconds (OSG-016 §B1).
-    await session.reader.drain?.();
+    if (pipeline) await drainModule?.(drainName);
+    else await session.reader.drain?.();
     session.release();
   }
 }

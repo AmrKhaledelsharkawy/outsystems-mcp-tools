@@ -86,6 +86,12 @@ export interface RunScopeOptions extends RunCommonOptions {
   maxOpen?: number;
   /** Consecutive open failures that stop the run; default 3, `0` disables. */
   maxConsecutiveFailures?: number;
+  /**
+   * Modules open and read at once. Default 1 = the sequential open -> stage -> close loop, untouched.
+   * `>= 2` selects the opt-in pipeline (`runPipelined`): serialized opens/closes, overlapping reads.
+   * `maxOpen` keeps its meaning: the ceiling on ALL open tabs.
+   */
+  pipelineDepth?: number;
 }
 
 export interface RunModuleRow {
@@ -118,6 +124,8 @@ export interface RunScopeResult {
   rebuild?: RebuildResult;
   /** Present when the run stopped early: the circuit breaker, or --max-open reached because closes failed. */
   stoppedEarly?: string;
+  /** Present for a pipelined run: whole-run and per-module wall-clock spans (never written to timings.json). */
+  pipeline?: PipelineTimings;
   /** Present when nothing failed yet the stage is still incomplete (e.g. an unreadable stage entry). */
   incomplete?: string;
   failures: number;
@@ -302,33 +310,64 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   const { log } = s;
   const maxOpen = Math.max(1, Math.trunc(options.maxOpen ?? DEFAULT_MAX_OPEN));
   const maxFailures = Math.max(0, Math.trunc(options.maxConsecutiveFailures ?? DEFAULT_MAX_CONSECUTIVE_FAILURES));
+  const pipelineDepth = Math.max(1, Math.trunc(options.pipelineDepth ?? 1));
   const modules = uniqueModules(scope.modules);
   const reportPath = join(s.runDir, "report.json");
   const snapshotPath = resolveScopeArtifactPaths(graphDir, scope.name).graph;
 
   const rows: RunModuleRow[] = [];
-  const record = (row: RunModuleRow): void => {
-    rows.push(row);
+  let reportExtra: Record<string, unknown> = {};
+  const writeReport = (): void => {
     try {
-      writeFileSync(reportPath, `${JSON.stringify({ scope: scope.name, rows }, null, 2)}\n`, "utf8");
+      writeFileSync(reportPath, `${JSON.stringify({ scope: scope.name, ...reportExtra, rows }, null, 2)}\n`, "utf8");
     } catch {
       /* the report is a convenience */
     }
+  };
+  const record = (row: RunModuleRow): void => {
+    rows.push(row);
+    writeReport();
   };
 
   const initiallyStaged = stagedNames(graphDir, scope.name);
   const alreadyStaged = modules.filter((m) => initiallyStaged.has(lower(m))).length;
   options.state?.beginRun(scope.name, modules);
-  log(`run ${scope.name}: ${modules.length} scope module(s), ${alreadyStaged} already staged, max open ${maxOpen}`);
+  log(
+    `run ${scope.name}: ${modules.length} scope module(s), ${alreadyStaged} already staged, max open ${maxOpen}` +
+      (pipelineDepth >= 2 ? `, pipeline depth ${pipelineDepth}` : "")
+  );
 
   let consecutiveOpenFailures = 0;
   let stoppedEarly: string | undefined;
   let finalized: RebuildResult | undefined;
   const stagedThisRun = new Set<string>();
+  let pipeline: PipelineTimings | undefined;
+  let pipelineIncomplete: string | undefined;
 
   await s.session.acquire();
   try {
-    for (const [i, mod] of modules.entries()) {
+    if (pipelineDepth >= 2) {
+      const outcome = await runPipelined({
+        options,
+        s,
+        modules,
+        initiallyStaged,
+        depth: pipelineDepth,
+        maxOpen,
+        maxFailures,
+        snapshotPath,
+        rows,
+        record,
+        setReportExtra: (extra) => {
+          reportExtra = { mode: "pipeline", pipelineDepth, ...extra };
+          writeReport();
+        }
+      });
+      stoppedEarly = outcome.stoppedEarly;
+      finalized = outcome.finalized;
+      pipelineIncomplete = outcome.incomplete;
+      pipeline = outcome.timings;
+    } else for (const [i, mod] of modules.entries()) {
       const tag = `[${i + 1}/${modules.length}] ${mod}`;
       // A finalize clears the stage, so what this run staged is remembered here as well; a module
       // after the finalizing one was by definition already staged (finalize needs every module).
@@ -494,8 +533,8 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   // Resume wedge: every scope module has a stage entry but nothing finalized (a finalize that threw
   // after its entry was written, a kill between the two, or a scope that shrank after staging).
   // Finalize from the stage now, offline, exactly as `stageModule` would have.
-  let incomplete: string | undefined;
-  if (finalized === undefined && stoppedEarly === undefined && failures === 0) {
+  let incomplete: string | undefined = pipelineIncomplete;
+  if (pipelineDepth < 2 && finalized === undefined && stoppedEarly === undefined && failures === 0) {
     let fin: ReturnType<typeof finalizeStage>;
     try {
       fin = finalizeStage({
@@ -555,10 +594,432 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     ...(finalized !== undefined ? { rebuild: finalized } : {}),
     ...(stoppedEarly !== undefined ? { stoppedEarly } : {}),
     ...(incomplete !== undefined ? { incomplete } : {}),
+    ...(pipeline !== undefined ? { pipeline } : {}),
     failures,
     runDir: s.runDir,
     logPath: s.logPath,
     reportPath
+  };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Pipelined full build (`--pipeline-depth` >= 2), plan v3 sections 3, 6 and 8                    */
+/* -------------------------------------------------------------------------------------------- */
+
+/** Whole-run and per-module wall-clock spans of a pipelined run. NOT written to `timings.json`. */
+export interface PipelineTimings {
+  mode: "pipeline";
+  pipelineDepth: number;
+  maxOpen: number;
+  /** Wall clock of the whole run, finalize included. */
+  wallMs: number;
+  /** Spans overlap across modules, so they are wall-clock per module, never exclusive costs. */
+  modules: Array<{ module: string; openMs?: number; captureMs?: number; closeMs?: number; totalMs?: number }>;
+}
+
+interface PipelineContext {
+  options: RunScopeOptions;
+  s: ReturnType<typeof setup>;
+  modules: string[];
+  initiallyStaged: Set<string>;
+  depth: number;
+  maxOpen: number;
+  maxFailures: number;
+  snapshotPath: string;
+  rows: RunModuleRow[];
+  record: (row: RunModuleRow) => void;
+  /** Fields merged into report.json next to the rows (timings); rewrites the file. */
+  setReportExtra: (extra: Record<string, unknown>) => void;
+}
+
+interface PipelineOutcome {
+  stoppedEarly?: string;
+  finalized?: RebuildResult;
+  incomplete?: string;
+  timings: PipelineTimings;
+}
+
+/**
+ * The opt-in pipeline: ONE serialized GUI operator opens and closes, every open module is captured
+ * (stage-only) at the same time over the one shared 4-wide client, and a module's tab is closed the
+ * moment ITS reads have settled, without waiting for the others. `finalizeStage` runs once, last.
+ *
+ * - A module holds a depth slot from the moment it starts opening until its close is confirmed; a
+ *   failed close keeps the slot. `gapMs` is a cooldown of the GUI operator only: it never holds a slot
+ *   and never pauses reads of open modules.
+ * - Tabs: at most `depth` modules are active, and no open is started while ALL open tabs (the user's
+ *   included) are at `--max-open`. Only tabs this process opened are ever closed.
+ * - A read failure stops new opens, lets started work settle and closes owned tabs; the previous graph
+ *   is untouched (finalize is skipped). Open failures follow the circuit breaker. A session-fatal error
+ *   does the same, then rethrows.
+ */
+async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
+  const { options, s, modules, depth, maxOpen, maxFailures, snapshotPath, rows, record } = c;
+  const { opener } = options;
+  const { log } = s;
+  const reader = s.session.reader;
+  if (typeof reader.drainModule !== "function") {
+    throw new OsgraphToolError(
+      "INTERNAL_ERROR",
+      "--pipeline-depth >= 2 needs a Service Studio reader with drainModule(): closing one module's tab while " +
+        "another still reads is only safe behind a module-scoped barrier, and a global drain would stall every module.",
+      { scope: options.scope.name, pipelineDepth: depth }
+    );
+  }
+  const drainModule = reader.drainModule.bind(reader);
+  const runStart = Date.now();
+  const spans = new Map<string, PipelineTimings["modules"][number]>();
+  const spanOf = (m: string): PipelineTimings["modules"][number] => {
+    let sp = spans.get(lower(m));
+    if (sp === undefined) {
+      sp = { module: m };
+      spans.set(lower(m), sp);
+    }
+    return sp;
+  };
+  const timings = (): PipelineTimings => ({
+    mode: "pipeline",
+    pipelineDepth: depth,
+    maxOpen,
+    wallMs: Date.now() - runStart,
+    modules: modules.filter((m) => spans.has(lower(m))).map((m) => spans.get(lower(m)) as PipelineTimings["modules"][number])
+  });
+
+  const indexOf = (m: string): number => modules.findIndex((x) => lower(x) === lower(m));
+  const tagOf = (m: string): string => `[${indexOf(m) + 1}/${modules.length}] ${m}`;
+  const queue: string[] = [];
+  for (const mod of modules) {
+    if (c.initiallyStaged.has(lower(mod))) {
+      log(`${tagOf(mod)} already staged`);
+      record({ module: mod, outcome: "skipped" });
+    } else queue.push(mod);
+  }
+
+  // Slots held by modules from opening until their close is confirmed (or, for a tab that was already
+  // open, until its capture has drained).
+  const active = new Set<string>();
+  const running = new Set<Promise<void>>();
+  const waiters: Array<() => void> = [];
+  const signal = (): void => {
+    for (const w of waiters.splice(0)) w();
+  };
+  const nextEvent = (): Promise<void> => new Promise<void>((resolve) => waiters.push(resolve));
+
+  let abort = false;
+  let roomStop = false;
+  let stoppedEarly: string | undefined;
+  let fatal: unknown;
+  let consecutiveOpenFailures = 0;
+
+  // The one GUI operator: opens and closes never overlap, and `gapMs` is its cooldown between actions.
+  let guiTail: Promise<unknown> = Promise.resolve();
+  let lastGuiEnd: number | undefined;
+  const gui = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = guiTail.then(async () => {
+      if (lastGuiEnd !== undefined) {
+        const wait = s.gapMs - (Date.now() - lastGuiEnd);
+        if (wait > 0) await s.sleep(wait);
+      }
+      try {
+        return await fn();
+      } finally {
+        lastGuiEnd = Date.now();
+      }
+    });
+    guiTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  };
+
+  /** Only after the module's own barrier; a thrown close counts as "not closed". */
+  const closeOwnedTab = (mod: string): Promise<{ ok: boolean; error?: string }> =>
+    gui(async () => {
+      try {
+        await s.waitForForeground();
+        const closed = await opener.closeOwned(mod);
+        if (closed.ok) {
+          log(`   close ${mod} ok`);
+          return { ok: true };
+        }
+        const error = describeOsopenerFailure(closed.failure);
+        log(`   close ${mod} FAILED ${error}`);
+        return { ok: false, error };
+      } catch (err) {
+        const error = errorOf(err).message;
+        log(`   close ${mod} FAILED ${error}`);
+        return { ok: false, error };
+      }
+    });
+
+  const noteFatal = (err: unknown): void => {
+    fatal ??= err;
+    abort = true;
+  };
+
+  const startTask = (mod: string, openedHere: boolean, attempts: number | undefined): void => {
+    const task = (async () => {
+      const t0 = Date.now();
+      let row: RunModuleRow;
+      try {
+        const outcome = await stageModule({
+          scope: options.scope,
+          module: mod,
+          graphDir: options.graphDir,
+          snapshotPath,
+          session: options.createSession(),
+          rules: options.rules,
+          now: s.now,
+          onProgress: s.onProgress,
+          finalize: false,
+          ...(options.fetchConcurrency !== undefined ? { fetchConcurrency: options.fetchConcurrency } : {}),
+          ...(options.skipKinds !== undefined ? { skipKinds: options.skipKinds } : {}),
+          ...(options.fetchReferencedElements !== undefined ? { fetchReferencedElements: options.fetchReferencedElements } : {}),
+          ...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {})
+        });
+        row = {
+          module: mod,
+          outcome: "staged",
+          openedHere,
+          nodeCount: outcome.staged.nodeCount,
+          edgeCount: outcome.staged.edgeCount,
+          skippedCount: outcome.staged.skippedCount,
+          durationMs: outcome.staged.durationMs,
+          finalized: false,
+          ...(attempts !== undefined ? { attempts } : {})
+        };
+        log(
+          `${tagOf(mod)} staged in ${Math.round(outcome.staged.durationMs / 1000)}s: nodes=${outcome.staged.nodeCount} ` +
+            `edges=${outcome.staged.edgeCount} skipped=${outcome.staged.skippedCount}`
+        );
+      } catch (err) {
+        const e = errorOf(err);
+        row = { module: mod, outcome: "stage-failed", openedHere, error: e };
+        log(`${tagOf(mod)} stage FAILED ${e.code}: ${e.message}`);
+        if (SESSION_FATAL.has(e.code)) noteFatal(err);
+        else abort = true;
+      }
+      spanOf(mod).captureMs = Date.now() - t0;
+
+      // Module-scoped barrier: every read, retry and parse of THIS module has settled; others go on.
+      let drained = true;
+      try {
+        await drainModule(mod);
+      } catch (err) {
+        drained = false;
+        log(`   drain ${mod} FAILED ${errorOf(err).message}`);
+      }
+      if (openedHere) {
+        const c0 = Date.now();
+        if (!drained) {
+          row.closed = false;
+          row.closeError = "module drain failed, so the tab was not closed";
+        } else {
+          const closed = await closeOwnedTab(mod);
+          row.closed = closed.ok;
+          if (closed.error !== undefined) row.closeError = closed.error;
+          if (closed.ok) active.delete(lower(mod));
+        }
+        spanOf(mod).closeMs = Date.now() - c0;
+      } else if (drained) {
+        active.delete(lower(mod));
+      }
+      spanOf(mod).totalMs = Date.now() - t0 + (spanOf(mod).openMs ?? 0);
+      record(row);
+    })().catch((err: unknown) => {
+      // Not reachable through the paths above; never let a bug leave the scheduler waiting forever.
+      noteFatal(err);
+    });
+    running.add(task);
+    void task.finally(() => {
+      running.delete(task);
+      signal();
+    });
+  };
+
+  const openFailed = (mod: string, error: NonNullable<RunModuleRow["error"]>, extra: Partial<RunModuleRow> = {}): void => {
+    record({ module: mod, outcome: "open-failed", error, ...extra });
+    consecutiveOpenFailures++;
+    if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures && stoppedEarly === undefined) {
+      stoppedEarly =
+        `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${error.code}). ` +
+        `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+        `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+        `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+      log(`STOPPED: ${stoppedEarly}`);
+      abort = true;
+    }
+  };
+
+  // Scheduler: opens are decided here, one at a time, on a fresh listApps; reads run in the tasks.
+  while (queue.length > 0 && !abort) {
+    const mod = queue[0] as string;
+    if (active.size >= depth) {
+      if (running.size === 0) {
+        const stuck = opener.ownedModules();
+        stoppedEarly =
+          `${active.size} module(s) hold every pipeline slot (--pipeline-depth ${depth}) and none can progress: ` +
+          `${stuck.length > 0 ? `tab(s) this run opened could not be closed (${stuck.join(", ")}). ` : ""}` +
+          `osopener's close is failing (a save prompt, or a tab-close step that no longer matches this Studio build). ` +
+          `Close those tabs by hand, then run the same command again: staged modules are skipped, so it resumes.`;
+        log(`STOPPED: ${stoppedEarly}`);
+        roomStop = true;
+        break;
+      }
+      await nextEvent();
+      continue;
+    }
+
+    let apps: ServiceStudioApp[];
+    try {
+      apps = await s.listApps();
+    } catch (err) {
+      const e = errorOf(err);
+      log(`${tagOf(mod)} open FAILED ${e.code}: ${e.message}`);
+      queue.shift();
+      if (SESSION_FATAL.has(e.code)) {
+        record({ module: mod, outcome: "open-failed", error: e });
+        noteFatal(err);
+        break;
+      }
+      openFailed(mod, e);
+      continue;
+    }
+    if (abort) break;
+    const isOpen = (name: string): boolean => apps.some((a) => a.isOpen === true && lower(a.name) === lower(name));
+    const already = isOpen(mod);
+    const tabs = apps.filter((a) => a.isOpen === true).length;
+    if (!already && tabs >= maxOpen) {
+      // Counted over ALL open tabs, the user's included. Wait for one of ours to close; if nothing can,
+      // stop rather than open one more (the >30-tab degradation this command exists to avoid).
+      if (running.size === 0) {
+        stoppedEarly =
+          `${tabs} tab(s) are open in Service Studio (${opener.ownedModules().length} opened by this run) and --max-open ` +
+          `is ${maxOpen}: opening ${mod} would exceed it and nothing this run holds can be closed. Close some tabs by ` +
+          `hand or raise --max-open, then run the same command again: staged modules are skipped, so it resumes.`;
+        log(`STOPPED: ${stoppedEarly}`);
+        roomStop = true;
+        break;
+      }
+      await nextEvent();
+      continue;
+    }
+
+    queue.shift();
+    active.add(lower(mod));
+    if (already) {
+      consecutiveOpenFailures = 0;
+      startTask(mod, false, undefined);
+      continue;
+    }
+    const o0 = Date.now();
+    let opened: Awaited<ReturnType<typeof s.openWithRetry>>;
+    try {
+      opened = await gui(() => s.openWithRetry(mod));
+    } catch (err) {
+      const e = errorOf(err);
+      log(`${tagOf(mod)} open FAILED ${e.code}: ${e.message}`);
+      active.delete(lower(mod));
+      if (SESSION_FATAL.has(e.code)) {
+        record({ module: mod, outcome: "open-failed", error: e });
+        noteFatal(err);
+      } else openFailed(mod, e);
+      continue;
+    }
+    spanOf(mod).openMs = Date.now() - o0;
+    if (!opened.ok) {
+      log(`${tagOf(mod)} open FAILED ${describeOsopenerFailure(opened.failure)}`);
+      // A failed open that nonetheless left a tab this process owns keeps its slot until closed.
+      if (opener.owns(mod)) {
+        const closed = await closeOwnedTab(mod);
+        if (closed.ok) active.delete(lower(mod));
+      } else active.delete(lower(mod));
+      openFailed(mod, failureRow(opened.failure), {
+        attempts: opened.attempts,
+        ...(opened.screenshotPath !== undefined ? { screenshotPath: opened.screenshotPath } : {})
+      });
+      continue;
+    }
+    consecutiveOpenFailures = 0;
+    log(`   open ${mod} ok${opened.attempts > 1 ? ` after ${opened.attempts} attempts` : ""}`);
+    startTask(mod, opened.openedHere, opened.attempts);
+  }
+
+  // Let everything already started settle (its capture, drain and close) before touching the result.
+  while (running.size > 0) await Promise.all([...running]);
+
+  // Aborted: close what this process still owns (a failed close earlier, a refused one now). Best
+  // effort and visible; never a tab the process did not open (closeOwned refuses those).
+  if (abort && !roomStop) {
+    for (const owned of [...opener.ownedModules()]) {
+      try {
+        await drainModule(owned);
+      } catch {
+        continue;
+      }
+      const closed = await closeOwnedTab(owned);
+      const row = rows.find((r) => lower(r.module) === lower(owned));
+      if (row !== undefined) {
+        row.closed = closed.ok;
+        if (closed.error !== undefined) row.closeError = closed.error;
+        else delete row.closeError;
+      }
+      if (closed.ok) active.delete(lower(owned));
+    }
+  }
+
+  rows.sort((a, b) => indexOf(a.module) - indexOf(b.module));
+
+  if (fatal !== undefined) {
+    const e = errorOf(fatal);
+    c.setReportExtra({ timings: timings() });
+    options.state?.failRun(e.code, e.message);
+    throw fatal;
+  }
+
+  const failures = rows.filter((r) => r.outcome === "open-failed" || r.outcome === "stage-failed").length;
+  let finalized: RebuildResult | undefined;
+  let incomplete: string | undefined;
+  if (!abort && stoppedEarly === undefined && failures === 0 && queue.length === 0) {
+    try {
+      const fin = finalizeStage({
+        scope: options.scope,
+        graphDir: options.graphDir,
+        snapshotPath,
+        rules: options.rules,
+        now: s.now,
+        startedAt: runStart,
+        ...(options.fetchConcurrency !== undefined ? { fetchConcurrency: options.fetchConcurrency } : {})
+      });
+      if (fin.outcome !== undefined) {
+        finalized = fin.outcome.result;
+        log("every scope module is staged: finalized from the stage");
+        s.onProgress({ type: "done", durationMs: finalized.durationMs, snapshotPath });
+        options.state?.finishRun(finalized.perModule);
+        // Deliberately no writeTimings: overlapped wall-clock spans would corrupt the sequential ETA store.
+      } else {
+        incomplete =
+          `stage incomplete although no module failed: missing ${fin.missingModules.join(", ")}` +
+          (fin.unreadableStageFiles.length > 0 ? `; unreadable stage files: ${fin.unreadableStageFiles.join(", ")}` : "");
+        log(incomplete);
+        options.state?.failRun("RUN_INCOMPLETE", incomplete);
+      }
+    } catch (err) {
+      const e = errorOf(err);
+      log(`finalize FAILED ${e.code}: ${e.message}`);
+      c.setReportExtra({ timings: timings() });
+      options.state?.failRun(e.code, e.message);
+      throw err;
+    }
+  }
+  const finalTimings = timings();
+  c.setReportExtra({ timings: finalTimings });
+  return {
+    ...(stoppedEarly !== undefined ? { stoppedEarly } : {}),
+    ...(finalized !== undefined ? { finalized } : {}),
+    ...(incomplete !== undefined ? { incomplete } : {}),
+    timings: finalTimings
   };
 }
 
