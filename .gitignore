@@ -31,6 +31,7 @@ osgraph/tests/*
 !osgraph/tests/progress.discover.test.ts
 !osgraph/tests/progress.server.test.ts
 !osgraph/tests/progress.state.test.ts
+!osgraph/tests/query.ergonomics.test.ts
 !osgraph/tests/raw.test.ts
 !osgraph/tests/rebuild.fake.ts
 !osgraph/tests/rebuild.test.ts
