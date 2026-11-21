@@ -23,6 +23,7 @@ const EXPECTED_TOOLS = [
   "listViolations",
   "getFlow",
   "searchFlows",
+  "graphStatus",
   "defineScope",
   "listScopes"
 ];
@@ -86,7 +87,7 @@ describe("osgraph CLI smoke", () => {
     };
     try {
       await client.connect(transport);
-      expect((await client.listTools()).tools).toHaveLength(8);
+      expect((await client.listTools()).tools).toHaveLength(9);
 
       const def = await callJson("defineScope", { name: "demo", modules: ["MOD_Demo_X_BL"] });
       expect(def.isError).toBe(false);
@@ -184,7 +185,7 @@ describe("osgraph CLI smoke", () => {
     }
   }, 20_000);
 
-  it("serves all eight tools over stdio; listScopes on an empty workspace answers with graphCompleteness", async () => {
+  it("serves all nine tools over stdio; listScopes on an empty workspace answers with graphCompleteness", async () => {
     const root = mkdtempSync(join(tmpdir(), "osgraph-smoke-"));
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -199,7 +200,7 @@ describe("osgraph CLI smoke", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name).sort();
       expect(names).toEqual([...EXPECTED_TOOLS].sort());
-      expect(tools).toHaveLength(8);
+      expect(tools).toHaveLength(9);
 
       const res = await client.callTool({ name: "listScopes", arguments: {} });
       expect(res.isError).toBeFalsy();

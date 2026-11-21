@@ -8,6 +8,7 @@ import { defineScope } from "./defineScope.js";
 import { listScopes } from "./listScopes.js";
 import { getFlow } from "./getFlow.js";
 import { searchFlows } from "./searchFlows.js";
+import { graphStatus } from "./graphStatus.js";
 
 /**
  * The six v1 tools (OSG-007 as revised by ADR-0005), plus v1.1's two flow tools (ADR-0012).
@@ -20,6 +21,7 @@ export const tools: readonly OsgraphTool[] = [
   listViolations,
   getFlow,
   searchFlows,
+  graphStatus,
   defineScope,
   listScopes
 ];

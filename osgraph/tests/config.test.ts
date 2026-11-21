@@ -184,11 +184,12 @@ describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start wi
   const load = (command: string, table?: Readonly<Record<string, boolean>>) =>
     loadConfig2({}, { cwd: "C:/w", existsSync: () => false, requireServiceStudio: requiresServiceStudioAtStart(command, table) });
 
-  it2("serve, reextract and doctor (#63) start without an endpoint", () => {
-    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, doctor: false, run: true });
+  it2("serve, reextract, doctor (#63) and status (#66) start without an endpoint", () => {
+    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, doctor: false, status: false, run: true });
     expect2(requiresServiceStudioAtStart("serve")).toBe(false);
     expect2(requiresServiceStudioAtStart("reextract")).toBe(false);
     expect2(requiresServiceStudioAtStart("doctor")).toBe(false);
+    expect2(requiresServiceStudioAtStart("status")).toBe(false);
     expect2(load("serve").serviceStudioUrl).toBeUndefined();
     expect2(load("reextract").serviceStudioUrl).toBeUndefined();
   });

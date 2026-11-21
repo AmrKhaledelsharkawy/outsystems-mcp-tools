@@ -125,6 +125,7 @@ milestones M0–M4; the issue tracker is the authority on what has landed.
 |---|---|
 | `defineScope` | Writes a scope file `{ name, modules }`. Overwrites a scope of the same name |
 | `listScopes` | Lists defined scopes, sorted by name |
+| `graphStatus` | Read-only freshness report for one scope's **local** snapshot: snapshot build time, scope completeness (scope modules with no capture, by name), and per module `capturedAt`, `moduleVersion` (`"unknown"` for captures that predate the version field), skipped and referenced-only counts. Reads files on disk only: no Studio, no osopener, works with Studio shut. CLI twin: `osgraph status --scope <name> [--json]` |
 | `rebuild` | Full extraction run over one scope: reads every element of every module through the `servicestudio` MCP (read-only), parses edges, regenerates the snapshot **atomically** — all-or-nothing, so the previous snapshot survives any failure. Raises the [live progress site](#the-live-progress-site) and returns its URL |
 | `queryImpact` | Reachable node set from one node (dependents *or* dependencies, optionally depth-capped), by in-process BFS |
 | `queryPath` | Shortest path between two nodes |
@@ -427,6 +428,12 @@ node dist/cli.js reextract --scope <name>
 node dist/cli.js reextract --scope <name> --json   # full result as JSON
 node dist/cli.js --help
 ```
+
+### Snapshot freshness
+
+`graphStatus` (MCP) and `osgraph status --scope <name> [--json]` (CLI) report, from files on disk only, when a scope's snapshot was built and how complete it is. They need no Service Studio and no token. The captures they describe were produced by `run`/`rebuild`, which do need osopener and the token manager.
+
+Live check (human, with Service Studio open): after a real `osgraph run --scope <name>`, compare `osgraph status --scope <name> --json` with each `<graphDir>/<scope>/raw/<module>/manifest.json` (`capturedAt`, `moduleVersion`, `skipped.length`, `referencedOnlyCount`); they must match exactly.
 
 ---
 
