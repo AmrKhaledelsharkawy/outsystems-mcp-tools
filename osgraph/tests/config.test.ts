@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { loadConfig, OsgraphConfigError, requireServiceStudioUrl } from "../src/config.js";
 
 const URL = "http://127.0.0.1:41820/mcp";
-const cwd = join("C:", "work", "proj");
+// Absolute on every platform ("C:\work\proj" on Windows, "/work/proj" elsewhere): token discovery
+// resolves a relative path against the working directory, so a drive-letter fixture breaks on POSIX.
+const cwd = resolve(sep, "work", "proj");
 
 describe("loadConfig", () => {
   // #7: before command-scoped configuration this was the unconditional process-start check. The
