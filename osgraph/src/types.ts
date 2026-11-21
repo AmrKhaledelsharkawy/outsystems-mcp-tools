@@ -44,6 +44,11 @@ export type OsgraphErrorCode =
    */
   | "BUSY"
   /**
+   * A second in-process raw capture of a module was started while the first was still unfinished
+   * (`RawModuleWriter`). Refused rather than letting two writers race for one live `raw/<module>/`.
+   */
+  | "RAW_CAPTURE_ACTIVE"
+  /**
    * ADR-0012: `getFlow` / `searchFlows` were asked for flow data that is missing, unreadable, of
    * another schema version, or was built for a different rebuild of the scope than the snapshot
    * beside it. Distinct from `SNAPSHOT_MISSING` because the fix is different and far cheaper:

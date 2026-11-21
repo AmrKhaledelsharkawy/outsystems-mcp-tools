@@ -912,15 +912,23 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
     emit,
     raw
   );
-  const texts = await walker.walk();
+  let result: ReturnType<typeof extractModule>;
+  try {
+    const texts = await walker.walk();
 
-  const extractStarted = Date.now();
-  emit({ type: "phase-start", module: app.name, phase: "extract" });
-  const result = extractModule({ module: app.name, moduleType: app.moduleType, texts });
-  // Tool-level skips (OSG-011) sit beside the extractor's own NO_ANCHOR / PARSE_ERROR skips.
-  for (const s of walker.skipped) result.skipped.push({ kind: s.kind, name: s.name, reason: "TOOL_ERROR" });
-  walker.phaseDurations.extract = Date.now() - extractStarted;
-  emit({ type: "phase-done", module: app.name, phase: "extract", durationMs: walker.phaseDurations.extract });
+    const extractStarted = Date.now();
+    emit({ type: "phase-start", module: app.name, phase: "extract" });
+    result = extractModule({ module: app.name, moduleType: app.moduleType, texts });
+    // Tool-level skips (OSG-011) sit beside the extractor's own NO_ANCHOR / PARSE_ERROR skips.
+    for (const s of walker.skipped) result.skipped.push({ kind: s.kind, name: s.name, reason: "TOOL_ERROR" });
+    walker.phaseDurations.extract = Date.now() - extractStarted;
+    emit({ type: "phase-done", module: app.name, phase: "extract", durationMs: walker.phaseDurations.extract });
+  } catch (err) {
+    // A failed walk/extract releases its staging directory (and this process's writer slot for the
+    // module), so the module can be captured again; the previous live capture stays untouched.
+    raw?.abort();
+    throw err;
+  }
 
   // The manifest is written last and only once the module's walk completed, so its presence is the
   // marker that `raw/<module>/` is a whole capture and not the remains of an aborted one.

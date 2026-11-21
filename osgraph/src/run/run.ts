@@ -23,6 +23,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import type { LayerRules } from "../layers/rules.js";
 import { describeOsopenerFailure, type OsopenerAdapter, type OsopenerFailure } from "../osopener/adapter.js";
@@ -35,6 +36,7 @@ import { finalizeStage, stageModule, type RebuildProgressEvent, type RebuildResu
 import type { PrunableKind } from "../rebuild/readKinds.js";
 import { readStage, stagePath } from "../rebuild/stage.js";
 import type { ScopeDefinition } from "../scopes/store.js";
+import { summarizeTrace, type CallTrace, type GuiSpan, type TraceSummary } from "../servicestudio/trace.js";
 import { OsgraphToolError, type ServiceStudioApp } from "../servicestudio/types.js";
 import { decideChange, readCaptureVersion, type ChangeReason } from "./changed.js";
 import {
@@ -79,6 +81,20 @@ export interface RunCommonOptions {
   openLoop?: Omit<OpenLoopOptions, "screenshotDir" | "sleep" | "now" | "source">;
   /** Element retry back-off forwarded to the walk; tests pass 0. */
   retryDelayMs?: number;
+  /**
+   * `--trace` (full runs): write every servicestudio call (queued / admitted / attempts / settled) and
+   * every osopener open/close span to `<runDir>/calls.jsonl`, and put a `trace` summary (queue wait,
+   * read-slot utilization, GUI time hidden behind reads vs exposed) into report.json and the result.
+   * Off by default; when off, nothing about the run or its report changes.
+   */
+  trace?: boolean;
+}
+
+/** `RunScopeResult.trace`: the summary plus where the per-call stream was written. */
+export interface RunTraceSummary extends TraceSummary {
+  file: string;
+  /** False when the reader had no `setCallTrace` (then only GUI spans were recorded). */
+  callTracing: boolean;
 }
 
 export interface RunScopeOptions extends RunCommonOptions {
@@ -92,12 +108,26 @@ export interface RunScopeOptions extends RunCommonOptions {
    * `maxOpen` keeps its meaning: the ceiling on ALL open tabs.
    */
   pipelineDepth?: number;
+  /**
+   * Graceful cancellation (Ctrl+C). Once aborted the run opens nothing more, lets every module already
+   * started finish its capture, drains it, closes the tabs it opened, records the rest as
+   * `not-started`, and returns with `cancelled: true` and the previous graph untouched.
+   */
+  signal?: AbortSignal;
 }
+
+/** The `stoppedEarly` text of a cancelled run. */
+export const RUN_CANCELLED_MESSAGE =
+  "cancelled (Ctrl+C): no new module was opened; modules already started finished and were staged, and the " +
+  "tabs this run opened were closed. Run the same command again to continue: staged modules are skipped.";
 
 export interface RunModuleRow {
   module: string;
-  /** `skipped` = already staged before this run (resume). */
-  outcome: "staged" | "skipped" | "open-failed" | "stage-failed";
+  /**
+   * `skipped` = already staged before this run (resume). `not-started` = still queued when the run was
+   * cancelled or stopped; not a failure, the next run reads it.
+   */
+  outcome: "staged" | "skipped" | "open-failed" | "stage-failed" | "not-started";
   openedHere?: boolean;
   closed?: boolean;
   closeError?: string;
@@ -124,6 +154,10 @@ export interface RunScopeResult {
   rebuild?: RebuildResult;
   /** Present when the run stopped early: the circuit breaker, or --max-open reached because closes failed. */
   stoppedEarly?: string;
+  /** True when `signal` aborted the run (Ctrl+C); `stoppedEarly` then carries `RUN_CANCELLED_MESSAGE`. */
+  cancelled?: boolean;
+  /** Present with `trace: true`. */
+  trace?: RunTraceSummary;
   /** Present for a pipelined run: whole-run and per-module wall-clock spans (never written to timings.json). */
   pipeline?: PipelineTimings;
   /** Present when nothing failed yet the stage is still incomplete (e.g. an unreadable stage entry). */
@@ -212,6 +246,8 @@ function setup(options: RunCommonOptions): {
   onProgress: (event: RebuildProgressEvent) => void;
   listApps: () => Promise<ServiceStudioApp[]>;
   closeAfterDrain: (module: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Set by `--trace`: receives every open/close the run drives (drain waits excluded). */
+  traceGui: ((span: GuiSpan) => void) | undefined;
 } {
   const runDir = runDirFor(options.graphDir, options.scope.name);
   mkdirSync(runDir, { recursive: true });
@@ -250,18 +286,25 @@ function setup(options: RunCommonOptions): {
    */
   const closeAfterDrain = async (module: string): Promise<{ ok: boolean; error?: string }> => {
     await session.reader.drain?.();
-    await waitForForeground();
-    const closed = await options.opener.closeOwned(module);
-    if (closed.ok) {
-      log(`   close ${module} ok`);
-      return { ok: true };
+    const t0 = performance.now();
+    let ok = false;
+    try {
+      await waitForForeground();
+      const closed = await options.opener.closeOwned(module);
+      if (closed.ok) {
+        ok = true;
+        log(`   close ${module} ok`);
+        return { ok: true };
+      }
+      const error = describeOsopenerFailure(closed.failure);
+      log(`   close ${module} FAILED ${error}`);
+      return { ok: false, error };
+    } finally {
+      plumbing.traceGui?.({ action: "close", module, startMs: t0, endMs: performance.now(), ok });
     }
-    const error = describeOsopenerFailure(closed.failure);
-    log(`   close ${module} FAILED ${error}`);
-    return { ok: false, error };
   };
 
-  return {
+  const plumbing: ReturnType<typeof setup> = {
     log,
     runDir,
     logPath,
@@ -270,10 +313,56 @@ function setup(options: RunCommonOptions): {
     gapMs: options.gapMs ?? DEFAULT_GAP_MS,
     session,
     waitForForeground,
-    openWithRetry,
+    openWithRetry: async (module: string) => {
+      const t0 = performance.now();
+      let ok = false;
+      try {
+        const opened = await openWithRetry(module);
+        ok = opened.ok;
+        return opened;
+      } finally {
+        plumbing.traceGui?.({ action: "open", module, startMs: t0, endMs: performance.now(), ok });
+      }
+    },
     onProgress,
     listApps,
-    closeAfterDrain
+    closeAfterDrain,
+    traceGui: undefined
+  };
+  return plumbing;
+}
+
+/**
+ * `--trace`: one JSON line per servicestudio call and per GUI span in `<runDir>/calls.jsonl`, plus the
+ * in-memory copy `finish()` summarizes. Detaches its sink on `finish()`.
+ */
+function startTrace(s: ReturnType<typeof setup>): { finish: () => RunTraceSummary } {
+  const file = join(s.runDir, "calls.jsonl");
+  const calls: CallTrace[] = [];
+  const gui: GuiSpan[] = [];
+  const append = (line: Record<string, unknown>): void => {
+    try {
+      appendFileSync(file, `${JSON.stringify(line)}\n`, "utf8");
+    } catch {
+      /* the stream is a convenience; the in-memory copy still feeds the summary */
+    }
+  };
+  const reader = s.session.reader;
+  const callTracing = typeof reader.setCallTrace === "function";
+  reader.setCallTrace?.((t) => {
+    calls.push(t);
+    append({ type: "call", ...t });
+  });
+  s.traceGui = (g) => {
+    gui.push(g);
+    append({ type: "gui", ...g });
+  };
+  return {
+    finish: () => {
+      reader.setCallTrace?.(undefined);
+      s.traceGui = undefined;
+      return { file, callTracing, ...summarizeTrace(calls, gui, reader.concurrency ?? 4) };
+    }
   };
 }
 
@@ -317,9 +406,11 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
 
   const rows: RunModuleRow[] = [];
   let reportExtra: Record<string, unknown> = {};
+  let traceSummary: RunTraceSummary | undefined;
   const writeReport = (): void => {
     try {
-      writeFileSync(reportPath, `${JSON.stringify({ scope: scope.name, ...reportExtra, rows }, null, 2)}\n`, "utf8");
+      const body = { scope: scope.name, ...reportExtra, ...(traceSummary !== undefined ? { trace: traceSummary } : {}), rows };
+      writeFileSync(reportPath, `${JSON.stringify(body, null, 2)}\n`, "utf8");
     } catch {
       /* the report is a convenience */
     }
@@ -343,6 +434,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   const stagedThisRun = new Set<string>();
   let pipeline: PipelineTimings | undefined;
   let pipelineIncomplete: string | undefined;
+  const tracer = options.trace === true ? startTrace(s) : undefined;
 
   await s.session.acquire();
   try {
@@ -376,6 +468,15 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
       if (finalized !== undefined || staged.has(lower(mod))) {
         log(`${tag} already staged`);
         record({ module: mod, outcome: "skipped" });
+        continue;
+      }
+      // Cancelled between modules: the previous module was already staged, drained and closed.
+      if (options.signal?.aborted === true) {
+        if (stoppedEarly === undefined) {
+          stoppedEarly = RUN_CANCELLED_MESSAGE;
+          log(`CANCELLED: ${stoppedEarly}`);
+        }
+        record({ module: mod, outcome: "not-started" });
         continue;
       }
 
@@ -526,6 +627,14 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   } finally {
     await s.session.reader.drain?.();
     s.session.release();
+    if (tracer !== undefined) {
+      traceSummary = tracer.finish();
+      writeReport();
+      log(
+        `trace: ${traceSummary.calls} call(s), read-slot utilization ${traceSummary.readSlotUtilization}, ` +
+          `GUI ${Math.round(traceSummary.gui.totalMs / 1000)}s (${Math.round(traceSummary.gui.exposedMs / 1000)}s exposed) -> ${traceSummary.file}`
+      );
+    }
   }
 
   const failures = rows.filter((r) => r.outcome === "open-failed" || r.outcome === "stage-failed").length;
@@ -566,8 +675,9 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     }
   }
 
+  const cancelled = options.signal?.aborted === true && stoppedEarly === RUN_CANCELLED_MESSAGE;
   if (stoppedEarly !== undefined) {
-    options.state?.failRun("RUN_STOPPED", stoppedEarly);
+    options.state?.failRun(cancelled ? "RUN_CANCELLED" : "RUN_STOPPED", stoppedEarly);
   } else if (finalized === undefined && failures > 0) {
     options.state?.failRun("RUN_INCOMPLETE", `${failures} module(s) failed; run the same command again to retry them`);
   }
@@ -593,6 +703,8 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     finalized: finalized !== undefined,
     ...(finalized !== undefined ? { rebuild: finalized } : {}),
     ...(stoppedEarly !== undefined ? { stoppedEarly } : {}),
+    ...(cancelled ? { cancelled: true } : {}),
+    ...(traceSummary !== undefined ? { trace: traceSummary } : {}),
     ...(incomplete !== undefined ? { incomplete } : {}),
     ...(pipeline !== undefined ? { pipeline } : {}),
     failures,
@@ -711,6 +823,19 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   let fatal: unknown;
   let consecutiveOpenFailures = 0;
 
+  // Ctrl+C: stop scheduling, let started modules finish and close, then report. The abort path below
+  // already does exactly that; cancellation only has to flip it and wake the scheduler.
+  let cancelled = false;
+  const onCancel = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    abort = true;
+    log(`CANCELLING: opening nothing more; ${running.size} module(s) in flight will finish, drain and close`);
+    signal();
+  };
+  options.signal?.addEventListener("abort", onCancel, { once: true });
+  if (options.signal?.aborted === true) onCancel();
+
   // The one GUI operator: opens and closes never overlap, and `gapMs` is its cooldown between actions.
   let guiTail: Promise<unknown> = Promise.resolve();
   let lastGuiEnd: number | undefined;
@@ -736,10 +861,13 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   /** Only after the module's own barrier; a thrown close counts as "not closed". */
   const closeOwnedTab = (mod: string): Promise<{ ok: boolean; error?: string }> =>
     gui(async () => {
+      const t0 = performance.now();
+      let ok = false;
       try {
         await s.waitForForeground();
         const closed = await opener.closeOwned(mod);
         if (closed.ok) {
+          ok = true;
           log(`   close ${mod} ok`);
           return { ok: true };
         }
@@ -750,6 +878,8 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
         const error = errorOf(err).message;
         log(`   close ${mod} FAILED ${error}`);
         return { ok: false, error };
+      } finally {
+        s.traceGui?.({ action: "close", module: mod, startMs: t0, endMs: performance.now(), ok });
       }
     });
 
@@ -943,11 +1073,26 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     }
     consecutiveOpenFailures = 0;
     log(`   open ${mod} ok${opened.attempts > 1 ? ` after ${opened.attempts} attempts` : ""}`);
+    if (abort) {
+      // Stopped (or cancelled) while this open was in progress: give the tab back unread instead of
+      // spending a whole capture on it; the next run reads it.
+      if (opened.openedHere) {
+        const closed = await closeOwnedTab(mod);
+        if (closed.ok) active.delete(lower(mod));
+      } else active.delete(lower(mod));
+      queue.unshift(mod);
+      break;
+    }
     startTask(mod, opened.openedHere, opened.attempts);
   }
 
   // Let everything already started settle (its capture, drain and close) before touching the result.
   while (running.size > 0) await Promise.all([...running]);
+  options.signal?.removeEventListener("abort", onCancel);
+  if (cancelled && stoppedEarly === undefined) {
+    stoppedEarly = RUN_CANCELLED_MESSAGE;
+    log(`CANCELLED: ${stoppedEarly}`);
+  }
 
   // Aborted: close what this process still owns (a failed close earlier, a refused one now). Best
   // effort and visible; never a tab the process did not open (closeOwned refuses those).
@@ -967,6 +1112,11 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
       }
       if (closed.ok) active.delete(lower(owned));
     }
+  }
+
+  // Every scope module gets a row: what was still queued when the run stopped is `not-started`.
+  for (const mod of queue) {
+    if (!rows.some((r) => lower(r.module) === lower(mod))) record({ module: mod, outcome: "not-started" });
   }
 
   rows.sort((a, b) => indexOf(a.module) - indexOf(b.module));

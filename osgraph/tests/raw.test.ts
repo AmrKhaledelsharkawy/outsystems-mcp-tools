@@ -263,6 +263,28 @@ describe("rebuild captures raw texts", () => {
     expect(statSync(rawManifestPath(graphDir, "demo", "demoportal")).isFile()).toBe(true);
   });
 
+  it("a failed walk aborts its raw writer, so the same module can be staged again in this process", async () => {
+    const graphDir = join(tmp(), "graphs");
+    const stage = (session: ReturnType<typeof fakeSession>) =>
+      stageModule({
+        scope,
+        module: "demoportal",
+        graphDir,
+        snapshotPath: join(graphDir, "demo", "graph.json"),
+        session,
+        rules,
+        now: fixedNow,
+        retryDelayMs: 0
+      });
+    const failing = fakeSession([demoPortalModule({ referencedOnly: false })], { failures: { "getScreenNames:demoportal:": Infinity } });
+    await expect(stage(failing)).rejects.toThrow();
+    const parent = join(graphDir, "demo", "raw");
+    expect(existsSync(parent) ? readdirSync(parent).filter((n) => n.startsWith("%tmp-")) : []).toEqual([]);
+    // No RAW_CAPTURE_ACTIVE: the aborted writer released the module.
+    await stage(fakeSession([demoPortalModule({ referencedOnly: false })]));
+    expect(listRawModules(graphDir, "demo")).toEqual(["demoportal"]);
+  });
+
   it("is deterministic: two rebuilds produce byte-identical raw files and manifests", async () => {
     const run = async (): Promise<Record<string, string>> => {
       const graphDir = join(tmp(), "graphs");
@@ -412,12 +434,41 @@ describe("atomic per-module capture (ADR-0015)", () => {
   it("a new capture of the same module clears that module's stale staging directory", () => {
     const dir = tmp();
     capture(dir, { A: "old-a" });
-    capture(dir, { A: "never-finished" }, false);
+    // A writer that died with its process (no in-process owner) leaves its staging behind.
     const parent = join(rawModuleDir(dir, "s", "M"), "..");
+    const dead = join(parent, "%tmp-M-999999-1");
+    mkdirSync(dead, { recursive: true });
+    writeFileSync(join(dead, "x.txt"), "never-finished", "utf8");
     expect(readdirSync(parent).filter((n) => n.startsWith("%tmp-"))).toHaveLength(1);
     capture(dir, { A: "next" });
     expect(readdirSync(parent)).toEqual(["M"]);
     expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("next");
+  });
+
+  it("a second unfinished writer for the same module (any case) is refused; the first is untouched", () => {
+    const dir = tmp();
+    const first = capture(dir, { A: "first" }, false);
+    const parent = join(rawModuleDir(dir, "s", "M"), "..");
+    const before = readdirSync(parent).filter((n) => n.startsWith("%tmp-"));
+    expect(before).toHaveLength(1);
+    expect(() => new RawModuleWriter(dir, "s", "M")).toThrow(/already in progress/);
+    expect(() => new RawModuleWriter(dir, "s", "m")).toThrow(/already in progress/);
+    expect(readdirSync(parent).filter((n) => n.startsWith("%tmp-"))).toEqual(before);
+    // The same module captured into another scope is a different live directory: not blocked.
+    const other = new RawModuleWriter(dir, "s2", "M");
+    other.abort();
+    first.writeManifest(meta);
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("first");
+  });
+
+  it("abort() frees the module so it can be captured again in the same process", () => {
+    const dir = tmp();
+    capture(dir, { A: "old" });
+    const w = capture(dir, { A: "aborted" }, false);
+    w.abort();
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("old");
+    capture(dir, { A: "again" });
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("again");
   });
 
   describe("staging cleanup is exact-module (concurrent writers)", () => {

@@ -530,3 +530,70 @@ describe("ServiceStudioClient auth handling + redaction", () => {
     expect(fake.calls).toHaveLength(0);
   });
 });
+
+describe("ServiceStudioClient call tracing (osgraph run --trace)", () => {
+  const OML = { code: -32000, message: "OML not found: /tmp/ServiceStudio.MCPServer/abc-in.oml" };
+  type Trace = import("../src/servicestudio/trace.js").CallTrace;
+
+  it("records queued/admitted/attempt/settled per call, separating queue wait from service time", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fake = new FakeServiceStudio(async (call) => {
+      if (call.input.eSpaceName === "B") await gate;
+      return { text: FENCED };
+    });
+    const client = makeClient(fake, { maxConcurrent: 1 });
+    const traces: Trace[] = [];
+    client.setCallTrace((t) => traces.push(t));
+    const b = client.getDataModel("B"); // holds the only permit
+    const a = client.getDataModel("A"); // waits in the FIFO
+    await new Promise((r) => setTimeout(r, 15));
+    release!();
+    await Promise.all([a, b]);
+    expect(traces.map((t) => [t.tool, t.module, t.ok])).toEqual([
+      ["getDataModel", "B", true],
+      ["getDataModel", "A", true]
+    ]);
+    const ta = traces[1] as Trace;
+    const tb = traces[0] as Trace;
+    expect(ta.admissions).toHaveLength(1);
+    expect(ta.attempts).toHaveLength(1);
+    // A was admitted only after B released the permit: that wait is queue time, not service time.
+    expect(ta.admissions[0]!.admittedMs).toBeGreaterThanOrEqual(tb.admissions[0]!.releasedMs);
+    expect(ta.admissions[0]!.admittedMs - ta.queuedMs).toBeGreaterThanOrEqual(10);
+    expect(ta.settledMs).toBeGreaterThanOrEqual(ta.admissions[0]!.releasedMs);
+    expect(JSON.stringify(traces)).not.toContain(TOKEN);
+  });
+
+  it("a transient temp-OML retry is two attempts inside one admission; a failure carries its code", async () => {
+    let n = 0;
+    const fake = new FakeServiceStudio((call) => {
+      if (call.input.eSpaceName === "Bad") return { rpcError: { code: -32602, message: "bad input" } };
+      n++;
+      return n === 1 ? { rpcError: OML } : { text: FENCED };
+    });
+    const client = makeClient(fake);
+    const traces: Trace[] = [];
+    client.setCallTrace((t) => traces.push(t));
+    await client.getDataModel("A");
+    await catchError(client.getScreen("Bad", "S"));
+    const [ok, bad] = traces as [Trace, Trace];
+    expect(ok.admissions).toHaveLength(1);
+    expect(ok.attempts.map((x) => x.ok)).toEqual([false, true]);
+    expect(bad.ok).toBe(false);
+    expect(typeof bad.errorCode).toBe("string");
+  });
+
+  it("is off by default and detaches cleanly", async () => {
+    const fake = new FakeServiceStudio(() => ({ text: FENCED }));
+    const client = makeClient(fake);
+    const traces: Trace[] = [];
+    await client.getDataModel("A");
+    client.setCallTrace((t) => traces.push(t));
+    await client.getDataModel("A");
+    client.setCallTrace(undefined);
+    await client.getDataModel("A");
+    expect(traces).toHaveLength(1);
+    expect(client.concurrency).toBe(4);
+  });
+});
