@@ -10,7 +10,7 @@ import { closeSite, ensureSite } from "./progress/site.js";
 import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js";
 import { createServiceStudioClient } from "./servicestudio/token.js";
 import { createSharedSessionFactory } from "./tools/tool.js";
-import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, runScope } from "./run/run.js";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, refreshModules, runScope } from "./run/run.js";
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
@@ -115,6 +115,29 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     fail(EXIT_USAGE, `--module needs a module name.\n${USAGE}`);
     return;
   }
+  if (options.modules === "true" || options.modules === "") {
+    fail(EXIT_USAGE, `--modules needs a comma-separated list of module names.
+${USAGE}`);
+    return;
+  }
+  if (options.module !== undefined && (options.modules !== undefined || options.changed !== undefined)) {
+    fail(EXIT_USAGE, `--module cannot be combined with --modules or --changed.
+${USAGE}`);
+    return;
+  }
+  if (options.changed !== undefined && options.changed !== "true") {
+    fail(EXIT_USAGE, `--changed takes no value.
+${USAGE}`);
+    return;
+  }
+  if (options.changed === "true" && process.env.OSGRAPH_DISABLE_CHANGED === "1") {
+    fail(
+      EXIT_USAGE,
+      "CHANGED_DISABLED: --changed is switched off (OSGRAPH_DISABLE_CHANGED=1), because the listed-module-version signal " +
+        "failed or has not passed its live probe. Use --modules <names> or a full run instead."
+    );
+    return;
+  }
   const maxOpen = intFlag(options["max-open"], DEFAULT_MAX_OPEN);
   const maxFailures = intFlag(options["max-consecutive-failures"], DEFAULT_MAX_CONSECUTIVE_FAILURES);
   if (maxOpen === null || maxOpen < 1 || maxFailures === null) {
@@ -158,7 +181,35 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
   let exitCode = 0;
   let payload: unknown;
   const lines: string[] = [];
-  if (options.module !== undefined) {
+  if (options.modules !== undefined || options.changed === "true") {
+    const result = await refreshModules({
+      ...common,
+      ...(options.modules !== undefined ? { modules: options.modules.split(",").map((m) => m.trim()).filter((m) => m !== "") } : {}),
+      changed: options.changed === "true",
+      maxOpen,
+      maxConsecutiveFailures: maxFailures
+    });
+    payload = result;
+    lines.push(
+      `scope '${result.scope}': ${result.readCount} module(s) read of ${result.rows.length} considered, ${result.failures} failure(s)`
+    );
+    for (const r of result.rows) {
+      const tagText = r.error !== undefined ? "FAILED " : r.read ? "read   " : "reused ";
+      const errText = r.error !== undefined ? ` -- ${r.error.code}: ${r.error.message}` : "";
+      lines.push(`  ${tagText} ${r.module}  [${r.reason}] ${r.detail}${errText}`);
+    }
+    if (result.stoppedEarly !== undefined) lines.push(`  STOPPED: ${result.stoppedEarly}`);
+    if (result.reextract !== undefined) {
+      lines.push(
+        `  graph.json  ${result.reextract.nodeCount} nodes, ${result.reextract.edgeCount} edges, ${result.reextract.violationCount} violation(s)`,
+        `  flows.json  ${result.reextract.flowActionCount} actions, ${result.reextract.flowNodeCount} flow nodes`
+      );
+    } else {
+      lines.push("  not re-extracted: fix the failures and run the same command again");
+      exitCode = 1;
+    }
+    lines.push(`  log ${result.logPath}`);
+  } else if (options.module !== undefined) {
     const result = await refreshModule({ ...common, module: options.module });
     payload = result;
     lines.push(
