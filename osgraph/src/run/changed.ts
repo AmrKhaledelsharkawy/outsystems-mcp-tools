@@ -7,6 +7,10 @@
  *
  * Rule that never bends: an unknown version is NEVER treated as unchanged. Unknown on either side (an
  * old-schema manifest, an empty or missing listed version) means "read it".
+ *
+ * "0" is unknown too: Service Studio lists a module's real server version only when it was opened through
+ * Open from Environment; a module opened from the recent list is listed as version "0", so "0" == "0"
+ * would wrongly read as unchanged.
  */
 import { listRawModules, readRawModule } from "../rebuild/raw.js";
 
@@ -44,14 +48,33 @@ export function readCaptureVersion(graphDir: string, scope: string, module: stri
   }
 }
 
+/** A version that can be compared: a non-empty string other than "0" (see the file comment). */
+export function isKnownVersion(version: string | null | undefined): boolean {
+  return typeof version === "string" && version !== "" && version !== "0";
+}
+
 /** The single comparison. `listedVersion` is what Studio's open-module listing reports now. */
 export function decideChange(capture: CaptureVersion, listedVersion: string | null | undefined): ChangeDecision {
   if (!capture.exists) return { read: true, reason: "no capture", detail: "no raw capture yet" };
-  if (capture.version === null) {
-    return { read: true, reason: "unknown", detail: "the capture records no module version (old schema or not listed)" };
+  if (!isKnownVersion(capture.version)) {
+    return {
+      read: true,
+      reason: "unknown",
+      detail:
+        capture.version === "0"
+          ? 'the capture records version "0" (unknown: not an Open from Environment open)'
+          : "the capture records no module version (old schema or not listed)"
+    };
   }
-  if (typeof listedVersion !== "string" || listedVersion === "") {
-    return { read: true, reason: "unknown", detail: "Studio reports no version for the open module" };
+  if (!isKnownVersion(listedVersion)) {
+    return {
+      read: true,
+      reason: "unknown",
+      detail:
+        listedVersion === "0"
+          ? 'Studio lists version "0" for the open module (unknown: not an Open from Environment open)'
+          : "Studio reports no version for the open module"
+    };
   }
   if (listedVersion === capture.version) {
     return { read: false, reason: "unchanged", detail: `version ${listedVersion} matches the capture` };

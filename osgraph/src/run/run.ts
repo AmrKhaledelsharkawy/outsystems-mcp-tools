@@ -941,6 +941,12 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
     s.session.release();
   }
 
+  if (changedMode) {
+    const unknownVersion = rows.filter((r) => r.reason === "unknown" && r.read).length;
+    if (unknownVersion > 0) {
+      log(`WARNING: ${unknownVersion} module(s) re-read because their version was unknown ("0", empty or missing)`);
+    }
+  }
   const failures = rows.filter((r) => r.error !== undefined).length;
   const readCount = rows.filter((r) => r.read && r.error === undefined).length;
   let reextract: ReextractResult | undefined;

@@ -912,6 +912,53 @@ describe("decideChange: the one comparison behind --changed", () => {
   it("no capture is a read", () => {
     expect(decideChange({ exists: false, version: null }, "1.0")).toMatchObject({ read: true, reason: "no capture" });
   });
+  it('"0" is unknown on either side (a recent-list open lists version "0"), so "0" == "0" is still a read', () => {
+    expect(decideChange({ exists: true, version: "0" }, "0")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "0" }, "8")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "8" }, "0")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "8" }, "8")).toMatchObject({ read: false, reason: "unchanged" });
+  });
+});
+
+describe("osgraph run opens through Open from Environment", () => {
+  it("runScope passes source 'environment' on every open", async () => {
+    const s = fakeStudio(mods());
+    await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
+    expect(s.openInputs.length).toBeGreaterThan(0);
+    for (const input of s.openInputs) expect(input.source).toBe("environment");
+  });
+
+  it("refreshModules (--changed) passes source 'environment' on every open", async () => {
+    const graphDir = tmp();
+    const scope = { name: "demo", modules: ["alpha", "beta"] };
+    await runScope({ ...common(graphDir, fakeStudio(mods().slice(0, 2)), []), scope });
+    const s = fakeStudio(mods().slice(0, 2));
+    await refreshModules({ ...common(graphDir, s, [], T1), scope, changed: true });
+    expect(s.openInputs.map((i) => [i.name, i.source])).toEqual([
+      ["alpha", "environment"],
+      ["beta", "environment"]
+    ]);
+  });
+
+  it("the adapter omits source when the caller gives none (osopener's default applies)", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const adapter = createOsopenerAdapter(
+      {
+        async open(input) {
+          inputs.push(input);
+          return { opened: true, alreadyOpen: false };
+        },
+        async close() {
+          return { closed: true };
+        }
+      },
+      "fake-dist"
+    );
+    await adapter.open("alpha");
+    await adapter.open("beta", { source: "environment" });
+    expect("source" in inputs[0]).toBe(false);
+    expect(inputs[1].source).toBe("environment");
+  });
 });
 
 describe("osgraph run opens through Open from Environment", () => {
@@ -1006,6 +1053,62 @@ describe("refreshModules: --changed", () => {
     const result = await refreshModules({ ...common(graphDir, s, [], T1), scope: scope3, changed: true });
     expect(readModules(s)).toEqual(new Set(["alpha"]));
     expect(result.rows.find((r) => r.module === "alpha")).toMatchObject({ reason: "unknown", read: true });
+  });
+
+  /** Rewrites the `moduleVersion` a capture recorded; `undefined` deletes the field. */
+  function setCaptureVersion(graphDir: string, module: string, version: string | undefined): void {
+    const mp = rawManifestPath(graphDir, "demo", module);
+    const m = JSON.parse(read(mp)) as Record<string, unknown>;
+    if (version === undefined) delete m.moduleVersion;
+    else m.moduleVersion = version;
+    writeFileSync(mp, JSON.stringify(m));
+  }
+
+  it('a listed or captured version of "0", "" or missing is unknown: re-read, with one warning line; equal real versions are skipped', async () => {
+    const graphDir = await baseline(); // every capture records "1.0"
+    // alpha: Studio lists "0" now (recent-list open) while the capture says "1.0".
+    // beta : capture says "0", Studio lists "0" too — "0" == "0" must NOT be unchanged.
+    // gamma: equal real versions ("1.0" both sides) — the only skip.
+    setCaptureVersion(graphDir, "beta", "0");
+    const fresh = mods().slice(0, 3);
+    fresh[0].app.version = "0";
+    fresh[1].app.version = "0";
+    const s = fakeStudio(fresh);
+    const logs: string[] = [];
+    const result = await refreshModules({ ...common(graphDir, s, logs, T1), scope: scope3, changed: true });
+    expect(result.rows.map((r) => [r.module, r.reason, r.read])).toEqual([
+      ["alpha", "unknown", true],
+      ["beta", "unknown", true],
+      ["gamma", "unchanged", false]
+    ]);
+    expect(readModules(s)).toEqual(new Set(["alpha", "beta"]));
+    const warnings = logs.filter((l) => l.startsWith("WARNING:"));
+    expect(warnings).toEqual(['WARNING: 2 module(s) re-read because their version was unknown ("0", empty or missing)']);
+  });
+
+  it("an empty listed version and a missing captured version are unknown too", async () => {
+    const graphDir = await baseline();
+    setCaptureVersion(graphDir, "beta", undefined);
+    const fresh = mods().slice(0, 3);
+    fresh[0].app.version = "";
+    const s = fakeStudio(fresh);
+    const logs: string[] = [];
+    const result = await refreshModules({ ...common(graphDir, s, logs, T1), scope: scope3, changed: true });
+    expect(result.rows.map((r) => [r.module, r.reason, r.read])).toEqual([
+      ["alpha", "unknown", true],
+      ["beta", "unknown", true],
+      ["gamma", "unchanged", false]
+    ]);
+    expect(logs.filter((l) => l.startsWith("WARNING:"))).toEqual([
+      'WARNING: 2 module(s) re-read because their version was unknown ("0", empty or missing)'
+    ]);
+  });
+
+  it("no unknown-version warning when every version is known", async () => {
+    const graphDir = await baseline();
+    const logs: string[] = [];
+    await refreshModules({ ...common(graphDir, fakeStudio(mods().slice(0, 3)), logs, T1), scope: scope3, changed: true });
+    expect(logs.some((l) => l.startsWith("WARNING:"))).toBe(false);
   });
 
   it("a module with no capture is read and reported as no capture", async () => {
