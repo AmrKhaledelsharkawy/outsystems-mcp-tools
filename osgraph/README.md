@@ -489,7 +489,7 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 | `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
 | `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |
-| `OSGRAPH_STUDIO_LOCK` | no | `<tmpdir>/osgraph-studio.lock` | Cross-process Service Studio lock file (ADR-0015). `osgraph run`, MCP `rebuild` and module discovery hold it while they open, read and close tabs; a second contender fails fast with `BUSY` naming the holder. Every osgraph process on the machine must use the same path |
+| `OSGRAPH_STUDIO_LOCK` | no | `<tmpdir>/osgraph-studio.lock` | Cross-process Service Studio lock file (ADR-0017). `osgraph run`, MCP `rebuild` and module discovery hold it while they open, read and close tabs; a second contender fails fast with `BUSY` naming the holder. Every osgraph process on the machine must use the same path |
 
 osgraph **only ever reads** the session token — it never calls `createSessionToken`,
 because approving a session is a human act. It therefore **cannot obtain a token by
