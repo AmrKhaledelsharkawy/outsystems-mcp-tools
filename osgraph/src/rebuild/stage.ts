@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { ExtractedModule } from "../extract/index.js";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import type { RebuildPhase } from "./rebuild.js";
+import type { ModuleKindStats, PrunableKind } from "./readKinds.js";
 
 /**
  * Bumped whenever `StageEntry`'s shape changes incompatibly. An entry carrying a different version
@@ -51,6 +52,10 @@ export interface StageEntry {
    * rather than inventing one. `phaseDurationsMs` is only interpretable against this.
    */
   concurrency?: number;
+  /** Per-kind read cost (#69). Optional: entries staged before it existed carry none. */
+  kinds?: ModuleKindStats;
+  /** Kinds switched off when this module was staged (#69). Absent = none. */
+  skippedKinds?: PrunableKind[];
   extracted: ExtractedModule;
 }
 

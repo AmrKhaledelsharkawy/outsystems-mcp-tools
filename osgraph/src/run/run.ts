@@ -32,6 +32,7 @@ import { reextractScope, type ReextractResult } from "../reextract.js";
 import { listRawModules, rawManifestPath, type RawManifest } from "../rebuild/raw.js";
 import type { ServiceStudioSession } from "../rebuild/reader.js";
 import { finalizeStage, stageModule, type RebuildProgressEvent, type RebuildResult, type StageOutcome } from "../rebuild/rebuild.js";
+import type { PrunableKind } from "../rebuild/readKinds.js";
 import { readStage, stagePath } from "../rebuild/stage.js";
 import type { ScopeDefinition } from "../scopes/store.js";
 import { OsgraphToolError, type ServiceStudioApp } from "../servicestudio/types.js";
@@ -66,6 +67,8 @@ export interface RunCommonOptions {
   state?: RunState;
   log?: (line: string) => void;
   fetchConcurrency?: number;
+  /** Kinds not to read (#69). Passed through to every staged module read. */
+  skipKinds?: readonly PrunableKind[];
   fetchReferencedElements?: boolean;
   now?: () => Date;
   sleep?: Sleep;
@@ -431,6 +434,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
           now: s.now,
           onProgress: s.onProgress,
           ...(options.fetchConcurrency !== undefined ? { fetchConcurrency: options.fetchConcurrency } : {}),
+          ...(options.skipKinds !== undefined ? { skipKinds: options.skipKinds } : {}),
           ...(options.fetchReferencedElements !== undefined ? { fetchReferencedElements: options.fetchReferencedElements } : {}),
           ...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {})
         });
@@ -661,6 +665,7 @@ export async function refreshModule(options: RefreshModuleOptions): Promise<Refr
         now: s.now,
         onProgress: s.onProgress,
         ...(options.fetchConcurrency !== undefined ? { fetchConcurrency: options.fetchConcurrency } : {}),
+        ...(options.skipKinds !== undefined ? { skipKinds: options.skipKinds } : {}),
         ...(options.fetchReferencedElements !== undefined ? { fetchReferencedElements: options.fetchReferencedElements } : {}),
         ...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {})
       });
