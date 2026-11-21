@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { loadLayerRules } from "../src/layers/rules.js";
 import { rebuildScope, stageModule } from "../src/rebuild/rebuild.js";
 import {
+  IDENTITY_UNKNOWN_NOT_LISTED,
+  IDENTITY_UNKNOWN_OLD_SCHEMA,
   RAW_SCHEMA_VERSION,
   RawCaptureError,
   RawModuleWriter,
@@ -281,5 +283,64 @@ describe("rebuild captures raw texts", () => {
       return out;
     };
     expect(await run()).toEqual(await run());
+  });
+});
+
+describe("module identity in the manifest (#61)", () => {
+  const base = { moduleType: "Reactive", capturedAt: "2026-10-30T12:00:00.000Z", referencedOnlyCount: 0, skipped: [] };
+
+  it("round-trips the key and version exactly as given, under schema 2", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "k-123", moduleVersion: "7.4" });
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.moduleKey).toBe("k-123");
+    expect(manifest.moduleVersion).toBe("7.4");
+    expect(manifest.moduleIdentityReason).toBeNull();
+  });
+
+  it("stores null plus a reason, and does not fail, when the listing lacked them", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "", moduleVersion: undefined });
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.moduleKey).toBeNull();
+    expect(manifest.moduleVersion).toBeNull();
+    expect(manifest.moduleIdentityReason).toBe(IDENTITY_UNKNOWN_NOT_LISTED);
+  });
+
+  it("reads a schema-1 manifest as explicit unknown, leaving the file untouched", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "k", moduleVersion: "1" });
+    const path = rawManifestPath(dir, "s", "M");
+    const m = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    delete m.moduleKey;
+    delete m.moduleVersion;
+    delete m.moduleIdentityReason;
+    const old = JSON.stringify({ ...m, schemaVersion: 1 });
+    writeFileSync(path, old, "utf8");
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.moduleKey).toBeNull();
+    expect(manifest.moduleVersion).toBeNull();
+    expect(manifest.moduleIdentityReason).toBe(IDENTITY_UNKNOWN_OLD_SCHEMA);
+    expect(readFileSync(path, "utf8")).toBe(old);
+  });
+
+  it("a full rebuild persists the listing's key and version for every module", async () => {
+    const dir = tmp();
+    const session = fakeSession([demoPortalModule({ referencedOnly: false }), syntheticXModule()]);
+    await rebuildScope({
+      scope: { name: "demo", modules: ["demoportal", "x"] },
+      snapshotPath: join(dir, "demo", "graph.json"),
+      session,
+      rules,
+      retryDelayMs: 0,
+      rawGraphDir: dir
+    });
+    for (const name of listRawModules(dir, "demo")) {
+      const { manifest } = readRawModule(dir, "demo", name);
+      expect(manifest.moduleKey).toBe(`key-${name}`);
+      expect(manifest.moduleVersion).toBe("1.0");
+      expect(manifest.moduleIdentityReason).toBeNull();
+    }
   });
 });
