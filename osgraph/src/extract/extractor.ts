@@ -128,6 +128,14 @@ export function extractText(text: string, ctx: TextContext): TextResult {
   let pendingSignature: { kind: ElementKind | undefined; path: string } | undefined;
   let lambdaFlowVar: string | undefined;
   let dependencyFlow: string | undefined;
+  /**
+   * OSG-60: the Model API emits an action's nodes in an unstable order, so a var may be *used*
+   * (a `.Named(...)` lookup through a reference var, a flow var, an element var) on a line that
+   * precedes its declaration. The collect passes below fill `vars` from the whole text first
+   * (no edges, nodes, anchors or skips recorded); the emit pass then resolves forward uses
+   * against that table, while still letting a declaration overwrite an entry as it is reached.
+   */
+  let collecting = false;
 
   const resolveModule = (receiver: string): string | undefined => {
     if (receiver === "eSpace") return ctx.module;
@@ -136,6 +144,7 @@ export function extractText(text: string, ctx: TextContext): TextResult {
   };
 
   const addEdge = (target: Extract<VarEntry, { t: "elem" }>, sourceId: string): void => {
+    if (collecting) return;
     const targetId = entryId(target);
     if (targetId === sourceId) return;
     const edge: ExtractedEdge = {
@@ -149,181 +158,195 @@ export function extractText(text: string, ctx: TextContext): TextResult {
     edges.push(edge);
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line === "") continue;
+  const scan = (): void => {
+    current = undefined;
+    pendingSignature = undefined;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line === "") continue;
 
-    const anchor = ANCHOR_RE.exec(line);
-    if (anchor) {
-      const kind = normalizeKind(anchor[1]);
-      const block: AnchorBlock = { rawKind: anchor[1], kind, name: anchor[2], line: i };
-      anchors.push(block);
-      if (kind === undefined) {
-        current = undefined; // not graphed in v1 (ADR-0006): block ignored silently
-        continue;
-      }
-      const uiFlow = isFlowQualified(kind) ? ctx.uiFlow : undefined;
-      const id = buildId({ module: ctx.module, kind, name: block.name, uiFlow });
-      current = { block, id };
-      const node: ExtractedNode = { id, label: block.name, kind, module: ctx.module };
-      if (uiFlow !== undefined) node.uiFlow = uiFlow;
-      nodes.set(id, node);
-      continue;
-    }
-
-    const lambda = LAMBDA_PARAM_RE.exec(line);
-    if (lambda) {
-      if (/Flow/.test(lambda[1])) {
-        lambdaFlowVar = lambda[2];
-        vars.set(lambda[2], { t: "flow", module: ctx.module, flow: ctx.uiFlow });
-      }
-      continue;
-    }
-
-    const signature = SIGNATURE_COMMENT_RE.exec(line);
-    if (signature) {
-      pendingSignature = { kind: normalizeKind(signature[1]), path: signature[2] };
-      continue;
-    }
-
-    const dependency = ADD_DEPENDENCY_RE.exec(line);
-    if (dependency) {
-      const [, varName, castType, globalKey] = dependency;
-      const kind = pendingSignature?.kind ?? normalizeKind(castType);
-      const path = pendingSignature?.path;
-      pendingSignature = undefined;
-      if (kind === undefined) continue; // dependency on a non-graphed kind: dropped silently
-      let entry: Extract<VarEntry, { t: "elem" }>;
-      if (path !== undefined && path.includes("/")) {
-        const segments = path.split("/");
-        const module = normalizeModuleName(segments[0]);
-        const name = segments[segments.length - 1];
-        const uiFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
-        if (uiFlow !== undefined && dependencyFlow === undefined) dependencyFlow = uiFlow;
-        entry = { t: "elem", kind, name, module, uiFlow, external: module !== ctx.module, globalKey, opaque: false };
-      } else {
-        entry = { t: "elem", kind, name: globalKey, module: undefined, external: true, globalKey, opaque: true };
-      }
-      vars.set(varName, entry);
-      if (entry.external) externals.push(entry);
-      if (current) addEdge(entry, current.id);
-      continue;
-    }
-    // `var eSpace = <param>.GetESpace();` sits between the signature comment and its AddDependency.
-    if (!/^var eSpace = /.test(line)) pendingSignature = undefined;
-
-    const reference = REFERENCE_RE.exec(line);
-    if (reference) {
-      vars.set(reference[1], { t: "ref", module: normalizeModuleName(reference[2]) });
-      continue;
-    }
-
-    const flow = FLOW_RE.exec(line);
-    if (flow) {
-      const module = resolveModule(flow[2]);
-      if (module !== undefined) vars.set(flow[1], { t: "flow", module, flow: flow[3] });
-      continue;
-    }
-
-    const flowNode = FLOW_NODE_RE.exec(line);
-    if (flowNode) {
-      const [, varName, flowVar, typeName, name] = flowNode;
-      const kind = normalizeKind(typeName);
-      const flowEntry = vars.get(flowVar);
-      if (kind !== undefined && isFlowQualified(kind) && flowEntry?.t === "flow") {
-        let uiFlow = flowEntry.flow;
-        if (uiFlow === undefined && flowEntry.module === ctx.module) {
-          const candidates = ctx.flowsByName.get(name) ?? [];
-          if (candidates.length === 1) uiFlow = candidates[0];
-          else {
-            skipped.push({ kind, name, reason: "DUPLICATE_NAME_UNRESOLVABLE" });
-            continue; // never attached to an arbitrary duplicate (ADR-0008)
-          }
+      const anchor = ANCHOR_RE.exec(line);
+      if (anchor) {
+        const kind = normalizeKind(anchor[1]);
+        const block: AnchorBlock = { rawKind: anchor[1], kind, name: anchor[2], line: i };
+        if (!collecting) anchors.push(block);
+        if (kind === undefined) {
+          current = undefined; // not graphed in v1 (ADR-0006): block ignored silently
+          continue;
         }
-        const entry: Extract<VarEntry, { t: "elem" }> = {
-          t: "elem",
-          kind,
-          name,
-          module: flowEntry.module,
-          uiFlow,
-          external: flowEntry.module !== ctx.module,
-          opaque: false
-        };
-        vars.set(varName, entry);
-        if (entry.external) externals.push(entry);
-        if (current) addEdge(entry, current.id);
+        const uiFlow = isFlowQualified(kind) ? ctx.uiFlow : undefined;
+        const id = buildId({ module: ctx.module, kind, name: block.name, uiFlow });
+        current = { block, id };
+        const node: ExtractedNode = { id, label: block.name, kind, module: ctx.module };
+        if (uiFlow !== undefined) node.uiFlow = uiFlow;
+        if (!collecting) nodes.set(id, node);
+        continue;
       }
-      continue;
-    }
 
-    const systemRole = SYSTEM_ROLE_RE.exec(line);
-    if (systemRole) {
-      const entry: Extract<VarEntry, { t: "elem" }> = {
-        t: "elem",
-        kind: "Role",
-        name: systemRole[2],
-        module: "System",
-        external: true,
-        opaque: false
-      };
-      vars.set(systemRole[1], entry);
-      if (current) addEdge(entry, current.id);
-      continue;
-    }
+      const lambda = LAMBDA_PARAM_RE.exec(line);
+      if (lambda) {
+        if (/Flow/.test(lambda[1])) {
+          lambdaFlowVar = lambda[2];
+          vars.set(lambda[2], { t: "flow", module: ctx.module, flow: ctx.uiFlow });
+        }
+        continue;
+      }
 
-    const collection = COLLECTION_RE.exec(line);
-    if (collection) {
-      const [, varName, receiver, collectionName, name] = collection;
-      const kind = collectionKind(collectionName);
-      const module = resolveModule(receiver);
-      if (kind !== undefined && module !== undefined) {
-        const entry: Extract<VarEntry, { t: "elem" }> = {
-          t: "elem",
-          kind,
-          name,
-          module,
-          external: module !== ctx.module,
-          opaque: false
-        };
+      const signature = SIGNATURE_COMMENT_RE.exec(line);
+      if (signature) {
+        pendingSignature = { kind: normalizeKind(signature[1]), path: signature[2] };
+        continue;
+      }
+
+      const dependency = ADD_DEPENDENCY_RE.exec(line);
+      if (dependency) {
+        const [, varName, castType, globalKey] = dependency;
+        const kind = pendingSignature?.kind ?? normalizeKind(castType);
+        const path = pendingSignature?.path;
+        pendingSignature = undefined;
+        if (kind === undefined) continue; // dependency on a non-graphed kind: dropped silently
+        let entry: Extract<VarEntry, { t: "elem" }>;
+        if (path !== undefined && path.includes("/")) {
+          const segments = path.split("/");
+          const module = normalizeModuleName(segments[0]);
+          const name = segments[segments.length - 1];
+          const uiFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
+          if (!collecting && uiFlow !== undefined && dependencyFlow === undefined) dependencyFlow = uiFlow;
+          entry = { t: "elem", kind, name, module, uiFlow, external: module !== ctx.module, globalKey, opaque: false };
+        } else {
+          entry = { t: "elem", kind, name: globalKey, module: undefined, external: true, globalKey, opaque: true };
+        }
         vars.set(varName, entry);
-        if (entry.external && kind !== "Role") externals.push(entry);
+        if (entry.external && !collecting) externals.push(entry);
         if (current) addEdge(entry, current.id);
         continue;
       }
-      // other `.Named(...)` lookups (InputParameters, Placeholders, …) fall through to the generic scan
-    }
+      // `var eSpace = <param>.GetESpace();` sits between the signature comment and its AddDependency.
+      if (!/^var eSpace = /.test(line)) pendingSignature = undefined;
 
-    if (current && current.varName === undefined) {
-      const create = CREATE_RE.exec(line);
-      if (create && create[2] === current.block.name) {
-        current.varName = create[1];
-        vars.set(create[1], {
-          t: "elem",
-          kind: current.block.kind as ElementKind,
-          name: current.block.name,
-          module: ctx.module,
-          uiFlow: isFlowQualified(current.block.kind as ElementKind) ? ctx.uiFlow : undefined,
-          external: false,
-          opaque: false
-        });
+      const reference = REFERENCE_RE.exec(line);
+      if (reference) {
+        vars.set(reference[1], { t: "ref", module: normalizeModuleName(reference[2]) });
         continue;
       }
-    }
 
-    if (!current) continue;
+      const flow = FLOW_RE.exec(line);
+      if (flow) {
+        const module = resolveModule(flow[2]);
+        if (module !== undefined) vars.set(flow[1], { t: "flow", module, flow: flow[3] });
+        continue;
+      }
 
-    // Generic scan: any element var from the table used inside this element's block is an edge.
-    const scanned = stripStringsAndComments(line);
-    const declared = VAR_DECL_RE.exec(scanned)?.[1];
-    const tokens = scanned.match(/[A-Za-z_]\w*/g) ?? [];
-    const seen = new Set<string>();
-    for (const token of tokens) {
-      if (token === declared || seen.has(token)) continue;
-      seen.add(token);
-      const entry = vars.get(token);
-      if (entry?.t === "elem") addEdge(entry, current.id);
+      const flowNode = FLOW_NODE_RE.exec(line);
+      if (flowNode) {
+        const [, varName, flowVar, typeName, name] = flowNode;
+        const kind = normalizeKind(typeName);
+        const flowEntry = vars.get(flowVar);
+        if (kind !== undefined && isFlowQualified(kind) && flowEntry?.t === "flow") {
+          let uiFlow = flowEntry.flow;
+          if (uiFlow === undefined && flowEntry.module === ctx.module) {
+            const candidates = ctx.flowsByName.get(name) ?? [];
+            if (candidates.length === 1) uiFlow = candidates[0];
+            else {
+              if (!collecting) skipped.push({ kind, name, reason: "DUPLICATE_NAME_UNRESOLVABLE" });
+              continue; // never attached to an arbitrary duplicate (ADR-0008)
+            }
+          }
+          const entry: Extract<VarEntry, { t: "elem" }> = {
+            t: "elem",
+            kind,
+            name,
+            module: flowEntry.module,
+            uiFlow,
+            external: flowEntry.module !== ctx.module,
+            opaque: false
+          };
+          vars.set(varName, entry);
+          if (entry.external && !collecting) externals.push(entry);
+          if (current) addEdge(entry, current.id);
+        }
+        continue;
+      }
+
+      const systemRole = SYSTEM_ROLE_RE.exec(line);
+      if (systemRole) {
+        const entry: Extract<VarEntry, { t: "elem" }> = {
+          t: "elem",
+          kind: "Role",
+          name: systemRole[2],
+          module: "System",
+          external: true,
+          opaque: false
+        };
+        vars.set(systemRole[1], entry);
+        if (current) addEdge(entry, current.id);
+        continue;
+      }
+
+      const collection = COLLECTION_RE.exec(line);
+      if (collection) {
+        const [, varName, receiver, collectionName, name] = collection;
+        const kind = collectionKind(collectionName);
+        const module = resolveModule(receiver);
+        if (kind !== undefined && module !== undefined) {
+          const entry: Extract<VarEntry, { t: "elem" }> = {
+            t: "elem",
+            kind,
+            name,
+            module,
+            external: module !== ctx.module,
+            opaque: false
+          };
+          vars.set(varName, entry);
+          if (entry.external && kind !== "Role" && !collecting) externals.push(entry);
+          if (current) addEdge(entry, current.id);
+          continue;
+        }
+        // other `.Named(...)` lookups (InputParameters, Placeholders, …) fall through to the generic scan
+      }
+
+      if (current && current.varName === undefined) {
+        const create = CREATE_RE.exec(line);
+        if (create && create[2] === current.block.name) {
+          current.varName = create[1];
+          vars.set(create[1], {
+            t: "elem",
+            kind: current.block.kind as ElementKind,
+            name: current.block.name,
+            module: ctx.module,
+            uiFlow: isFlowQualified(current.block.kind as ElementKind) ? ctx.uiFlow : undefined,
+            external: false,
+            opaque: false
+          });
+          continue;
+        }
+      }
+
+      if (!current) continue;
+
+      // Generic scan: any element var from the table used inside this element's block is an edge.
+      const scanned = stripStringsAndComments(line);
+      const declared = VAR_DECL_RE.exec(scanned)?.[1];
+      const tokens = scanned.match(/[A-Za-z_]\w*/g) ?? [];
+      const seen = new Set<string>();
+      for (const token of tokens) {
+        if (token === declared || seen.has(token)) continue;
+        seen.add(token);
+        const entry = vars.get(token);
+        if (entry?.t === "elem") addEdge(entry, current.id);
+      }
     }
+  };
+
+  // Collect passes run to a fixpoint (a lookup may chain through a var declared later in the text).
+  collecting = true;
+  for (let pass = 0, size = -1; pass < 8 && vars.size !== size; pass++) {
+    size = vars.size;
+    scan();
   }
+  collecting = false;
+  lambdaFlowVar = undefined;
+  scan();
 
   for (const entry of externals) {
     const node = externalNode(entry);
