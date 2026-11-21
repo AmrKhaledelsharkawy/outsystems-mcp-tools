@@ -233,6 +233,27 @@ ${USAGE}`);
     fail(EXIT_USAGE, `--pipeline-depth must be an integer >= 1.\n${USAGE}`);
     return;
   }
+  // --pipeline-depth and --trace only exist on the full run. The refresh modes would silently ignore
+  // them, and `--changed --pipeline-depth 4` would look pipelined while running one module at a time.
+  const refreshMode = options.module !== undefined || options.modules !== undefined || options.changed === "true";
+  if (refreshMode) {
+    const unsupported = [
+      ...(options["pipeline-depth"] !== undefined && pipelineDepth !== 1 ? ["--pipeline-depth"] : []),
+      ...(options.trace !== undefined ? ["--trace"] : [])
+    ];
+    if (unsupported.length > 0) {
+      fail(
+        EXIT_USAGE,
+        `${unsupported.join(" and ")} ${unsupported.length > 1 ? "apply" : "applies"} only to a full run (osgraph run --scope <name>); --module, --modules and ` +
+          `--changed always read one module at a time. Drop ${unsupported.length > 1 ? "them" : "it"} or run the full scope.\n${USAGE}`
+      );
+      return;
+    }
+  }
+  if (options.trace !== undefined && options.trace !== "true") {
+    fail(EXIT_USAGE, `--trace takes no value.\n${USAGE}`);
+    return;
+  }
   const graphDir = options["graph-dir"] ?? config.graphDir;
   const scope = readScope(config.scopesDir, scopeName);
   const log = (line: string): void => {
@@ -246,7 +267,20 @@ ${USAGE}`);
     `osgraph run --scope ${scopeName}${options.module !== undefined ? ` --module ${options.module}` : ""}`
   );
   const onExit = (): void => studioHold.release();
+  // A full run (`runScope`) cancels gracefully on the first Ctrl+C: no new opens, in-flight modules
+  // finish, drain and close, the report is written. A second Ctrl+C, or any signal in the refresh
+  // modes (which have no cancellation path), exits at once as before.
+  const cancel = new AbortController();
+  let graceful = false;
   const onSignal = (): void => {
+    if (graceful && !cancel.signal.aborted) {
+      log(
+        "CANCEL requested: opening no more modules; waiting for the ones in flight to finish, drain and close " +
+          "(press Ctrl+C again to exit immediately)."
+      );
+      cancel.abort();
+      return;
+    }
     studioHold.release();
     process.exit(130);
   };
@@ -260,7 +294,24 @@ ${USAGE}`);
     process.off("SIGTERM", onSignal);
   };
   try {
-    await runRunLocked(config, options, { scopeName, graphDir, scope, log, maxOpen, maxFailures, pipelineDepth }, releaseStudio);
+    await runRunLocked(
+      config,
+      options,
+      {
+        scopeName,
+        graphDir,
+        scope,
+        log,
+        maxOpen,
+        maxFailures,
+        pipelineDepth,
+        cancelSignal: cancel.signal,
+        enableGracefulCancel: () => {
+          graceful = true;
+        }
+      },
+      releaseStudio
+    );
   } finally {
     releaseStudio();
   }
@@ -274,6 +325,10 @@ interface RunLockedArgs {
   maxOpen: number;
   maxFailures: number;
   pipelineDepth: number;
+  /** Aborted by the first Ctrl+C once `enableGracefulCancel` was called. */
+  cancelSignal: AbortSignal;
+  /** Called right before `runScope`: only the full run has a graceful cancellation path. */
+  enableGracefulCancel: () => void;
 }
 
 /** The Studio-touching body of `run`; `releaseStudio` is called the moment the Studio work is over. */
@@ -357,7 +412,15 @@ async function runRunLocked(
     );
     for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
   } else {
-    const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures, pipelineDepth });
+    args.enableGracefulCancel();
+    const result = await runScope({
+      ...common,
+      maxOpen,
+      maxConsecutiveFailures: maxFailures,
+      pipelineDepth,
+      signal: args.cancelSignal,
+      ...(options.trace === "true" ? { trace: true } : {})
+    });
     releaseStudio();
     payload = result;
     const staged = result.rows.filter((r) => r.outcome === "staged").length;
@@ -379,7 +442,7 @@ async function runRunLocked(
     lines.push(`  log ${result.logPath}`);
     if (result.incomplete !== undefined) lines.push(`  INCOMPLETE: ${result.incomplete}`);
     // Anything short of a written graph.json is not success, whatever the reason.
-    if (!result.finalized) exitCode = 1;
+    if (!result.finalized) exitCode = result.cancelled === true ? 130 : 1;
   }
 
   if (options.json === "true") {

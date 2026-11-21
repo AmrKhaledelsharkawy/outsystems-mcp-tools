@@ -8,6 +8,7 @@ import type {
   ServiceStudioApp,
   ServiceStudioElementName
 } from "../servicestudio/types.js";
+import type { CallTraceSink } from "../servicestudio/trace.js";
 
 export interface ServiceStudioReader {
   listApps(): Promise<ServiceStudioApp[]>;
@@ -48,6 +49,13 @@ export interface ServiceStudioReader {
    * awaits its retries), so settling of the walk already covers it. Never call this mid-walk.
    */
   drainModule?(module: string): Promise<void>;
+  /**
+   * `osgraph run --trace`: attach (or detach with `undefined`) a per-call trace sink. Optional: a reader
+   * without it simply produces no call trace (the run still records its GUI spans).
+   */
+  setCallTrace?(sink: CallTraceSink | undefined): void;
+  /** Read permits (`maxConcurrent`), the denominator of the trace's slot utilization. */
+  readonly concurrency?: number;
 }
 
 /** What the orchestration needs from the session layer: acquire once, release at the end. */

@@ -14,6 +14,9 @@
  *  - Secrecy: every error message / detail leaving this module passes through `redact()`.
  *  - Transport failures (ECONNREFUSED, timeout, non-2xx) -> `OsgraphToolError("SERVICESTUDIO_UNREACHABLE")`.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+import { performance } from "node:perf_hooks";
+import type { CallAdmission, CallAttempt, CallTrace, CallTraceSink } from "./trace.js";
 import { parseSseBody, unwrapCodeText, unwrapJsonArray, unwrapJsonObject } from "./unwrap.js";
 import {
   OsgraphToolError,
@@ -122,6 +125,11 @@ export class ServiceStudioClient {
   /** `drainModule()` callers waiting for their module's count to reach zero. */
   private readonly moduleWaiters = new Map<string, Array<() => void>>();
   private nextId = 1;
+  /** `--trace`: receives one `CallTrace` per settled `callTool`. Undefined = tracing off. */
+  private traceSink: CallTraceSink | undefined;
+  /** The trace of the call whose async context is running (admissions and attempts land on it). */
+  private readonly traceCtx = new AsyncLocalStorage<CallTrace>();
+  private nextTraceId = 1;
 
   constructor(options: ServiceStudioClientOptions) {
     this.url = options.url;
@@ -157,6 +165,51 @@ export class ServiceStudioClient {
    * `OsgraphToolError("TOKEN_EXPIRED")`.
    */
   async callTool(name: string, input: Record<string, unknown> = {}): Promise<string> {
+    const sink = this.traceSink;
+    if (sink === undefined) return this.callToolCounted(name, input);
+    const trace: CallTrace = {
+      id: this.nextTraceId++,
+      tool: name,
+      module: typeof input.eSpaceName === "string" ? input.eSpaceName : null,
+      startedAtUtc: new Date().toISOString(),
+      queuedMs: performance.now(),
+      admissions: [],
+      attempts: [],
+      settledMs: 0,
+      ok: false
+    };
+    try {
+      const text = await this.traceCtx.run(trace, () => this.callToolCounted(name, input));
+      trace.ok = true;
+      return text;
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      trace.errorCode = typeof code === "string" ? code : err instanceof Error ? err.name : "UNKNOWN";
+      throw err;
+    } finally {
+      trace.settledMs = performance.now();
+      try {
+        sink(trace);
+      } catch {
+        /* tracing must never fail a read */
+      }
+    }
+  }
+
+  /**
+   * Attaches (or, with `undefined`, detaches) a per-call trace sink (`osgraph run --trace`). Off by
+   * default; when off, the call path is unchanged apart from one field check.
+   */
+  setCallTrace(sink: CallTraceSink | undefined): void {
+    this.traceSink = sink;
+  }
+
+  /** The number of read permits (the server's admission width). */
+  get concurrency(): number {
+    return this.maxConcurrent;
+  }
+
+  private async callToolCounted(name: string, input: Record<string, unknown>): Promise<string> {
     // The module count is taken here, before the FIFO and before any token acquire/recover, and released
     // only when this outermost promise settles (plan v3 section 4). `listApps` has no `eSpaceName`, so it
     // stays untracked by module and is covered by the global `drain()` only.
@@ -208,7 +261,9 @@ export class ServiceStudioClient {
     input: Record<string, unknown> = {}
   ): Promise<string> {
     try {
-      return await this.callToolRawInternal(token, name, input);
+      // The token provider's own calls happen inside some traced call's token step; keep them out of
+      // that call's trace (they are not its read).
+      return await this.traceCtx.exit(() => this.callToolRawInternal(token, name, input));
     } catch (err) {
       if (err instanceof AuthFailure) {
         throw new OsgraphToolError("TOKEN_EXPIRED", TOKEN_EXPIRED_MESSAGE, {
@@ -227,8 +282,23 @@ export class ServiceStudioClient {
     input: Record<string, unknown>
   ): Promise<string> {
     if (token !== undefined && token.length > 0) this.rawTokens.add(token);
-    const run = () => this.withTransientRetry(name, () => this.post(token, name, input));
+    const run = () => this.withTransientRetry(name, () => this.tracedPost(token, name, input));
     return this.enqueue(run);
+  }
+
+  /** `post`, recorded as one attempt on the current call's trace when tracing is on. */
+  private async tracedPost(token: string | undefined, name: string, input: Record<string, unknown>): Promise<string> {
+    const trace = this.traceCtx.getStore();
+    if (trace === undefined) return this.post(token, name, input);
+    const attempt: CallAttempt = { startMs: performance.now(), endMs: 0, ok: false };
+    trace.attempts.push(attempt);
+    try {
+      const text = await this.post(token, name, input);
+      attempt.ok = true;
+      return text;
+    } finally {
+      attempt.endMs = performance.now();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -365,10 +435,15 @@ export class ServiceStudioClient {
    * module buys no extra capacity (section 6.2).
    */
   private async enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const trace = this.traceCtx.getStore();
     await this.acquire();
+    const admission: CallAdmission | undefined =
+      trace !== undefined ? { admittedMs: performance.now(), releasedMs: 0 } : undefined;
+    if (admission !== undefined) trace?.admissions.push(admission);
     try {
       return await fn();
     } finally {
+      if (admission !== undefined) admission.releasedMs = performance.now();
       this.release();
     }
   }

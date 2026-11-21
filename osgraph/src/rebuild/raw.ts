@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
+import { OsgraphToolError } from "../servicestudio/types.js";
 
 /**
  * Staging / aside directory prefixes (ADR-0015). `%` is always followed by two hex digits in an
@@ -193,6 +194,17 @@ export class RawModuleWriter {
     private readonly scope: string,
     private readonly module: string
   ) {
+    // One unfinished writer per canonical module per process: a second one would race the first
+    // for the same live directory and its staging cleanup. Fail closed instead of guessing.
+    const active = activeWriterFor(dirname(rawModuleDir(graphDir, scope, module)), module);
+    if (active !== undefined) {
+      throw new OsgraphToolError(
+        "RAW_CAPTURE_ACTIVE",
+        `a raw capture of module '${module}' is already in progress in this process (${active}); ` +
+          `a module is captured by one writer at a time`,
+        { module, stagingDir: active }
+      );
+    }
     this.dir = rawModuleDir(graphDir, scope, module);
     const parent = dirname(this.dir);
     mkdirSync(parent, { recursive: true });
@@ -379,10 +391,21 @@ function swapIn(staged: string, live: string, aside: string): void {
 
 /**
  * Staging directories owned by a not-yet-finished `RawModuleWriter` in this process (dir -> module).
- * Concurrent writers for different modules share one `raw/` parent, so another module's cleanup
- * must never delete one of these. A restart of the SAME module still supersedes its own entry.
+ * Cleanup never deletes one of these, whichever module it belongs to: an entry leaves the map only
+ * through `abort()` or a successful `writeManifest()`. A second writer for a module that already has
+ * an entry is refused (`RAW_CAPTURE_ACTIVE`), so a stale entry is always another process's leftover.
  */
 const ACTIVE_STAGING = new Map<string, string>();
+
+/**
+ * The staging dir of this process's unfinished writer for `module` (case-insensitive) under the
+ * same `raw/` parent, if any. Keyed by parent so one module captured into two scopes is not blocked.
+ */
+function activeWriterFor(parent: string, module: string): string | undefined {
+  const key = module.toLowerCase();
+  for (const [dir, owner] of ACTIVE_STAGING) if (dirname(dir) === parent && owner.toLowerCase() === key) return dir;
+  return undefined;
+}
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -404,9 +427,8 @@ function removeStagingFor(parent: string, module: string): void {
   for (const name of names) {
     if (!grammar.test(name)) continue;
     const dir = join(parent, name);
-    const owner = ACTIVE_STAGING.get(dir);
-    if (owner !== undefined && owner !== module) continue;
-    ACTIVE_STAGING.delete(dir);
+    // Never an active writer's directory (any module): only leftovers of finished or dead writers.
+    if (ACTIVE_STAGING.has(dir)) continue;
     rmSync(dir, { recursive: true, force: true });
   }
 }

@@ -347,7 +347,9 @@ describe("runScope pipeline: failures", () => {
     expect(result.stoppedEarly).toContain("3 module(s) in a row failed to open");
     expect(result.stoppedEarly).toContain("resumes");
     expect(s.events).not.toContain("open:delta");
-    expect(result.rows.map((r) => r.outcome)).toEqual(["open-failed", "open-failed", "open-failed"]);
+    // Every scope module has a row: the one still queued at the stop is `not-started`, not a failure.
+    expect(result.rows.map((r) => r.outcome)).toEqual(["open-failed", "open-failed", "open-failed", "not-started"]);
+    expect(result.failures).toBe(3);
     expect(result.finalized).toBe(false);
     expect(logs.some((l) => l.startsWith("STOPPED:"))).toBe(true);
   });
@@ -511,6 +513,196 @@ describe("runScope pipeline: gapMs is a GUI cooldown only", () => {
     expect(snapshots.length).toBeGreaterThan(0);
     expect(snapshots.some((x) => x.after > x.before)).toBe(true);
     expect(s.maxConcurrentGui).toBe(1);
+  });
+});
+
+describe("runScope: graceful cancellation (Ctrl+C)", () => {
+  /** Aborts the run the moment `module`'s open is logged as successful. */
+  const cancelAfterOpen = (module: string, logs: string[]) => {
+    const ac = new AbortController();
+    const log = (line: string): void => {
+      logs.push(line);
+      if (line.includes(`open ${module} ok`)) ac.abort();
+    };
+    return { ac, log };
+  };
+
+  /** A state whose progress stream aborts the run the moment `module`'s capture has started reading. */
+  const cancelWhileReading = (module: string) => {
+    const ac = new AbortController();
+    const { state, calls } = recordingState();
+    const handle = (state as unknown as { handle: (e: { type: string; module?: string }) => void }).handle;
+    (state as unknown as { handle: (e: { type: string; module?: string }) => void }).handle = (e) => {
+      handle(e);
+      if (e.type === "module-start" && e.module === module) ac.abort();
+    };
+    return { ac, state, calls };
+  };
+
+  it("depth 1: Ctrl+C after an open lets that module finish and close, and opens nothing more", async () => {
+    const graphDir = tmp();
+    const s = fakeStudio(mods());
+    const logs: string[] = [];
+    const { ac, log } = cancelAfterOpen("alpha", logs);
+    const { state, calls } = recordingState();
+    const result = await runScope({ ...common(graphDir, s, logs), log, state, maxOpen: 12, pipelineDepth: 1, signal: ac.signal });
+    expect(result.cancelled).toBe(true);
+    expect(result.rows.map((r) => [r.module, r.outcome])).toEqual([
+      ["alpha", "staged"],
+      ["beta", "not-started"],
+      ["gamma", "not-started"],
+      ["delta", "not-started"]
+    ]);
+    expect(guiEvents(s)).toEqual(["open:alpha", "close:alpha"]);
+    expect(calls).toContain("fail:RUN_CANCELLED");
+    expect(existsSync(resolveScopeArtifactPaths(graphDir, "demo").graph)).toBe(false);
+  });
+
+  it("pipeline: Ctrl+C landing during an open gives that tab back unread and opens nothing more", async () => {
+    const s = fakeStudio(mods());
+    const logs: string[] = [];
+    const { ac, log } = cancelAfterOpen("alpha", logs);
+    const result = await runScope({ ...common(tmp(), s, logs), log, maxOpen: 12, pipelineDepth: 2, signal: ac.signal });
+    expect(result.cancelled).toBe(true);
+    expect(result.rows.every((r) => r.outcome === "not-started")).toBe(true);
+    expect(guiEvents(s)).toEqual(["open:alpha", "close:alpha"]);
+    expect(s.open.size).toBe(0);
+  });
+
+  for (const depth of [2, 4]) {
+    it(`depth ${depth}: Ctrl+C while a module reads lets it finish, drain and close; the rest are not-started`, async () => {
+      const graphDir = tmp();
+      const s = fakeStudio(mods(), { readerOptions: { delayMs: ({ module }) => (module === "alpha" ? 3 : 0) } });
+      const logs: string[] = [];
+      const { ac, state, calls } = cancelWhileReading("alpha");
+      const result = await runScope({ ...common(graphDir, s, logs), state, maxOpen: 12, pipelineDepth: depth, signal: ac.signal });
+
+      expect(result.cancelled).toBe(true);
+      expect(result.finalized).toBe(false);
+      expect(result.failures).toBe(0);
+      expect(result.stoppedEarly).toContain("cancelled");
+      expect(existsSync(resolveScopeArtifactPaths(graphDir, "demo").graph)).toBe(false);
+      // The in-flight module was captured, staged and its tab given back; nothing else was opened.
+      expect(result.rows.map((r) => [r.module, r.outcome])).toEqual([
+        ["alpha", "staged"],
+        ["beta", "not-started"],
+        ["gamma", "not-started"],
+        ["delta", "not-started"]
+      ]);
+      expect(result.rows[0]?.closed).toBe(true);
+      // An open already under way when Ctrl+C landed (beta at most) is given back unread; none after it.
+      const gui = guiEvents(s);
+      expect(gui.slice(0, 1)).toEqual(["open:alpha"]);
+      expect(gui).toContain("close:alpha");
+      expect(gui).not.toContain("open:gamma");
+      expect(gui).not.toContain("open:delta");
+      if (gui.includes("open:beta")) expect(gui).toContain("close:beta");
+      expect(s.open.size).toBe(0);
+      expect(s.atClose.every((c) => c.own === 0)).toBe(true);
+      expect(readStage(graphDir, "demo").entries.map((e) => e.module)).toEqual(["alpha"]);
+      expect(calls).toContain("fail:RUN_CANCELLED");
+      expect(calls).not.toContain("event:done");
+      // The report on disk lists every module, so the cancellation is complete and resumable.
+      expect(JSON.parse(read(result.reportPath)).rows).toHaveLength(SCOPE.modules.length);
+    });
+  }
+
+  it("a signal already aborted before the run starts opens nothing", async () => {
+    const s = fakeStudio(mods());
+    const ac = new AbortController();
+    ac.abort();
+    const result = await runScope({ ...common(tmp(), s, []), maxOpen: 12, pipelineDepth: 2, signal: ac.signal });
+    expect(result.cancelled).toBe(true);
+    expect(guiEvents(s)).toEqual([]);
+    expect(result.rows.every((r) => r.outcome === "not-started")).toBe(true);
+  });
+
+  it("the cancelled run resumes: the next run skips the staged module and finalizes", async () => {
+    const graphDir = tmp();
+    const first = fakeStudio(mods(), { readerOptions: { delayMs: ({ module }) => (module === "alpha" ? 3 : 0) } });
+    const { ac, state } = cancelWhileReading("alpha");
+    const cancelled = await runScope({ ...common(graphDir, first, []), state, maxOpen: 12, pipelineDepth: 2, signal: ac.signal });
+    expect(cancelled.rows.find((r) => r.module === "alpha")?.outcome).toBe("staged");
+    const second = fakeStudio(mods());
+    const result = await runScope({ ...common(graphDir, second, []), maxOpen: 12, pipelineDepth: 2 });
+    expect(result.finalized).toBe(true);
+    expect(result.rows.find((r) => r.module === "alpha")?.outcome).toBe("skipped");
+    expect(second.events).not.toContain("open:alpha");
+  });
+});
+
+describe("runScope --trace", () => {
+  /** Gives the fake reader a call-trace hook: every getDataModel is reported as one traced call. */
+  const withCallTrace = (s: ReturnType<typeof fakeStudio>) => {
+    type Sink = (t: import("../src/servicestudio/trace.js").CallTrace) => void;
+    const reader = s.reader as unknown as {
+      setCallTrace?: (sink: Sink | undefined) => void;
+      concurrency?: number;
+      getDataModel: (m: string) => Promise<string>;
+    };
+    let sink: Sink | undefined;
+    let id = 0;
+    const original = reader.getDataModel.bind(reader);
+    reader.setCallTrace = (next) => {
+      sink = next;
+    };
+    Object.defineProperty(reader, "concurrency", { value: 4 });
+    reader.getDataModel = async (m: string) => {
+      const q = performance.now();
+      const text = await original(m);
+      const end = performance.now();
+      sink?.({
+        id: ++id,
+        tool: "getDataModel",
+        module: m,
+        startedAtUtc: T0.toISOString(),
+        queuedMs: q,
+        admissions: [{ admittedMs: q, releasedMs: end }],
+        attempts: [{ startMs: q, endMs: end, ok: true }],
+        settledMs: end,
+        ok: true
+      });
+      return text;
+    };
+  };
+
+  for (const depth of [1, 2]) {
+    it(`depth ${depth}: writes calls.jsonl (calls + GUI spans) and a trace summary in the report and result`, async () => {
+      const graphDir = tmp();
+      const s = fakeStudio(mods());
+      withCallTrace(s);
+      const result = await runScope({ ...common(graphDir, s, []), maxOpen: 12, pipelineDepth: depth, trace: true });
+      expect(result.finalized).toBe(true);
+      const trace = result.trace;
+      expect(trace?.callTracing).toBe(true);
+      expect(trace?.calls).toBe(SCOPE.modules.length);
+      expect(trace?.readSlots).toBe(4);
+      expect(trace?.gui.opens).toBe(SCOPE.modules.length);
+      expect(trace?.gui.closes).toBe(SCOPE.modules.length);
+      expect(trace?.gui.overlappedMs).toBeLessThanOrEqual(trace?.gui.totalMs ?? 0);
+      const lines = read(trace?.file as string).trim().split("\n").map((l) => JSON.parse(l) as { type: string });
+      expect(lines.filter((l) => l.type === "call")).toHaveLength(SCOPE.modules.length);
+      expect(lines.filter((l) => l.type === "gui")).toHaveLength(SCOPE.modules.length * 2);
+      expect(JSON.parse(read(result.reportPath)).trace.calls).toBe(SCOPE.modules.length);
+      // The sink is detached at the end of the run.
+      expect((s.reader as unknown as { setCallTrace: unknown }).setCallTrace).toBeTypeOf("function");
+    });
+  }
+
+  it("a reader without setCallTrace still gets GUI spans, flagged callTracing: false", async () => {
+    const s = fakeStudio(mods());
+    const result = await runScope({ ...common(tmp(), s, []), maxOpen: 12, pipelineDepth: 2, trace: true });
+    expect(result.trace?.callTracing).toBe(false);
+    expect(result.trace?.calls).toBe(0);
+    expect(result.trace?.gui.opens).toBe(SCOPE.modules.length);
+  });
+
+  it("without trace the report and result carry no trace", async () => {
+    const s = fakeStudio(mods());
+    const result = await runScope({ ...common(tmp(), s, []), maxOpen: 12, pipelineDepth: 2 });
+    expect(result.trace).toBeUndefined();
+    expect(JSON.parse(read(result.reportPath)).trace).toBeUndefined();
+    expect(existsSync(join(result.runDir, "calls.jsonl"))).toBe(false);
   });
 });
 

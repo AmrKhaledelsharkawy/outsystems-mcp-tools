@@ -87,12 +87,19 @@ read needs the human-approved session token the token manager keeps in token.txt
   --max-open <n>                    tabs open before the run closes its own staged ones (default 12)
   --pipeline-depth <n>              modules open and read at once (default 1 = one at a time; 2+ is the experimental
                                     pipeline: opens/closes stay serial, reads of open modules overlap). Never exceeds
-                                    --max-open, which still bounds ALL open tabs, yours included
+                                    --max-open, which still bounds ALL open tabs, yours included. Full run only:
+                                    rejected with --module, --modules and --changed. On the first module failure
+                                    the pipeline stops opening (depth 1 moves on to the next module)
+  --trace                           full run only: write every Service Studio call and every open/close to
+                                    <runDir>/calls.jsonl and a trace summary (queue wait, read-slot utilization,
+                                    open/close time hidden behind reads vs exposed) to report.json
   --max-consecutive-failures <n>    stop after n modules in a row fail to open (default 3, 0 = never)
   --graph-dir <dir>                 override OSGRAPH_GRAPH_DIR
   --json                            print the result as JSON on stdout (log lines stay on stderr)
   --serve                           keep the progress site running after the run (until Ctrl+C)
   A full run is resumable: modules already staged are skipped, so re-run the same command to continue.
+  Ctrl+C during a full run cancels gracefully: no new module is opened, modules already started finish,
+  drain and close, and the report lists the rest as not-started. A second Ctrl+C exits immediately.
 `;
 
 /** `--flag value` and `--flag=value`, with bare flags mapping to `"true"`. */
