@@ -37,6 +37,14 @@ const openModuleShape = {
         "there is one (no keyboard), else Open from Environment. 'environment': always go through Open from Environment " +
         "(name typed into the CEF dialog; needs a brief focus). Only an environment open makes servicestudio listApps " +
         "report the module's real server version; a recent-list open reports version '0'."
+    ),
+  cancelSavePrompt: z
+    .boolean()
+    .optional()
+    .describe(
+      "Opt-in for OSGraph run: on UNSAVED_CHANGES_DIALOG, cancel exactly one confirmed Save dialog using its " +
+        "Cancel button and retry this module once. Never Save, Don't Save, Discard, or close a modified tab. " +
+        "Unknown dialogs and failed cancellation remain errors. Default false."
     )
 };
 const openModuleInput = z.object(openModuleShape);
@@ -272,7 +280,8 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
     "about a second (focusPolicy 'brief', default) or fails FOREGROUND_REQUIRED (focusPolicy 'never'). " +
     "source 'environment' skips the recent list and always uses Open from Environment, so listApps reports the " +
     "module's real server version (a recent-list open reports '0'). " +
-    "Never closes Studio or discards changes; aborts with UNSAVED_CHANGES_DIALOG when a save prompt is up.",
+    "Never closes Studio or discards changes. By default a Save prompt fails with UNSAVED_CHANGES_DIALOG; " +
+    "cancelSavePrompt=true allows one verified Cancel-only recovery and one retry, without saving or discarding edits.",
   inputSchema: openModuleShape,
   async handler(rawArgs, ctx): Promise<OpenModuleResult> {
     const t0 = Date.now();
@@ -665,6 +674,48 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       return { opened: true, alreadyOpen: false, studioLaunched, durationMs, steps };
     } catch (e) {
       const failure = toOsopenerError(e);
+      let cancelFailure: string | undefined;
+      // OSGraph full runs may explicitly opt into Cancel-only recovery. A generic/unknown Studio modal was also
+      // classified as UNSAVED_CHANGES_DIALOG, so the helper must independently confirm a real Save dialog.
+      // The retry disables this flag: a recurring prompt stops, never loops or guesses a destructive button.
+      if (failure.code === "UNSAVED_CHANGES_DIALOG" && parsed.data.cancelSavePrompt === true) {
+        try {
+          const startCancel = Date.now();
+          const cancelled = await ctx.helper.run("cancel-save-prompt");
+          steps.push({
+            step: "cancel-save-prompt",
+            ok: cancelled.ok === true,
+            ms: Date.now() - startCancel,
+            detail: cancelled.ok ? String(cancelled.method ?? "Cancel invoked") : String(cancelled.error?.message ?? "could not confirm Cancel")
+          });
+          if (cancelled.ok) {
+            // If this call opened its own dropdown or module dialog before the prompt appeared, clear that UI too.
+            // The standard dismiss still refuses to touch a new Save dialog.
+            if (uiOpen) {
+              const cleaned = await escapeDialog("dismiss-own-ui-after-cancel");
+              if (!cleaned.ok) {
+                cancelFailure = String(cleaned.error?.message ?? "could not clean up the previously opened UI");
+              }
+            }
+            if (cancelFailure === undefined) {
+              await giveBackForeground();
+              const retried = (await openModule.handler({ ...parsed.data, cancelSavePrompt: false }, ctx)) as OpenModuleResult;
+              return {
+                ...retried,
+                studioLaunched: studioLaunched || retried.studioLaunched,
+                durationMs: Date.now() - t0,
+                steps: [...steps, ...retried.steps]
+              };
+            }
+          } else {
+            cancelFailure = String(cancelled.error?.message ?? "the save prompt was not verified or did not close");
+          }
+        } catch (cancelErr) {
+          cancelFailure = cancelErr instanceof Error ? cancelErr.message : String(cancelErr);
+        }
+      }
+      const reportedFailure =
+        cancelFailure === undefined ? failure : { ...failure, message: `${failure.message}; safe Cancel recovery failed: ${cancelFailure}` };
       // Leave Studio usable: close a dropdown/dialog we opened. Never on UNSAVED_CHANGES_DIALOG — that prompt is the
       // user's to answer, and OSG-014 §6 requires leaving it untouched.
       if (uiOpen && failure.code !== "UNSAVED_CHANGES_DIALOG") {
@@ -682,7 +733,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
         durationMs: Date.now() - t0,
         steps,
         ...(screenshotPath ? { screenshotPath } : {}),
-        error: failure
+        error: reportedFailure
       };
     }
   }
