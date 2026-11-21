@@ -7,6 +7,7 @@ import {
   type RebuildResult,
   type StageOutcome
 } from "../rebuild/rebuild.js";
+import type { StudioLockHandle } from "../lock/studioLock.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
 import { ensureSite, siteInfo, type SiteInfo } from "../progress/site.js";
 import { writeTimings } from "../progress/timings.js";
@@ -126,7 +127,13 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
       }
       // Declared outside the try so the catch below can mark where the run died.
       let site: Awaited<ReturnType<typeof ensureSite>> | undefined;
+      let studioHold: StudioLockHandle | undefined;
       try {
+        // #64: the cross-process lock, taken before the first Studio call (and before the site is
+        // raised, so a BUSY refusal leaves nothing behind). A second *process* fails closed with BUSY.
+        studioHold = ctx.studioLock.acquire(
+          `mcp rebuild ${input.scope}${input.module !== undefined ? ` --module ${input.module}` : ""}`
+        );
         const definition = ctx.scopeStore.read(input.scope);
 
         // Raised BEFORE any Service Studio call, so the page is already up and showing the whole
@@ -197,6 +204,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
         );
         throw err;
       } finally {
+        studioHold?.release();
         ctx.rebuildGate.release();
       }
     });

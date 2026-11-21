@@ -896,7 +896,9 @@ describe("osgraph run (CLI)", () => {
   const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
   const runCli = (args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> =>
     new Promise((resolve) => {
-      const child = spawn(process.execPath, [cli, ...args], { env: { ...process.env, ...env } });
+      // #64: a private lockfile per spawn, so parallel test files never contend on the machine-wide default.
+      const lock = join(mkdtempSync(join(tmpdir(), "osgraph-run-lock-")), "studio.lock");
+      const child = spawn(process.execPath, [cli, ...args], { env: { ...process.env, OSGRAPH_STUDIO_LOCK: lock, ...env } });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d) => (stdout += String(d)));
@@ -931,6 +933,49 @@ describe("osgraph run (CLI)", () => {
     expect(r.stderr).toContain("osopener is not installed");
     // Nothing was staged or captured.
     expect(existsSync(join(root, "graphs", "demo", "stage"))).toBe(false);
+  }, 30_000);
+
+  it("fails closed with BUSY, before the site or osopener, when another process holds the Studio lock (#64)", async () => {
+    const root = tmp();
+    const scopesDir = join(root, "scopes");
+    mkdirSync(scopesDir, { recursive: true });
+    writeFileSync(join(scopesDir, "demo.json"), JSON.stringify({ name: "demo", modules: ["alpha"] }));
+    const lock = join(root, "held.lock");
+    // this test process is alive, so the lock is a live holder's
+    const held = { pid: process.pid, command: "mcp rebuild demo", startedAt: "2026-11-21T10:00:00.000Z" };
+    writeFileSync(lock, JSON.stringify(held));
+    const r = await runCli(["run", "--scope", "demo"], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_SCOPES_DIR: scopesDir,
+      OSGRAPH_GRAPH_DIR: join(root, "graphs"),
+      OSGRAPH_OSOPENER_DIST: join(root, "no-osopener"),
+      OSGRAPH_PROGRESS_SITE: "off",
+      OSGRAPH_STUDIO_LOCK: lock
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("BUSY");
+    expect(r.stderr).toContain(`pid ${process.pid}`);
+    expect(r.stderr).toContain("mcp rebuild demo");
+    expect(r.stderr).not.toContain("OSOPENER_UNAVAILABLE"); // refused before osopener was even loaded
+    expect(JSON.parse(readFileSync(lock, "utf8"))).toEqual(held); // the holder's lock is untouched
+  }, 30_000);
+
+  it("releases the Studio lock on its failure path (#64)", async () => {
+    const root = tmp();
+    const scopesDir = join(root, "scopes");
+    mkdirSync(scopesDir, { recursive: true });
+    writeFileSync(join(scopesDir, "demo.json"), JSON.stringify({ name: "demo", modules: ["alpha"] }));
+    const lock = join(root, "free.lock");
+    const r = await runCli(["run", "--scope", "demo"], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_SCOPES_DIR: scopesDir,
+      OSGRAPH_GRAPH_DIR: join(root, "graphs"),
+      OSGRAPH_OSOPENER_DIST: join(root, "no-osopener"),
+      OSGRAPH_PROGRESS_SITE: "off",
+      OSGRAPH_STUDIO_LOCK: lock
+    });
+    expect(r.stderr).toContain("OSOPENER_UNAVAILABLE");
+    expect(existsSync(lock)).toBe(false);
   }, 30_000);
 
   it("rejects a bad --max-open as a usage error", async () => {
