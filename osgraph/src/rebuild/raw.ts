@@ -202,6 +202,7 @@ export class RawModuleWriter {
     removeStagingFor(parent, module);
     this.stagingDir = join(parent, `${TMP_PREFIX}${encodeURIComponent(module)}-${process.pid}-${++RawModuleWriter.counter}`);
     mkdirSync(this.stagingDir, { recursive: true });
+    ACTIVE_STAGING.set(this.stagingDir, module);
   }
 
   /** The live capture directory (the staging directory is an implementation detail). */
@@ -211,6 +212,7 @@ export class RawModuleWriter {
 
   /** Discards the staging directory without touching the live capture (an explicit abort). */
   abort(): void {
+    ACTIVE_STAGING.delete(this.stagingDir);
     rmSync(this.stagingDir, { recursive: true, force: true });
   }
 
@@ -322,6 +324,7 @@ export class RawModuleWriter {
       this.abort();
       throw err;
     }
+    ACTIVE_STAGING.delete(this.stagingDir);
     return rawManifestPath(this.graphDir, this.scope, this.module);
   }
 }
@@ -374,15 +377,38 @@ function swapIn(staged: string, live: string, aside: string): void {
   if (hadOld) rmSync(aside, { recursive: true, force: true });
 }
 
+/**
+ * Staging directories owned by a not-yet-finished `RawModuleWriter` in this process (dir -> module).
+ * Concurrent writers for different modules share one `raw/` parent, so another module's cleanup
+ * must never delete one of these. A restart of the SAME module still supersedes its own entry.
+ */
+const ACTIVE_STAGING = new Map<string, string>();
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Removes stale staging directories of exactly `module`: names matching
+ * `%tmp-<encoded module>-<pid>-<n>`. A bare prefix match would also hit module `X-Y` when starting
+ * `X`, deleting a sibling writer's live staging directory.
+ */
 function removeStagingFor(parent: string, module: string): void {
-  const prefix = `${TMP_PREFIX}${encodeURIComponent(module)}-`;
+  const grammar = new RegExp(`^${escapeRegExp(`${TMP_PREFIX}${encodeURIComponent(module)}-`)}[0-9]+-[0-9]+$`);
   let names: string[];
   try {
     names = readdirSync(parent);
   } catch {
     return;
   }
-  for (const name of names) if (name.startsWith(prefix)) rmSync(join(parent, name), { recursive: true, force: true });
+  for (const name of names) {
+    if (!grammar.test(name)) continue;
+    const dir = join(parent, name);
+    const owner = ACTIVE_STAGING.get(dir);
+    if (owner !== undefined && owner !== module) continue;
+    ACTIVE_STAGING.delete(dir);
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**

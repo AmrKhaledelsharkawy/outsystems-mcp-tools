@@ -267,6 +267,109 @@ describe("ServiceStudioClient bounded concurrency", () => {
   });
 });
 
+describe("ServiceStudioClient drainModule (plan v3 section 4)", () => {
+  const OML = { code: -32000, message: "OML not found: C:\\Users\\x\\ServiceStudio.MCPServer\\abc-in.oml" };
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+
+  /** Calls for module B block on a gate; calls for any other module answer at once. */
+  function gatedB() {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fake = new FakeServiceStudio(async (call) => {
+      if (String(call.input.eSpaceName).toLowerCase() === "b") await gate;
+      return { text: FENCED };
+    });
+    return { fake, release: () => release!() };
+  }
+
+  it("A settles while B is queued/active: drainModule(A) resolves, drain() stays pending", async () => {
+    const { fake, release } = gatedB();
+    const client = makeClient(fake, { maxConcurrent: 2 });
+    const a1 = client.getDataModel("A");
+    const a2 = client.getStructures("A");
+    const b1 = client.getDataModel("B");
+    const b2 = client.getStructures("B");
+    let drained = false;
+    const global = client.drain().then(() => (drained = true));
+    await client.drainModule("A");
+    await Promise.all([a1, a2]);
+    await tick();
+    expect(drained).toBe(false);
+    release();
+    await Promise.all([b1, b2, global]);
+    expect(drained).toBe(true);
+  });
+
+  it("counts operations still queued behind the gate, not only admitted ones", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fake = new FakeServiceStudio(async () => {
+      await gate;
+      return { text: FENCED };
+    });
+    const client = makeClient(fake, { maxConcurrent: 1 });
+    const b1 = client.getDataModel("B"); // holds the only permit
+    const a1 = client.getDataModel("A"); // queued
+    let done = false;
+    const barrier = client.drainModule("A").then(() => (done = true));
+    await tick();
+    expect(fake.calls).toHaveLength(1);
+    expect(done).toBe(false);
+    release!();
+    await Promise.all([b1, a1, barrier]);
+    expect(done).toBe(true);
+  });
+
+  it("A's pending transient retry keeps drainModule(A) open while B reads", async () => {
+    let attemptsA = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fake = new FakeServiceStudio(async (call) => {
+      if (call.input.eSpaceName === "B") {
+        await gate;
+        return { text: FENCED };
+      }
+      attemptsA++;
+      return attemptsA === 1 ? { rpcError: OML } : { text: FENCED };
+    });
+    const client = makeClient(fake, { maxConcurrent: 2, transientRetryDelayMs: 60 });
+    const b1 = client.getDataModel("B");
+    const a1 = client.getDataModel("A");
+    let done = false;
+    const barrier = client.drainModule("A").then(() => (done = true));
+    await tick();
+    expect(attemptsA).toBe(1); // first attempt failed, back-off pending
+    expect(done).toBe(false);
+    await a1;
+    await barrier;
+    expect(attemptsA).toBe(2);
+    expect(done).toBe(true);
+    release!();
+    await b1;
+  });
+
+  it("is case-insensitive on the module key", async () => {
+    const { fake, release } = gatedB();
+    const client = makeClient(fake);
+    const b = client.getDataModel("B");
+    let done = false;
+    const barrier = client.drainModule("b").then(() => (done = true));
+    await tick();
+    expect(done).toBe(false);
+    release();
+    await Promise.all([b, barrier]);
+  });
+
+  it("a module with no operations resolves immediately, and a rejected op still releases", async () => {
+    const fake = new FakeServiceStudio(() => ({ rpcError: { code: -32602, message: "bad input" } }));
+    const client = makeClient(fake);
+    await client.drainModule("nobody");
+    const failing = client.getScreen("A", "S");
+    await expect(client.drainModule("A")).resolves.toBeUndefined();
+    await Promise.allSettled([failing]);
+  });
+});
+
 describe("ServiceStudioClient transient retry (ADR-0007)", () => {
   const OML = { code: -32000, message: "OML not found: C:\\Users\\x\\ServiceStudio.MCPServer\\abc-in.oml" };
 

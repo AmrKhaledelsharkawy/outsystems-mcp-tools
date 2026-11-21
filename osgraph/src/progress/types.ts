@@ -122,6 +122,8 @@ export interface Status {
   run: StatusRun;
   progress: StatusProgress;
   current: StatusCurrent | null;
+  /** Every module running right now (a pipelined run reads several at once); absent when none runs. */
+  activeModules?: StatusCurrent[];
   modules: StatusModuleRow[];
   snapshot: StatusSnapshot;
   flows: StatusFlows | null;
