@@ -523,6 +523,32 @@ and windows. The rule, the per-file reasons and the one known pre-existing failu
 
 `npm test` is still the gate for a change: locally it runs strictly more than CI can.
 
+### Accuracy regression gate
+
+[`tests/accuracy.gate.test.ts`](tests/accuracy.gate.test.ts) runs inside `npm test` and keeps graph
+correctness from regressing across the three ways a snapshot is produced: `osgraph run` (full),
+the MCP `rebuild`, and offline `reextract`. On the same synthetic captured inputs it asserts:
+
+- the three paths write byte-identical `graph.json` and `flows.json` (a failure names the artifact,
+  the two paths compared and the JSON path of the first difference);
+- a producer deleted or renamed upstream gives the consumer's edge an explicit `placeholder: true`
+  node, never a stale node that looks real;
+- a skipped read is recorded (`skipped`, completeness meta, `missingCaptures`) and never stubbed or
+  counted as read, so neither a module nor the scope looks complete;
+- the node-order permutation invariance and the listing-wave contract hold end to end.
+
+It uses fakes only: no Service Studio, osopener, token or network. **Replay-green is not live-green.**
+The live check is a human step, and until it is recorded the issue stays *unverified*:
+
+1. In a throwaway module (never a production one) that has a consumer module in the scope, rename a
+   server action, then publish the module.
+2. With Service Studio open, the token approved and osopener available (osgraph depends on both),
+   run `osgraph run --module <producer-module>` for the scope.
+3. Query the consumer's flow or impact. Expected: the consumer's reference points at a
+   `placeholder: true` node for the old name, not at a node that looks real; the renamed action
+   appears as a real node.
+4. Record the outcome (date, module, build) on the issue.
+
 The [decision record](docs/adr/) and [`GLOSSARY.md`](GLOSSARY.md) **are** published — every issue in
 the automatic-refresh backlog is written against their vocabulary. Real names in them are
 pseudonymised; the raw discovery measurement logs are not published at all. See
