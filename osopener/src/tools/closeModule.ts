@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { assertHelperOk, HelperError } from "../helper.js";
 import type { CloseModuleResult, ModuleTab, Step } from "../types.js";
-import { ensureStudioForeground, timed } from "./focusStudio.js";
+import { ensureStudioReady, timed } from "./focusStudio.js";
 import { defaultSleep, toOsopenerError, type OsopenerTool, type ToolContext } from "./tool.js";
 
 export const DEFAULT_CLOSE_TIMEOUT_MS = 60_000;
@@ -21,10 +21,11 @@ const closeModuleInput = z.object(closeModuleShape);
 /**
  * A module tab's UIA label is `<Module> (<Application>)` (live 2026-10-30). Matching on the module
  * part alone would make `MOD_EX_Demo_Portal_CW` also match a hypothetical `MOD_EX_Demo_Portal_CW2`, so
- * the regex anchors on the ` (` that starts the application name.
+ * the regex anchors on the ` (` that starts the application name — or on the end of the label: live 2026-11-20, a
+ * module without an application (e.g. a theme module) shows a bare `<Module>` label.
  */
 export function tabLabelRegex(module: string): string {
-  return `^${module.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(`;
+  return `^${module.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}( \\(|$)`;
 }
 
 /** Splits `<Module> (<Application>)` into its parts; `application` is undefined when absent. */
@@ -100,7 +101,8 @@ export const closeModule: OsopenerTool<typeof closeModuleShape> = {
         return { closed: true, alreadyClosed: true, durationMs: Date.now() - t0, steps };
       }
 
-      await ensureStudioForeground(ctx, steps, Math.max(10_000, deadline - Date.now()));
+      // Background: no focus change. The tab close is a UIA Invoke (live 2026-11-20).
+      await ensureStudioReady(ctx, steps, Math.max(10_000, deadline - Date.now()));
 
       const tabs = await timed(steps, "tab-list", () => listModuleTabs(ctx), (t) => `${t.length} module tab(s)`);
       const tab = tabs.find((t) => t.module === name);
