@@ -17,6 +17,7 @@ export default defineConfig({
   test: {
     include: [
       "tests/config.test.ts",
+      "tests/doctor.test.ts",
       "tests/graph.test.ts",
       "tests/graphify.test.ts",
       "tests/layers.test.ts",
