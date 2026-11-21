@@ -25,6 +25,8 @@
  * Studio UI.
  */
 
+import { createFileStudioLock, defaultStudioLockPath, type StudioLockHandle } from "../lock/studioLock.js";
+import { OsgraphToolError } from "../servicestudio/types.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -192,6 +194,8 @@ export interface DiscoverDeps {
   aliases: Record<string, string>;
   /** Omitted for a dry run. */
   live?: DiscoverLive;
+  /** Why `live` is absent when it was not a dry run (e.g. #64 `BUSY`); shown as the stop reason. */
+  liveUnavailableReason?: string;
   /** Called after every state change so the page can poll. */
   report: (status: DiscoverStatus) => void;
   now?: () => number;
@@ -272,7 +276,7 @@ export async function runDiscovery(deps: DiscoverDeps): Promise<DiscoverStatus> 
 
   if (!opts.dryRun) {
     if (!deps.live) {
-      stopped = "no live connection available (osopener could not be loaded)";
+      stopped = deps.liveUnavailableReason ?? "no live connection available (osopener could not be loaded)";
       return report(true);
     }
     try {
@@ -498,14 +502,33 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Pro
     }
   }
 
-  const status = await runDiscovery({
-    request,
-    cache,
-    aliases: readJson<Record<string, string>>(aliasFile, {}),
-    live,
-    report,
-    cancelled: () => cancelled
-  });
+  // #64: discovery opens and closes tabs through osopener, so it holds the cross-process Studio lock
+  // for the whole walk. A dry run touches no Studio and takes nothing.
+  let studioHold: StudioLockHandle | undefined;
+  let liveUnavailableReason: string | undefined;
+  if (live) {
+    try {
+      studioHold = createFileStudioLock({ path: defaultStudioLockPath(env) }).acquire("osgraph discover");
+    } catch (err) {
+      live = undefined;
+      liveUnavailableReason = `${err instanceof OsgraphToolError ? `${err.code}: ` : ""}${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  let status: DiscoverStatus;
+  try {
+    status = await runDiscovery({
+      request,
+      cache,
+      aliases: readJson<Record<string, string>>(aliasFile, {}),
+      live,
+      ...(liveUnavailableReason !== undefined ? { liveUnavailableReason } : {}),
+      report,
+      cancelled: () => cancelled
+    });
+  } finally {
+    studioHold?.release();
+  }
 
   // Persist the live answers so the next discovery of an overlapping estate is nearly free.
   try {

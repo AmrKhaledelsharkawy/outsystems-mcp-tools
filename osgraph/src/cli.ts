@@ -6,6 +6,7 @@ import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
+import { defaultStudioLockPath, createFileStudioLock } from "./lock/studioLock.js";
 import { closeSite, ensureSite } from "./progress/site.js";
 import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js";
 import { createServiceStudioClient } from "./servicestudio/token.js";
@@ -127,6 +128,50 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     process.stderr.write(`${line}\n`);
   };
 
+  // #64: the cross-process Studio lock comes first: before the site is raised, before osopener is
+  // loaded, before any Studio call. A contender throws BUSY here and costs nothing. Released on every
+  // exit path: after the Studio work below, in the `finally`, on process exit, and on SIGINT/SIGTERM.
+  const studioHold = createFileStudioLock({ path: defaultStudioLockPath(process.env) }).acquire(
+    `osgraph run --scope ${scopeName}${options.module !== undefined ? ` --module ${options.module}` : ""}`
+  );
+  const onExit = (): void => studioHold.release();
+  const onSignal = (): void => {
+    studioHold.release();
+    process.exit(130);
+  };
+  process.on("exit", onExit);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  const releaseStudio = (): void => {
+    studioHold.release();
+    process.off("exit", onExit);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  };
+  try {
+    await runRunLocked(config, options, { scopeName, graphDir, scope, log, maxOpen, maxFailures }, releaseStudio);
+  } finally {
+    releaseStudio();
+  }
+}
+
+interface RunLockedArgs {
+  scopeName: string;
+  graphDir: string;
+  scope: ReturnType<typeof readScope>;
+  log: (line: string) => void;
+  maxOpen: number;
+  maxFailures: number;
+}
+
+/** The Studio-touching body of `run`; `releaseStudio` is called the moment the Studio work is over. */
+async function runRunLocked(
+  config: OsgraphConfig,
+  options: Record<string, string>,
+  args: RunLockedArgs,
+  releaseStudio: () => void
+): Promise<void> {
+  const { graphDir, scope, log, maxOpen, maxFailures } = args;
   // The URL is printed before any other work: a multi-hour run must never be unobservable.
   const site = await ensureSite({ ...config, graphDir });
   for (const line of site.banner.split("\n")) log(line);
@@ -160,6 +205,7 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
   const lines: string[] = [];
   if (options.module !== undefined) {
     const result = await refreshModule({ ...common, module: options.module });
+    releaseStudio();
     payload = result;
     lines.push(
       `scope '${result.scope}': refreshed '${result.module}' (nodes ${result.staged.nodeCount}, edges ${result.staged.edgeCount}), ` +
@@ -171,6 +217,7 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
   } else {
     const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures });
+    releaseStudio();
     payload = result;
     const staged = result.rows.filter((r) => r.outcome === "staged").length;
     lines.push(

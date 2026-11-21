@@ -38,6 +38,12 @@ export type OsgraphErrorCode =
    */
   | "REBUILD_IN_PROGRESS"
   /**
+   * #64: another osgraph process (`osgraph run`, another server's `rebuild`, a discovery job) holds the
+   * cross-process Service Studio lock. Fails closed at once; `details.holder` names pid, command and
+   * start time. Distinct from `REBUILD_IN_PROGRESS`, which is the in-process gate.
+   */
+  | "BUSY"
+  /**
    * ADR-0012: `getFlow` / `searchFlows` were asked for flow data that is missing, unreadable, of
    * another schema version, or was built for a different rebuild of the scope than the snapshot
    * beside it. Distinct from `SNAPSHOT_MISSING` because the fix is different and far cheaper:
