@@ -189,10 +189,22 @@ anyone on that network. On a shared or untrusted network keep it on this PC:
 OSGRAPH_PROGRESS_HOST=127.0.0.1
 ```
 
-**Mutating routes stay loopback-only regardless of the bind address.** Viewing the page is a
-convenience worth sharing; starting a discovery or a run, pausing or cancelling one, or writing a
-scope file, is not something a device across the network gets to do. Those return `403` to any
-non-loopback peer, so press Start on `http://127.0.0.1:7473` on the PC itself.
+**Run control from your phone needs a run password.** When `osgraph run` starts with the site on the
+network, it asks at the laptop:
+
+```
+Set a run password to control this run from your phone (hidden; Enter = control from this PC only):
+```
+
+Type one, and the phone's page shows a password box next to Start / Pause / Resume / Cancel; type the
+same password there. Only a salted scrypt hash is kept, in memory, for this run only. The PC itself
+never needs it. Five wrong passwords within a minute lock remote control for a minute. For a
+non-interactive start set `OSGRAPH_CONTROL_PASSWORD` instead of answering the prompt. The site is
+plain HTTP, so the password crosses your network unencrypted: fine on your own Wi-Fi, not on a shared
+one.
+
+**Every other mutating route stays loopback-only regardless of the bind address.** Starting a
+discovery or writing a scope file returns `403` to any device but the PC itself.
 
 ### Turning it off
 
@@ -492,6 +504,7 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 ## Configuration
 
 | `OSGRAPH_PROGRESS_HOST` | no | `0.0.0.0` | Bind address. Every interface by default so a phone on the same network can watch; `127.0.0.1` keeps it on this PC — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_CONTROL_PASSWORD` | no | (prompt) | `osgraph run`: the run password that lets a phone use Start / Pause / Resume / Cancel, instead of answering the start-up prompt. Never logged |
 |---|---|---|---|
 | `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
 | `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file. Unset (or naming a missing file): every command — `run`, `rebuild`, `doctor`, discovery — uses the nearest `token.txt` at or above the working directory, by the one rule `doctor` and osopener share, and logs one stderr line naming the file (never its contents). Only when no file is found does osgraph fall back to interactive mode (`createSessionToken`, which raises a human approval dialog). A found file that Studio rejects fails `TOKEN_EXPIRED`; it never falls back to interactive |
@@ -504,7 +517,8 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 | `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
 | `OSGRAPH_PROGRESS_SITE` | no | `on` | `off`/`0`/`false`/`no`/`none` disables the live progress site |
-| `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_HOST` | no | `0.0.0.0` | Bind address. Every interface by default so a phone on the same network can watch; `127.0.0.1` keeps it on this PC — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_CONTROL_PASSWORD` | no | (prompt) | `osgraph run`: the run password that lets a phone use Start / Pause / Resume / Cancel, instead of answering the start-up prompt. Never logged |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
 | `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |
 | `OSGRAPH_STUDIO_LOCK` | no | `<tmpdir>/osgraph-studio.lock` | Cross-process Service Studio lock file (ADR-0017). `osgraph run`, MCP `rebuild` and module discovery hold it while they open, read and close tabs; a second contender fails fast with `BUSY` naming the holder. Every osgraph process on the machine must use the same path |

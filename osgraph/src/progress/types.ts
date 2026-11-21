@@ -126,12 +126,24 @@ export interface StatusControl {
 export interface RunControlHandle {
   snapshot(): StatusControl;
   act(action: "start" | "pause" | "resume" | "cancel"): boolean;
+  /** True when a remote-control password was set at the laptop. */
+  readonly remoteEnabled?: boolean;
+  /** Password check for a non-loopback request. */
+  authorize?(password: string | undefined): "ok" | "denied" | "locked" | "disabled";
 }
+
+/**
+ * Who may press the buttons, as seen by the requester: `local` (this PC), `password` (another device;
+ * a remote password is set), `none` (another device; control is this PC only).
+ */
+export type StatusControlAccess = "local" | "password" | "none";
 
 /** The whole `/api/status` body. */
 export interface Status {
   /** Present while an `osgraph run` with a control object is attached to the site (active scope only). */
   control?: StatusControl;
+  /** Present with `control`: whether THIS requester may act, and how. */
+  controlAccess?: StatusControlAccess;
   now: number;
   scope: string;
   run: StatusRun;

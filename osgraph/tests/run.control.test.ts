@@ -76,3 +76,40 @@ describe("RunControl", () => {
     expect(seen).toEqual(["waiting->running", "running->paused", "paused->done"]);
   });
 });
+
+describe("RunControl remote password", () => {
+  it("is off until a password is set; empty turns it off again", () => {
+    const c = new RunControl();
+    expect(c.remoteEnabled).toBe(false);
+    expect(c.authorize("x")).toBe("disabled");
+    c.setRemotePassword("s3cret-run");
+    expect(c.remoteEnabled).toBe(true);
+    c.setRemotePassword("");
+    expect(c.remoteEnabled).toBe(false);
+  });
+
+  it("accepts the right password, refuses wrong or missing ones", () => {
+    const c = new RunControl();
+    c.setRemotePassword("s3cret-run");
+    expect(c.authorize("s3cret-run")).toBe("ok");
+    expect(c.authorize("S3cret-run")).toBe("denied");
+    expect(c.authorize(undefined)).toBe("denied");
+  });
+
+  it("locks remote control after 5 wrong passwords within a minute, even for the right one, then recovers", () => {
+    const c = new RunControl();
+    c.setRemotePassword("s3cret-run");
+    const t0 = 1_000_000;
+    for (let i = 0; i < 4; i++) expect(c.authorize("guess", t0 + i)).toBe("denied");
+    expect(c.authorize("guess", t0 + 4)).toBe("locked");
+    expect(c.authorize("s3cret-run", t0 + 10)).toBe("locked");
+    expect(c.authorize("s3cret-run", t0 + 4 + 60_001)).toBe("ok");
+  });
+
+  it("keeps no plain text of the password", () => {
+    const c = new RunControl();
+    c.setRemotePassword("s3cret-run");
+    expect(JSON.stringify(c)).not.toContain("s3cret-run");
+    expect(JSON.stringify(c.snapshot())).not.toContain("s3cret-run");
+  });
+});

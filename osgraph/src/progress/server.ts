@@ -65,6 +65,8 @@ export interface SiteOptions {
   discovery?: DiscoveryRunner | undefined;
   /** Directory holding `index.html`. Defaults to the package's `dashboard/`. */
   dashboardDir?: string;
+  /** Test seam: decides whether a request is from this PC. Defaults to `isLocal` (peer address). */
+  isLocalPeer?: (req: IncomingMessage) => boolean;
 }
 
 export interface LiveSite {
@@ -264,9 +266,14 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
   };
 
   /**
-   * `osgraph run`'s Start / Pause / Resume / Cancel. Same guard as discovery: anyone may watch, only the
-   * PC running the site may act (these drive Service Studio on that PC).
+   * `osgraph run`'s Start / Pause / Resume / Cancel. Anyone may watch. The PC running the site may
+   * always act; another device (a phone) may act only with the remote-control password that was set
+   * at the laptop when the run started, sent in the `X-Osgraph-Password` header. Without a password
+   * set, control stays on the PC (as discovery does). Repeated wrong passwords lock remote control
+   * for a minute.
    */
+  const localPeer = options.isLocalPeer ?? isLocal;
+
   const runControlRoute = (req: IncomingMessage, res: ServerResponse, url: URL): void => {
     const control = options.state.runControl;
     if (url.pathname === "/api/run/control") {
@@ -277,10 +284,22 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
       return send(res, 404, JSON.stringify({ error: "not found" }));
     }
     if (req.method !== "POST") return send(res, 405, JSON.stringify({ error: "POST only" }));
-    if (!isLocal(req)) {
-      return send(res, 403, JSON.stringify({ error: "Controlling the run is only allowed from the PC running it." }));
-    }
     if (control === null) return send(res, 409, JSON.stringify({ error: "No osgraph run is attached to this site." }));
+    if (!localPeer(req)) {
+      const header = req.headers["x-osgraph-password"];
+      const auth = control.authorize?.(typeof header === "string" ? header : undefined) ?? "disabled";
+      if (auth === "disabled") {
+        return send(
+          res,
+          403,
+          JSON.stringify({ error: "Remote control is off: no password was set at the laptop when this run started." })
+        );
+      }
+      if (auth === "locked") {
+        return send(res, 429, JSON.stringify({ error: "Too many wrong passwords. Remote control is locked for a minute." }));
+      }
+      if (auth === "denied") return send(res, 401, JSON.stringify({ error: "Wrong password.", needPassword: true }));
+    }
     if (!control.act(action)) {
       return send(
         res,
@@ -338,7 +357,14 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           }
           return send(res, 200, JSON.stringify({ default: scopeOf(url), scopes }));
         }
-        if (url.pathname === "/api/status") return send(res, 200, JSON.stringify(statusFor(scopeOf(url))));
+        if (url.pathname === "/api/status") {
+          const body = statusFor(scopeOf(url));
+          if (body.control !== undefined) {
+            const remote = options.state.runControl?.remoteEnabled === true;
+            body.controlAccess = localPeer(req) ? "local" : remote ? "password" : "none";
+          }
+          return send(res, 200, JSON.stringify(body));
+        }
         if (url.pathname.startsWith("/api/run/")) return runControlRoute(req, res, url);
         if (url.pathname.startsWith("/api/discover/")) return await discoveryRoute(req, res, url);
         if (url.pathname === "/api/graph") {
@@ -481,7 +507,7 @@ export function siteBanner(site: LiveSite, interfaces?: ReturnType<typeof networ
       if (a === phone) continue;
       lines.push(`  also:              http://${a.address}:${site.port}   (${a.adapter}${a.virtual ? ", virtual: not for a phone" : ""})`);
     }
-    lines.push("  controls (Start / Pause / Cancel) work only on this PC; other devices can watch");
+    lines.push("  controls: always on this PC; from other devices only with the run password set when osgraph run starts");
   } else {
     lines.push(`  this PC: ${site.urls[0] ?? "-"}`);
     lines.push(`  bound to ${site.host} only; unset OSGRAPH_PROGRESS_HOST (or set it to 0.0.0.0) to open it from a phone`);

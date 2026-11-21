@@ -18,6 +18,33 @@ import { createServiceStudioClient } from "./servicestudio/token.js";
 import { createSharedSessionFactory, createToolContext } from "./tools/tool.js";
 import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, refreshModules, runScope } from "./run/run.js";
 import { RunControl } from "./run/control.js";
+import { createInterface } from "node:readline";
+
+/** Environment alternative to the prompt (non-interactive starts). Never logged. */
+const ENV_CONTROL_PASSWORD = "OSGRAPH_CONTROL_PASSWORD";
+
+/**
+ * Reads a line from the terminal without echoing it (the remote-control password). Prompt and
+ * newline go to stderr, so `--json` output on stdout stays clean.
+ */
+function promptHidden(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    process.stderr.write(question);
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+    // Swallow readline's echo of the typed characters.
+    (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => undefined;
+    rl.once("line", (line) => {
+      rl.close();
+      process.stderr.write("\n");
+      resolve(line);
+    });
+    rl.once("SIGINT", () => {
+      rl.close();
+      process.stderr.write("\n");
+      resolve("");
+    });
+  });
+}
 
 /**
  * `--wait`: Enter in the terminal presses Start. Only on an interactive terminal; returns the
@@ -440,6 +467,23 @@ async function runRunLocked(
   } else {
     args.enableGracefulCancel();
     const { control } = args;
+    // Remote control (a phone's Start / Pause / Resume / Cancel) needs a password set here, at the
+    // laptop, for this run only. Asked only when the site is reachable from other devices.
+    if (site.url !== null && site.urls.length > 1) {
+      const fromEnv = process.env[ENV_CONTROL_PASSWORD];
+      let password = fromEnv;
+      if (password === undefined && process.stdin.isTTY === true) {
+        password = await promptHidden(
+          "Set a run password to control this run from your phone (hidden; Enter = control from this PC only): "
+        );
+      }
+      control.setRemotePassword(password);
+      log(
+        control.remoteEnabled
+          ? `remote control: ON. On the phone open ${site.urls[1]} and type the run password to use Start / Pause / Resume / Cancel.`
+          : "remote control: OFF. The buttons work on this PC only; other devices can watch."
+      );
+    }
     site.state.attachControl(control);
     const stopEnter = control.state === "waiting" ? startOnEnter(control, log) : () => undefined;
     if (control.state === "waiting") {

@@ -323,7 +323,7 @@ describe("binding", () => {
     expect(lines[1]).toContain("Ethernet 3");
     expect(banner).toContain("this PC:           http://127.0.0.1:7473");
     expect(banner).toContain("172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)");
-    expect(banner).toContain("controls (Start / Pause / Cancel) work only on this PC");
+    expect(banner).toContain("from other devices only with the run password");
   });
 });
 
@@ -359,5 +359,71 @@ describe("run control routes (/api/run/*)", () => {
     expect((await post(site, "/api/run/cancel", {})).status).toBe(409);
     expect((await post(site, "/api/run/bogus", {})).status).toBe(404);
     expect(JSON.parse((await get(site, "/api/run/control")).body).state).toBe("cancelling");
+  });
+});
+
+describe("run control from another device (password)", () => {
+  const remoteSite = async (password: string | undefined) => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    control.setRemotePassword(password);
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    // Every request is treated as coming from another device on the network.
+    const site = await startSite({
+      graphDir,
+      scopesDir,
+      host: "127.0.0.1",
+      port: 0,
+      portScan: 5,
+      state,
+      dashboardDir,
+      isLocalPeer: () => false
+    });
+    sites.push(site);
+    return { site, control };
+  };
+  const postPw = async (site: LiveSite, path: string, pw?: string) =>
+    (
+      await fetch(`http://127.0.0.1:${site.port}${path}`, {
+        method: "POST",
+        headers: pw !== undefined ? { "X-Osgraph-Password": pw } : {}
+      })
+    ).status;
+
+  it("without a run password: watch only (403), status says controlAccess none", async () => {
+    const { site, control } = await remoteSite(undefined);
+    expect(await postPw(site, "/api/run/start", "anything")).toBe(403);
+    expect(control.state).toBe("waiting");
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("none");
+  });
+
+  it("with a run password: right one acts, wrong one is 401, then 429 after repeated guesses", async () => {
+    const { site, control } = await remoteSite("phone-pass");
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("password");
+    expect(await postPw(site, "/api/run/start")).toBe(401);
+    expect(await postPw(site, "/api/run/start", "nope")).toBe(401);
+    expect(control.state).toBe("waiting");
+    expect(await postPw(site, "/api/run/start", "phone-pass")).toBe(200);
+    expect(control.state).toBe("running");
+    expect(await postPw(site, "/api/run/pause", "phone-pass")).toBe(200);
+    // Two wrong guesses so far (no password, "nope"); two more are 401, the fifth locks.
+    for (let i = 0; i < 2; i++) expect(await postPw(site, "/api/run/resume", "nope")).toBe(401);
+    expect(await postPw(site, "/api/run/resume", "nope")).toBe(429);
+    expect(await postPw(site, "/api/run/resume", "phone-pass")).toBe(429);
+    expect(control.state).toBe("paused");
+  });
+
+  it("this PC never needs the password", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    control.setRemotePassword("phone-pass");
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+    expect((await post(site, "/api/run/start", {})).status).toBe(200);
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("local");
   });
 });

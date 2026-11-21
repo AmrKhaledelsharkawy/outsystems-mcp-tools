@@ -12,6 +12,8 @@
  *  - `done`       the run returned.
  */
 
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+
 export type RunControlState = "waiting" | "running" | "paused" | "cancelling" | "done";
 
 /** The `control` part of `/api/status`. */
@@ -24,6 +26,13 @@ export interface RunControlSnapshot {
 }
 
 export type RunControlAction = "start" | "pause" | "resume" | "cancel";
+
+/** Outcome of a remote (non-loopback) control request's password check. */
+export type RemoteAuth = "ok" | "denied" | "locked" | "disabled";
+
+/** Wrong passwords tolerated inside `LOCKOUT_WINDOW_MS` before remote control locks for that long. */
+export const LOCKOUT_FAILURES = 5;
+export const LOCKOUT_WINDOW_MS = 60_000;
 
 export class RunControl {
   private readonly now: () => Date;
@@ -38,6 +47,47 @@ export class RunControl {
     this.now = options.now ?? (() => new Date());
     this.current = options.waitForStart === true ? "waiting" : "running";
     this.since = this.now();
+  }
+
+  /** scrypt hash of the remote-control password; undefined = control from this PC only. */
+  private passwordHash: Buffer | undefined;
+  private passwordSalt: Buffer | undefined;
+  /** Times of recent wrong passwords (lockout window). */
+  private failures: number[] = [];
+
+  /**
+   * Lets other devices (a phone) Start / Pause / Resume / Cancel with this password. Set by the person
+   * at the laptop when the run starts; only a salted scrypt hash is kept in memory, never the text.
+   * `undefined` or empty turns remote control off (loopback only, the default).
+   */
+  setRemotePassword(password: string | undefined): void {
+    if (password === undefined || password.length === 0) {
+      this.passwordHash = undefined;
+      this.passwordSalt = undefined;
+      return;
+    }
+    this.passwordSalt = randomBytes(16);
+    this.passwordHash = scryptSync(password, this.passwordSalt, 32);
+  }
+
+  /** True when a remote-control password is set. */
+  get remoteEnabled(): boolean {
+    return this.passwordHash !== undefined;
+  }
+
+  /**
+   * Checks a remote request's password (constant-time). After `LOCKOUT_FAILURES` wrong ones within
+   * `LOCKOUT_WINDOW_MS` every remote attempt is refused until the window has passed, so a device on
+   * the network cannot guess it.
+   */
+  authorize(password: string | undefined, nowMs: number = Date.now()): RemoteAuth {
+    if (this.passwordHash === undefined || this.passwordSalt === undefined) return "disabled";
+    this.failures = this.failures.filter((t) => nowMs - t < LOCKOUT_WINDOW_MS);
+    if (this.failures.length >= LOCKOUT_FAILURES) return "locked";
+    const given = scryptSync(password ?? "", this.passwordSalt, 32);
+    if (timingSafeEqual(given, this.passwordHash)) return "ok";
+    this.failures.push(nowMs);
+    return this.failures.length >= LOCKOUT_FAILURES ? "locked" : "denied";
   }
 
   /** Called after every state change (the CLI logs them, so the run log shows who paused when). */
