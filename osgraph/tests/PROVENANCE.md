@@ -48,7 +48,6 @@ Two consequences worth stating, because both have already bitten:
 | `graph.live-fixtures.test.ts` | the byte-identical-rebuild determinism case, split out of `graph.test.ts` so the rest of that suite could be published |
 | `rebuild.capture.fake.ts` | serves the captured module and its real names listing through the published `FakeReader`; split out of `rebuild.fake.ts` so that file could be published |
 | `rebuild.capture.test.ts` | the real-capture rebuild cases kept after the port (see below) |
-| `rebuild.wave-order.test.ts` | the known A6.2b failure, kept verbatim (see "The known failure") |
 | `servicestudio.live.test.ts` | needs a live Service Studio MCP endpoint and an approved token |
 
 ## The `rebuild.fake.ts` family: published on a synthetic module, with the real-capture cases kept
@@ -99,46 +98,17 @@ stay local, in `rebuild.capture.test.ts`:
 `flows.tools.test.ts` (local) reads the captured Login screen, so it builds its tool context from
 `rebuild.capture.fake.ts` instead of `tools.helpers.ts`'s synthetic default.
 
-## The known failure
+## The known failure: resolved (#59)
 
-**"A6.2b: the 4 listings are one wave and the two module texts are another"** asserts
-`['getDataModel','getStructures']` and receives `['getActionNames','getDataModel']`. It is a
-wave-ordering assertion over an in-memory fake, **pre-existing**, and it is *not* to be "fixed" by
-weakening the assertion.
+The suite has **no known failures**. The former failure, "A6.2b: the 4 listings are one wave and the
+two module texts are another", was a stale assertion against a listing wave that had grown to five
+calls (`getActionNames(service)` was added so a Service module's `SL_*` actions are visible).
 
-It used to live in `rebuild.test.ts`. When that file was published (#41) the test was moved,
-**verbatim**, into the local-only `rebuild.wave-order.test.ts`, so the published set does not carry it
-and nobody had to touch the assertion to get CI green. The full local suite still shows it:
-
-```
-Tests  1 failed | 562 passed | 2 skipped (565)
-```
-
-That is the documented baseline. **Any other failure is caused by your change.**
-
-### Diagnosis (#41)
-
-The failure is a **stale assertion against a listing wave that grew**, not a concurrency or ordering
-bug in the pool. Observed call order for `syntheticWideModule(10)` at width 4:
-
-```
-listApps | getScreenNames | getWebBlockNames | getActionNames(client) | getActionNames(server)
-         | getActionNames(service) | getDataModel | getStructures | getClientAction(A_Act00) …
-```
-
-`ModuleWalker.walk()` (`src/rebuild/rebuild.ts`) now lists **five** kinds in wave 1, not four: a
-`getActionNames(service)` call was added so a Service module's `SL_*` actions are no longer invisible.
-The pool is width 4, so the fifth listing is dispatched only once one of the first four answers — at
-call index 5. `order.slice(5, 7)` is therefore `['getActionNames', 'getDataModel']`, exactly what
-the test reports. Everything else A6.2b checks still holds: the first four listings are one wave,
-the module texts follow the listings, and no element fetch starts before the last listing answered.
-The comment above `listingWave` ("the four name listings … exactly fill the server's admission
-window") predates the fifth listing in the same way.
-
-What is **not** decided here — and why the assertion is still untouched — is which contract is
-right: assert a five-call listing phase (4 + 1 at width 4), or stop issuing the service listing for
-modules that cannot have service actions so the wave is four again. That is a behaviour decision
-about `rebuild.ts`, outside a test-publishing change.
+Decision (#59): the service listing is issued **only for Service modules**; every other module's
+listing wave is four calls again. A6.2b was rewritten to assert that contract, with one case for a
+non-Service module (4 listings, then `getDataModel` / `getStructures`) and one for a Service module
+(5 listings, then the same two). It now lives in the published `rebuild.test.ts`, and the
+local-only `rebuild.wave-order.test.ts` is retired. Any other failure is caused by your change.
 
 ## Published after the root allowlist: `osgraph/.gitignore`
 
