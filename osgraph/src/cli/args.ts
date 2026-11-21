@@ -11,6 +11,9 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
+  osgraph run --scope <name> --modules a,b,c   re-read only the named scope modules, then re-extract offline
+  osgraph run --scope <name> --changed    open each scope module, re-read only those whose listed version
+                                          differs from the capture (unknown/no capture = read), then re-extract
   osgraph doctor [--scope <name>]         read-only local checks: token, Studio endpoint, osopener,
                                           scope module names, graph directory (exit 1 if any check fails)
   osgraph --help
@@ -33,6 +36,11 @@ read needs the human-approved session token the token manager keeps in token.txt
   --scope <name>                    required; the scope to build
   --module <name>                   refresh only this module; every other scope module must already
                                     have a raw/ capture (else RUN_CAPTURES_MISSING)
+  --modules <a,b,c>                 re-read only these scope modules (case-exact names); the others must already
+                                    have a raw/ capture (else RUN_CAPTURES_MISSING)
+  --changed                         re-read only modules whose Studio-listed version differs from the capture's
+                                    moduleVersion; unknown version or no capture is always read. Combine with
+                                    --modules to limit the candidates. Needs the live version probe (README).
   --max-open <n>                    tabs open before the run closes its own staged ones (default 12)
   --max-consecutive-failures <n>    stop after n modules in a row fail to open (default 3, 0 = never)
   --graph-dir <dir>                 override OSGRAPH_GRAPH_DIR

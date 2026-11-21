@@ -317,6 +317,8 @@ to over 45 s), so for anything larger use `osgraph run` below.
 ```bash
 node dist/cli.js run --scope <name>                    # full staged build, resumable
 node dist/cli.js run --scope <name> --module <module>  # refresh ONE module
+node dist/cli.js run --scope <name> --modules a,b,c            # re-read the named modules only
+node dist/cli.js run --scope <name> --changed                # re-read only modules whose listed version changed
 node dist/cli.js run --scope <name> --max-open 12 --max-consecutive-failures 3 --json
 ```
 
@@ -334,6 +336,26 @@ scope offline from `raw/`, so `graph.json` and `flows.json` come out byte-identi
 a `raw/` capture; if one does not, it fails with `RUN_CAPTURES_MISSING` naming them
 (run a full `osgraph run --scope <name>` first). It reports the capture age of every
 other module: the rest of the graph is only as fresh as its last full read.
+
+**Several modules, or only the changed ones.** `--modules a,b,c` reads only the named scope
+modules (names are case-exact; anything outside the scope is `SCOPE_INVALID`), then runs one
+offline re-extract; the unnamed modules need a `raw/` capture. `--changed` opens each scope
+module, compares the version Service Studio lists for it with the `moduleVersion` in its capture
+manifest, and re-reads only those that differ; then one re-extract. Every module is reported with
+its reason: `unchanged`, `changed`, `unknown` (the capture or the listing carries no version,
+e.g. a schema-1 manifest) or `no capture`. An unknown version is never treated as unchanged. The two
+flags combine (`--modules` limits the candidates). Opening, `--max-open` and drain-before-close are
+the same as a full run. The comparison is one function (`decideChange` in `src/run/changed.ts`) so a
+stronger change signal can replace it later. Like every `osgraph run` mode this needs osopener and the
+token manager's session token. A failed module skips the re-extract and exits 1.
+
+**Verifying `--changed` (human, live Service Studio required).** The listed version is trusted only
+after this probe passes: (1) publish a throwaway module and confirm the version `listApps` reports for
+it changes; (2) close and reopen an unchanged module and confirm its version does not change; (3) after
+publishing one module of a small scope, run `osgraph run --scope <scope> --changed` and confirm only
+that module is read (see the run log and timings). If (1) or (2) fails, set
+`OSGRAPH_DISABLE_CHANGED=1`: `--changed` then refuses with `CHANGED_DISABLED`; use `--modules` instead.
+Record the probe result in the issue.
 
 **Robustness**, learned from a 287-module run:
 
