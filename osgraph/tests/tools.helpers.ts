@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach } from "vitest";
 import { DEFAULT_FETCH_CONCURRENCY, type OsgraphConfig } from "../src/config.js";
+import { createFileStudioLock } from "../src/lock/studioLock.js";
 import { tools } from "../src/tools/index.js";
 import { createToolContext, type ToolContext, type ToolContextOverrides } from "../src/tools/tool.js";
 import type { ToolResponse } from "../src/types.js";
@@ -44,6 +45,8 @@ export function makeCtx(overrides: ToolContextOverrides = {}): {
     now: () => new Date("2026-10-30T12:00:00.000Z"),
     log: (l) => logs.push(l),
     createSession: () => fakeSession([demoPortalModule(), syntheticXModule()]),
+    // #64: never the machine-wide default lock path; parallel test files must not contend.
+    studioLock: createFileStudioLock({ path: join(root, "studio.lock") }),
     ...overrides
   });
   return { ctx, config, logs };

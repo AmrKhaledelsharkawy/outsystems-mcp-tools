@@ -40,6 +40,15 @@ import { mkdirSync } from "node:fs";
 import { DEFAULT_FETCH_CONCURRENCY, MAX_FETCH_CONCURRENCY, MIN_FETCH_CONCURRENCY } from "../config.js";
 import { clearStage, missingFromStage, readStage, writeStageEntry, type StageEntry } from "./stage.js";
 import { RawModuleWriter, type RawElementKind } from "./raw.js";
+import {
+  DEFAULT_SKIP_KINDS,
+  KindSampler,
+  PRUNABLE_KINDS,
+  readKindOf,
+  type ModuleKindStats,
+  type PrunableKind,
+  type ReadKind
+} from "./readKinds.js";
 import { buildScopeFlows, writeFlows, type FlowsArtifact } from "../flows/index.js";
 import { dirname } from "node:path";
 import { extractModule, type ExtractedModule, type FlowNamedText, type ModuleInput, type NamedText } from "../extract/index.js";
@@ -120,6 +129,13 @@ export interface RebuildPerModule {
   /** Read width this module was walked at (OSG-016/ADR-0013) — what `phaseDurationsMs` must be read against. */
   concurrency: number;
   /**
+   * Per-kind read cost (#69): call count and p50/p95 latency per kind actually read. This is what
+   * `timings.json` persists and `osgraph kinds` reads back. Absent on a module staged before it existed.
+   */
+  kinds?: ModuleKindStats;
+  /** Kinds switched off for this module (#69). Absent when everything was read. */
+  skippedKinds?: PrunableKind[];
+  /**
    * Flow counts for this module (F4; ADR-0012). Absent when no flow data was built — a rebuild run
    * with raw capture disabled, or a module whose raw capture could not be read back.
    */
@@ -161,6 +177,11 @@ export interface RebuildResult {
    * run always says which width produced its timings — a measurement without it is unreadable.
    */
   fetchConcurrency: number;
+  /**
+   * Kinds that were NOT read by at least one module of this rebuild (#69). Absent when every kind was
+   * read everywhere. Also written to `meta.json`, so the snapshot says it is partial by configuration.
+   */
+  skippedKinds?: PrunableKind[];
   /**
    * Scope totals for `flows.json` (F4; ADR-0012), plus anything that went wrong building it.
    * Absent when no flow data was built. `missingCaptures` is the honest counterpart of
@@ -209,6 +230,10 @@ export interface RebuildOptions {
    * differently from the one this was measured on. Default false.
    */
   fetchReferencedElements?: boolean;
+  /**
+   * Kinds not to read (#69; OSGRAPH_SKIP_KINDS). Default none. See `ExtractOpenModuleOptions.skipKinds`.
+   */
+  skipKinds?: readonly PrunableKind[];
   /**
    * Where `raw/` goes (F0 / Design 1): every element text the rebuild fetched is written verbatim
    * under `<rawGraphDir>/<scope>/raw/<module>/`, so flow extraction can be re-run offline instead of
@@ -271,6 +296,14 @@ export function resolveScopeModules(scope: ScopeDefinition, apps: ServiceStudioA
 function resolveFetchConcurrency(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_FETCH_CONCURRENCY;
   return Math.min(MAX_FETCH_CONCURRENCY, Math.max(MIN_FETCH_CONCURRENCY, Math.trunc(value)));
+}
+
+/**
+ * Only a Service module publishes `SL_*` service actions (#59). Matched like `isTraditional`, so a
+ * decorated spelling of the type still counts; a module whose type is not Service never asks.
+ */
+function isServiceModule(moduleType: string): boolean {
+  return /service/i.test(moduleType);
 }
 
 function isTraditional(moduleType: string): boolean {
@@ -346,6 +379,8 @@ async function mapPool<T, R>(
 
 class ModuleWalker {
   readonly skipped: RebuildSkippedElement[] = [];
+  /** Per-kind call latencies for this module (#69); summarised into `timings.json`. */
+  readonly sampler = new KindSampler();
   /** Listing entries never fetched because `IsReferenced === true` (S6 audit F3). Never a skip. */
   referencedOnlyCount = 0;
   readonly phaseDurations: Record<RebuildPhase, number> = Object.fromEntries(
@@ -357,10 +392,14 @@ class ModuleWalker {
     private readonly scope: string,
     private readonly module: string,
     private readonly traditional: boolean,
+    /** Service module: the only kind that can have service actions, hence the only one that lists them (#59). */
+    private readonly service: boolean,
     private readonly retryDelayMs: number,
     private readonly fetchReferenced: boolean,
     /** Element fetches in flight at once (OSG-016 §C1); 1 is the pre-OSG-016 serial walk. */
     private readonly fetchConcurrency: number,
+    /** Kinds switched off (#69): never listed, never fetched, never captured. Empty = read everything. */
+    private readonly skip: ReadonlySet<ReadKind>,
     private readonly emit: (e: RebuildProgressEvent) => void,
     /**
      * Raw-text capture (F0). Undefined disables it; the walk is otherwise identical, so a test or a
@@ -399,6 +438,25 @@ class ModuleWalker {
     const report = (outcome: "ok" | "retry" | "skipped"): void =>
       this.emit({ type: "element", module: this.module, phase, kind, name, index, total, outcome, durationMs: Date.now() - started });
     try {
+      return await this.guardedAttempts(report, kind, name, call);
+    } finally {
+      this.sample(kind, started);
+    }
+  }
+
+  /** One logical read's latency, filed under its kind (#69). Failures and skips count: they cost time too. */
+  private sample(kind: string, started: number): void {
+    const readKind = readKindOf(kind);
+    if (readKind !== undefined) this.sampler.record(readKind, Date.now() - started);
+  }
+
+  private async guardedAttempts<T>(
+    report: (outcome: "ok" | "retry" | "skipped") => void,
+    kind: string,
+    name: string,
+    call: () => Promise<T>
+  ): Promise<{ value: T } | { skip: RebuildSkippedElement }> {
+    try {
       const value = await call();
       report("ok");
       return { value };
@@ -434,6 +492,20 @@ class ModuleWalker {
     const started = Date.now();
     const report = (outcome: "ok" | "retry" | "failed"): void =>
       this.emit({ type: "element", module: this.module, phase, kind, name: call, index: 1, total: 1, outcome, durationMs: Date.now() - started });
+    try {
+      return await this.kindLevelAttempts(report, kind, call, phase, run);
+    } finally {
+      this.sample(kind, started);
+    }
+  }
+
+  private async kindLevelAttempts<T>(
+    report: (outcome: "ok" | "retry" | "failed") => void,
+    kind: string,
+    call: string,
+    phase: RebuildPhase,
+    run: () => Promise<T>
+  ): Promise<T> {
     try {
       const value = await run();
       report("ok");
@@ -521,6 +593,9 @@ class ModuleWalker {
     fetch: (name: string) => Promise<string>,
     make: (entry: ServiceStudioElementName, text: string) => T
   ): Promise<T[]> {
+    // A switched-off kind is never reached (its listing is empty), but say so here too so a future
+    // caller cannot fetch one by accident.
+    if (this.skip.has(readKindOf(kind) as ReadKind)) return [];
     const wanted = this.fetchReferenced ? listing : listing.filter((e) => e.IsReferenced !== true);
     this.referencedOnlyCount += listing.length - wanted.length;
     return this.phase(phase, wanted.length, async () => {
@@ -599,7 +674,7 @@ class ModuleWalker {
     //
     // The phase boundary is kept: every listing must be complete before any element fetch starts,
     // because `elements()` consumes `listings.*`.
-    const listingWave = [
+    const listingWave: ReadonlyArray<{ kind: string; call: string; run: () => Promise<ServiceStudioElementName[]> }> = [
       {
         kind: "Screen",
         call: t ? "getScreenNamesTraditional" : "getScreenNames",
@@ -615,13 +690,27 @@ class ModuleWalker {
       // A Service module publishes `SL_*` service actions, which the "server" listing does not
       // return. Without this the whole SL layer reads as empty — 38 of 38 `_SL` modules yielded no
       // actions at all, and the layer became a terminal wall with 46 edges in and 0 out.
-      { kind: "ServiceAction", call: "getActionNames(service)", run: () => r.getActionNames(m, "service") }
-    ] as const;
-    const [screenNames, blockNames, clientActionNames, serverActionNames, serviceActionNames] = await this.phase(
-      "listing",
-      listingWave.length,
-      () => mapPool(listingWave, this.fetchConcurrency, (spec) => this.listing(spec.kind, spec.call, spec.run))
+      // Any other module cannot have service actions, so the call is not issued (#59): its listing
+      // wave stays four calls, and its service-action set is empty because it is *not applicable*,
+      // which is neither a skipped nor a failed read and never touches snapshot completeness.
+      ...(this.service
+        ? [{ kind: "ServiceAction", call: "getActionNames(service)", run: () => r.getActionNames(m, "service") }]
+        : [])
+    ];
+    // A switched-off kind (#69) is not listed at all: its listing is one of the reads being saved.
+    const activeListings = listingWave.filter((spec) => !this.skip.has(readKindOf(spec.kind) as ReadKind));
+    const listed = await this.phase("listing", activeListings.length, () =>
+      mapPool(activeListings, this.fetchConcurrency, (spec) => this.listing(spec.kind, spec.call, spec.run))
     );
+    const listingFor = (kind: string): ServiceStudioElementName[] => {
+      const at = activeListings.findIndex((spec) => spec.kind === kind);
+      return at === -1 ? [] : listed[at];
+    };
+    const screenNames = listingFor("Screen");
+    const blockNames = listingFor("Block");
+    const clientActionNames = listingFor("ClientAction");
+    const serverActionNames = listingFor("ServerAction");
+    const serviceActionNames = listingFor("ServiceAction");
     // Service actions join the server-action listing rather than forming a phase of their own. Three
     // reasons, all load-bearing: `kinds.ts` already normalises `ServiceAction` -> `ServerAction`, so
     // the node id matches the External/Placeholder stub the consumer side already created; `raw/`
@@ -641,13 +730,26 @@ class ModuleWalker {
       { phase: "dataModel", kind: "Entity", call: "getDataModel", run: () => r.getDataModel(m) },
       { phase: "structures", kind: "Structure", call: "getStructures", run: () => r.getStructures(m) }
     ] as const;
-    const [dataModel, structures] = await mapPool(moduleTextWave, this.fetchConcurrency, (spec) =>
+    const activeTexts = moduleTextWave.filter((spec) => !this.skip.has(spec.kind));
+    const texts = await mapPool(activeTexts, this.fetchConcurrency, (spec) =>
       this.moduleText(spec.phase, spec.kind, spec.call, spec.run)
     );
+    // A switched-off kind (#69) reads as the empty text, which the extractor already treats as "no
+    // elements"; the raw capture simply has no entry for it.
+    const textFor = (kind: "Entity" | "Structure"): string => {
+      const at = activeTexts.findIndex((spec) => spec.kind === kind);
+      return at === -1 ? "" : texts[at];
+    };
+    const dataModel = textFor("Entity");
+    const structures = textFor("Structure");
     // Captured here, in fixed order, rather than inside `moduleText`: `raw/`'s manifest order is an
     // output (ADR-0012 byte-identity), so it must not record which of the two answered first.
-    this.raw?.add({ kind: "dataModel", manifestKind: "Entity", call: "getDataModel", text: dataModel });
-    this.raw?.add({ kind: "structures", manifestKind: "Structure", call: "getStructures", text: structures });
+    if (!this.skip.has("Entity")) {
+      this.raw?.add({ kind: "dataModel", manifestKind: "Entity", call: "getDataModel", text: dataModel });
+    }
+    if (!this.skip.has("Structure")) {
+      this.raw?.add({ kind: "structures", manifestKind: "Structure", call: "getStructures", text: structures });
+    }
 
     const flow = (entry: ServiceStudioElementName, text: string): FlowNamedText => ({
       name: String(entry.Name),
@@ -690,6 +792,10 @@ export interface ModuleTiming {
   phases: Record<RebuildPhase, number>;
   /** Width the module was walked at; what `phases` has to be read against (OSG-016 §A5). */
   concurrency: number;
+  /** Per-kind read cost of this walk (#69): calls and p50/p95 latency. Absent kinds were not read. */
+  kinds: ModuleKindStats;
+  /** Kinds switched off for this walk (#69), canonical order; empty when everything was read. */
+  skippedKinds: PrunableKind[];
 }
 
 export interface ExtractOpenModuleOptions {
@@ -715,6 +821,12 @@ export interface ExtractOpenModuleOptions {
   fetchReferencedElements?: boolean;
   /** Read width (OSG-016 §C1; ADR-0013), clamped to [1, 8]; default `DEFAULT_FETCH_CONCURRENCY`. */
   fetchConcurrency?: number;
+  /**
+   * Kinds not to read (#69), default `DEFAULT_SKIP_KINDS` (none). A switched-off kind costs no call at
+   * all, contributes nothing to the module, and is recorded in `ModuleTiming.skippedKinds` and in the
+   * raw manifest so the artifact cannot look complete when it is not. Only `PRUNABLE_KINDS` apply.
+   */
+  skipKinds?: readonly PrunableKind[];
   onProgress?: (event: RebuildProgressEvent) => void;
   /** F0 raw capture root; undefined writes no files. */
   rawGraphDir?: string;
@@ -780,6 +892,7 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
   const retryDelayMs = options.retryDelayMs ?? 250;
   const fetchReferenced = options.fetchReferencedElements === true;
   const fetchConcurrency = resolveFetchConcurrency(options.fetchConcurrency);
+  const skippedKinds = PRUNABLE_KINDS.filter((k) => (options.skipKinds ?? DEFAULT_SKIP_KINDS).includes(k));
   const emit = options.onProgress ?? (() => undefined);
   const now = options.now ?? (() => new Date());
   const moduleStarted = Date.now();
@@ -791,9 +904,11 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
     scope,
     app.name,
     isTraditional(app.moduleType),
+    isServiceModule(app.moduleType),
     retryDelayMs,
     fetchReferenced,
     fetchConcurrency,
+    new Set<ReadKind>(skippedKinds),
     emit,
     raw
   );
@@ -813,8 +928,11 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
     requestedAs: requested,
     moduleType: app.moduleType,
     capturedAt: now().toISOString(),
+    moduleKey: app.key,
+    moduleVersion: app.version,
     referencedOnlyCount: walker.referencedOnlyCount,
-    skipped: walker.skipped.map((s) => ({ kind: s.kind, name: s.name, reason: s.reason }))
+    skipped: walker.skipped.map((s) => ({ kind: s.kind, name: s.name, reason: s.reason })),
+    skippedKinds
   });
 
   const durationMs = Date.now() - moduleStarted;
@@ -827,7 +945,9 @@ async function walkAndExtract(options: ExtractOpenModuleOptions): Promise<OpenMo
       durationMs,
       referencedOnlyCount: walker.referencedOnlyCount,
       phases: walker.phaseDurations,
-      concurrency: fetchConcurrency
+      concurrency: fetchConcurrency,
+      kinds: walker.sampler.summary(),
+      skippedKinds
     },
     rawCapturePath: raw?.moduleDir,
     moduleKey: app.key,
@@ -866,6 +986,7 @@ export async function rebuildScope(options: RebuildOptions): Promise<RebuildOutc
         retryDelayMs,
         fetchReferencedElements: fetchReferenced,
         fetchConcurrency,
+        ...(options.skipKinds !== undefined ? { skipKinds: options.skipKinds } : {}),
         onProgress: emit,
         rawGraphDir: options.rawGraphDir,
         now
@@ -899,6 +1020,12 @@ export async function rebuildScope(options: RebuildOptions): Promise<RebuildOutc
     await session.reader.drain?.();
     session.release();
   }
+}
+
+/** Canonical-order union of every module's switched-off kinds (#69). */
+function unionSkippedKinds(lists: ReadonlyArray<readonly PrunableKind[]>): PrunableKind[] {
+  const all = new Set<PrunableKind>(lists.flat());
+  return PRUNABLE_KINDS.filter((k) => all.has(k));
 }
 
 /** Human-readable one-liner per progress event (stderr output of the MCP tool). */
@@ -959,6 +1086,10 @@ function buildOutcome(options: BuildOutcomeOptions): RebuildOutcome {
     built.meta.stagedFrom = stageAge.oldest;
     built.meta.stagedTo = stageAge.newest;
   }
+  // #69: a snapshot read with a kind switched off is partial BY CONFIGURATION. Recorded only when it
+  // is true, so the default build's meta.json is byte-identical to what it was before the switch.
+  const skippedKinds = unionSkippedKinds(perModuleTiming.map((t) => t.skippedKinds));
+  if (skippedKinds.length > 0) built.meta.skippedKinds = skippedKinds;
   mkdirSync(dirname(snapshotPath), { recursive: true });
   writeSnapshot(snapshotPath, built.snapshot, built.meta);
 
@@ -995,6 +1126,8 @@ function buildOutcome(options: BuildOutcomeOptions): RebuildOutcome {
       phaseDurationsMs: timing?.phases ?? (Object.fromEntries(REBUILD_PHASES.map((p) => [p, 0])) as Record<RebuildPhase, number>),
       concurrency: timing?.concurrency ?? options.fetchConcurrency
     };
+    if (timing?.kinds !== undefined && Object.keys(timing.kinds).length > 0) entry.kinds = timing.kinds;
+    if (timing !== undefined && timing.skippedKinds.length > 0) entry.skippedKinds = timing.skippedKinds;
     if (timing && timing.requested !== pm.module) entry.requestedAs = timing.requested;
     const flows = flowsArtifact?.perModule.find((f) => f.module === pm.module);
     if (flows !== undefined) {
@@ -1024,6 +1157,7 @@ function buildOutcome(options: BuildOutcomeOptions): RebuildOutcome {
     fetchConcurrency: options.fetchConcurrency,
     durationMs
   };
+  if (skippedKinds.length > 0) result.skippedKinds = skippedKinds;
   if (flowsArtifact !== undefined && flowsPathWritten !== undefined) {
     result.flows = {
       path: flowsPathWritten,
@@ -1162,7 +1296,9 @@ export function finalizeStage(options: FinalizeStageOptions): FinalizeStageResul
       durationMs: e.durationMs,
       referencedOnlyCount: e.referencedOnlyCount,
       phases: e.phaseDurationsMs,
-      concurrency: e.concurrency ?? fetchConcurrency
+      concurrency: e.concurrency ?? fetchConcurrency,
+      kinds: e.kinds ?? {},
+      skippedKinds: e.skippedKinds ?? []
     })),
     startedAt,
     fetchConcurrency,
@@ -1225,6 +1361,7 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
       retryDelayMs,
       fetchReferencedElements: fetchReferenced,
       fetchConcurrency,
+      ...(options.skipKinds !== undefined ? { skipKinds: options.skipKinds } : {}),
       onProgress: emit,
       // The staged path always captures: `graphDir` is where its stage already lives, and a staged
       // run is exactly the case (one module at a time, hours apart) where re-reading live is worst.
@@ -1241,6 +1378,8 @@ export async function stageModule(options: StageModuleOptions): Promise<StageOut
       referencedOnlyCount: walked.timing.referencedOnlyCount,
       phaseDurationsMs: walked.timing.phases,
       concurrency: walked.timing.concurrency,
+      ...(Object.keys(walked.timing.kinds).length > 0 ? { kinds: walked.timing.kinds } : {}),
+      ...(walked.timing.skippedKinds.length > 0 ? { skippedKinds: walked.timing.skippedKinds } : {}),
       extracted: walked.extracted
     };
     if (walked.timing.requested !== resolved.app.name) entry.requestedAs = walked.timing.requested;

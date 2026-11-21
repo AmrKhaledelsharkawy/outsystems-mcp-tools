@@ -114,7 +114,7 @@ osgraph does not work alone"** above.
 **What exists today:** stages 3, 4 (as `raw/` captures) and 5 (as a single snapshot) ship
 in the caller-triggered [`rebuild`](#tools) tool, which is **not** being removed — it stays
 the way to build a baseline and to force a re-read. Stages 1, 2, 6 and 7, immutable
-generations and the `watch` / `sync` / `status` / `doctor` commands are being built across
+generations and the `watch` / `sync` commands and the remote `status` are being built across
 milestones M0–M4; the issue tracker is the authority on what has landed.
 
 ---
@@ -125,6 +125,7 @@ milestones M0–M4; the issue tracker is the authority on what has landed.
 |---|---|
 | `defineScope` | Writes a scope file `{ name, modules }`. Overwrites a scope of the same name |
 | `listScopes` | Lists defined scopes, sorted by name |
+| `graphStatus` | Read-only freshness report for one scope's **local** snapshot: snapshot build time, scope completeness (scope modules with no capture, by name), and per module `capturedAt`, `moduleVersion` (`"unknown"` for captures that predate the version field), skipped and referenced-only counts. Reads files on disk only: no Studio, no osopener, works with Studio shut. CLI twin: `osgraph status --scope <name> [--json]` |
 | `rebuild` | Full extraction run over one scope: reads every element of every module through the `servicestudio` MCP (read-only), parses edges, regenerates the snapshot **atomically** — all-or-nothing, so the previous snapshot survives any failure. Raises the [live progress site](#the-live-progress-site) and returns its URL |
 | `queryImpact` | Reachable node set from one node (dependents *or* dependencies, optionally depth-capped), by in-process BFS |
 | `queryPath` | Shortest path between two nodes |
@@ -317,6 +318,8 @@ to over 45 s), so for anything larger use `osgraph run` below.
 ```bash
 node dist/cli.js run --scope <name>                    # full staged build, resumable
 node dist/cli.js run --scope <name> --module <module>  # refresh ONE module
+node dist/cli.js run --scope <name> --modules a,b,c            # re-read the named modules only
+node dist/cli.js run --scope <name> --changed                # re-read only modules whose listed version changed
 node dist/cli.js run --scope <name> --max-open 12 --max-consecutive-failures 3 --json
 ```
 
@@ -334,6 +337,31 @@ scope offline from `raw/`, so `graph.json` and `flows.json` come out byte-identi
 a `raw/` capture; if one does not, it fails with `RUN_CAPTURES_MISSING` naming them
 (run a full `osgraph run --scope <name>` first). It reports the capture age of every
 other module: the rest of the graph is only as fresh as its last full read.
+
+**Several modules, or only the changed ones.** `--modules a,b,c` reads only the named scope
+modules (names are case-exact; anything outside the scope is `SCOPE_INVALID`), then runs one
+offline re-extract; the unnamed modules need a `raw/` capture. `--changed` opens each scope
+module, compares the version Service Studio lists for it with the `moduleVersion` in its capture
+manifest, and re-reads only those that differ; then one re-extract. Every module is reported with
+its reason: `unchanged`, `changed`, `unknown` (the capture or the listing carries no version,
+e.g. a schema-1 manifest, or version `"0"`) or `no capture`. An unknown version is never treated as
+unchanged; the run ends with one `WARNING:` line counting the modules re-read for that reason. Service
+Studio lists a module's real server version only when it was opened through *Open from Environment*
+(a recent-list open lists `"0"`), so every `osgraph run` mode opens modules with osopener's
+`source: "environment"`. The two
+flags combine (`--modules` limits the candidates). Opening, `--max-open` and drain-before-close are
+the same as a full run. The comparison is one function (`decideChange` in `src/run/changed.ts`) so a
+stronger change signal can replace it later. Like every `osgraph run` mode this needs osopener and the
+token manager's session token. A failed module skips the re-extract and exits 1.
+
+**Verifying `--changed` (human, live Service Studio required).** The listed version is trusted only
+after this probe passes: (1) publish a throwaway module and confirm the version `listApps` reports for
+it changes; (2) close and reopen an unchanged module (through *Open from Environment*) and confirm its
+version does not change; (3) after
+publishing one module of a small scope, run `osgraph run --scope <scope> --changed` and confirm only
+that module is read (see the run log and timings). If (1) or (2) fails, set
+`OSGRAPH_DISABLE_CHANGED=1`: `--changed` then refuses with `CHANGED_DISABLED`; use `--modules` instead.
+Record the probe result in the issue.
 
 **Robustness**, learned from a 287-module run:
 
@@ -356,6 +384,45 @@ other module: the rest of the graph is only as fresh as its last full read.
 The live progress site is raised and its URL printed before any work starts; add
 `--serve` to keep it up after the run ends.
 
+### `osgraph doctor` — why a rebuild or run cannot work here
+
+One **read-only** command that explains, before anything fails halfway, whether this machine can
+rebuild or `run` a scope:
+
+```bash
+node dist/cli.js doctor --scope <name>
+node dist/cli.js doctor --scope <name> --json   # the report as JSON on stdout
+```
+
+| Check | Fails when |
+|---|---|
+| `token` | no `token.txt` at or above the working directory (the same search osopener uses), the file is empty, or Studio's `listApps` rejects it. The remedy is always a **human approving a new session through the token manager**; the doctor never calls `createSessionToken` and never prints the token. |
+| `endpoint` | `OSGRAPH_SERVICESTUDIO_URL` is unset/invalid, or Studio's MCP endpoint cannot be reached. A reachable endpoint that rejects the token is reported as a `token` failure, not an `endpoint` one. |
+| `osopener` | the shared adapter cannot load osopener; its failure cause is shown verbatim. |
+| `scope` | a module in the scope does not match a listed name **case-exactly**. Near misses (different case, typo) are reported with a suggestion. A listed-but-closed module is a warning. |
+| `graphDir` | the graph directory is not writable. Also reports whether a snapshot exists and how old it is. |
+
+`scope` and the snapshot age need `--scope`. Exit code is `1` when any check fails, `0` otherwise.
+It writes nothing and opens or closes no module; its one Studio call is `listApps`.
+
+**"No module is currently open in Service Studio"** means *that name is not an open module* — a
+closed, misspelled or wrongly-cased name — even while other modules are open. It does not mean
+Studio is empty or unreachable. The `scope` check says which of your names it is.
+
+This is the **local** doctor. Source / DEV-environment preflight (issue #9) is deferred and will
+extend this command rather than replace it. As everywhere, osgraph is not standalone: the doctor
+checks the two things it depends on — the human-approved session token and osopener.
+
+#### Live verification procedure (human, Service Studio open)
+
+Run each case and confirm the named check fails with the right cause, then restore the setup:
+
+1. **Expired token** — keep Studio open, put a stale value in the workspace's `token.txt`
+   (or let the session lapse). Expect `token` FAIL ("rejected the token") and `endpoint` PASS.
+2. **Studio closed** — quit Service Studio. Expect `endpoint` FAIL ("unreachable"), `token` SKIP.
+3. **Wrong-case scope name** — open the scope's modules, change one module name's case in the
+   scope file. Expect `scope` FAIL with `did you mean '<correct name>' (different case)`.
+
 ### Offline re-extract
 
 If you change the parser and want to regenerate `graph.json` + `flows.json` from raw
@@ -367,6 +434,46 @@ node dist/cli.js reextract --scope <name> --json   # full result as JSON
 node dist/cli.js --help
 ```
 
+### Snapshot freshness
+
+`graphStatus` (MCP) and `osgraph status --scope <name> [--json]` (CLI) report, from files on disk only, when a scope's snapshot was built and how complete it is. They need no Service Studio and no token. The captures they describe were produced by `run`/`rebuild`, which do need osopener and the token manager.
+
+Live check (human, with Service Studio open): after a real `osgraph run --scope <name>`, compare `osgraph status --scope <name> --json` with each `<graphDir>/<scope>/raw/<module>/manifest.json` (`capturedAt`, `moduleVersion`, `skipped.length`, `referencedOnlyCount`); they must match exactly.
+
+### Accuracy audit
+
+`osgraph audit --scope <name> [--k 20] [--seed 1] [--json]` samples K edges and K absent pairs per
+consumer layer and producer kind from the snapshot, checks each against the consumer element's raw
+text, and reports precision, recall and every disagreement. It reads only the snapshot and `raw/` that
+an earlier `run` produced (so, like every osgraph command that builds data, it depends on osopener and
+the token manager having produced them), and needs no Service Studio itself. The human half, comparing
+sampled module pairs with Studio's dependency list, is written up in [`LIVE-AUDIT.md`](LIVE-AUDIT.md).
+
+### Read cost per kind
+
+Every rebuild records, in `<graphDir>/<scope>/timings.json`, how many read calls each element kind
+cost in each module and their p50/p95 latency. `osgraph kinds` joins that to what each kind yielded
+and lists kinds with read time but zero edges and zero flows:
+
+```bash
+node dist/cli.js kinds --scope <name>          # offline: no Service Studio, no session token
+node dist/cli.js kinds --scope <name> --json
+```
+
+A kind found there can be switched off with `OSGRAPH_SKIP_KINDS` (e.g. `Structure,ClientAction`).
+The snapshot is then partial by configuration and says so (`skippedKinds` in `meta.json`); edges that
+target the unread elements point at placeholders. Concurrency is unchanged (4). Nothing is switched off
+by default. Rationale and limits: [ADR-0016](docs/adr/0016-read-cost-per-kind-and-opt-out-of-zero-yield-kinds.md).
+Recording the before/after profile on a real 30-module scope is a live-Studio step for a person.
+
+### Query ergonomics (offline)
+
+- **Did-you-mean.** `UNKNOWN_NODE` and `SCOPE_NOT_FOUND` carry up to 5 ranked `details.suggestions` (case-insensitive match, then prefix, substring, edit distance) and name them in the message. Suggestions are advice only: the exact name is still required for a lookup to succeed.
+- **Result limits.** `queryImpact` (`limit`, default 500 nodes, nearest first), `searchFlows` (`limit`, default 200 hits) and `queryPath` (`limit`, default 200 steps) report `total` and `truncated`. Calls without `limit` keep working; `queryImpact.count` is still the true total. When `queryPath` truncates, `raw` is returned empty.
+- **CLI.** `osgraph impact --scope <s> --node <id> --direction dependents|dependencies [--max-depth n] [--limit n]`, `osgraph flow --scope <s> --element <id|name> [--action a] [--module m]`, `osgraph path --scope <s> --from <id> --to <id> [--undirected] [--limit n]`, each with `--json` (the MCP tool's response envelope, verbatim) or human-readable output; exit code 1 on an error response. They call the same handlers as the MCP tools, need no Service Studio and no token, and only read a snapshot that `run` / `rebuild` (osopener and the token manager) already produced. `path` still needs the pinned graphify.
+
+Live check (human, local): run the three CLI commands and the matching MCP tools against a large installed snapshot (hundreds of modules) with Service Studio shut, and record the timings. Until recorded, issue #70 stays unverified.
+
 ---
 
 ## Configuration
@@ -374,11 +481,12 @@ node dist/cli.js --help
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
-| `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file |
+| `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file. Unset (or naming a missing file): every command — `run`, `rebuild`, `doctor`, discovery — uses the nearest `token.txt` at or above the working directory, by the one rule `doctor` and osopener share, and logs one stderr line naming the file (never its contents). Only when no file is found does osgraph fall back to interactive mode (`createSessionToken`, which raises a human approval dialog). A found file that Studio rejects fails `TOKEN_EXPIRED`; it never falls back to interactive |
 | `OSGRAPH_GRAPH_DIR` | no | `<cwd>/.osgraph` | Where snapshots are written |
 | `OSGRAPH_SCOPES_DIR` | no | `<package>/scopes` | Where scope files live |
 | `OSGRAPH_GRAPHIFY_BIN` | no | `graphify` | The pinned graphify executable used by `queryPath` |
 | `OSGRAPH_MAX_CONCURRENCY` | no | `4` | Reads in flight at once |
+| `OSGRAPH_SKIP_KINDS` | no | none | Kinds a rebuild does not read: any of `Entity`, `Structure`, `ClientAction`, `ServerAction` (comma separated). `Screen` and `Block` cannot be switched off. The default is empty until a live read-cost profile justifies a change — see [Read cost per kind](#read-cost-per-kind) |
 | `OSGRAPH_FETCH_REFERENCED_ELEMENTS` | no | — | Also fetch elements referenced from outside the scope |
 | `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
@@ -386,6 +494,7 @@ node dist/cli.js --help
 | `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
 | `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |
+| `OSGRAPH_STUDIO_LOCK` | no | `<tmpdir>/osgraph-studio.lock` | Cross-process Service Studio lock file (ADR-0017). `osgraph run`, MCP `rebuild` and module discovery hold it while they open, read and close tabs; a second contender fails fast with `BUSY` naming the holder. Every osgraph process on the machine must use the same path |
 
 osgraph **only ever reads** the session token — it never calls `createSessionToken`,
 because approving a session is a human act. It therefore **cannot obtain a token by
@@ -410,6 +519,23 @@ Measured against Service Studio **11.55.94**:
 
 ---
 
+### Verifying the Studio lock live
+
+Replay and unit tests cover the lock; they cannot show that no tab is closed under a run's reads. A
+person with Service Studio open and the session token approved does this once:
+
+1. Pick a small scope of two or three modules.
+2. Terminal A: `osgraph run --scope <small-scope>`. Wait until the progress site shows a module reading.
+3. Call the MCP `rebuild` tool on the same scope (or run the CLI again from a second terminal).
+4. Expect an immediate `BUSY` error naming terminal A's pid and `osgraph run --scope <small-scope>`,
+   and no change in Terminal A's progress. Confirm in Service Studio that no module tab closed or
+   reopened except the ones run A itself opens and closes.
+5. Let run A finish, then repeat step 3: `rebuild` now proceeds, and the lockfile is gone.
+6. Kill run A mid-way (Ctrl+C, then `kill -9` on a second try) and confirm the next command recovers the
+   stale lock instead of reporting `BUSY`.
+
+Record the outcome in the issue; until then the lock is unverified live.
+
 ## Development
 
 ```bash
@@ -427,6 +553,32 @@ and windows. The rule, the per-file reasons and the one known pre-existing failu
 [`tests/PROVENANCE.md`](tests/PROVENANCE.md).
 
 `npm test` is still the gate for a change: locally it runs strictly more than CI can.
+
+### Accuracy regression gate
+
+[`tests/accuracy.gate.test.ts`](tests/accuracy.gate.test.ts) runs inside `npm test` and keeps graph
+correctness from regressing across the three ways a snapshot is produced: `osgraph run` (full),
+the MCP `rebuild`, and offline `reextract`. On the same synthetic captured inputs it asserts:
+
+- the three paths write byte-identical `graph.json` and `flows.json` (a failure names the artifact,
+  the two paths compared and the JSON path of the first difference);
+- a producer deleted or renamed upstream gives the consumer's edge an explicit `placeholder: true`
+  node, never a stale node that looks real;
+- a skipped read is recorded (`skipped`, completeness meta, `missingCaptures`) and never stubbed or
+  counted as read, so neither a module nor the scope looks complete;
+- the node-order permutation invariance and the listing-wave contract hold end to end.
+
+It uses fakes only: no Service Studio, osopener, token or network. **Replay-green is not live-green.**
+The live check is a human step, and until it is recorded the issue stays *unverified*:
+
+1. In a throwaway module (never a production one) that has a consumer module in the scope, rename a
+   server action, then publish the module.
+2. With Service Studio open, the token approved and osopener available (osgraph depends on both),
+   run `osgraph run --module <producer-module>` for the scope.
+3. Query the consumer's flow or impact. Expected: the consumer's reference points at a
+   `placeholder: true` node for the old name, not at a node that looks real; the renamed action
+   appears as a real node.
+4. Record the outcome (date, module, build) on the issue.
 
 The [decision record](docs/adr/) and [`GLOSSARY.md`](GLOSSARY.md) **are** published — every issue in
 the automatic-refresh backlog is written against their vocabulary. Real names in them are

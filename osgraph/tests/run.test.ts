@@ -29,7 +29,9 @@ import {
   makeOpenWithRetry,
   waitForStudioIdle
 } from "../src/run/opener.js";
-import { formatAge, refreshModule, requireOtherCaptures, runDirFor, runScope, type RunCommonOptions } from "../src/run/run.js";
+import { decideChange } from "../src/run/changed.js";
+import { rawManifestPath, rawModuleDir } from "../src/rebuild/raw.js";
+import { formatAge, refreshModule, refreshModules, requireOtherCaptures, runDirFor, runScope, type RunCommonOptions } from "../src/run/run.js";
 import { OsgraphToolError, type ServiceStudioApp } from "../src/servicestudio/types.js";
 import { FakeReader, syntheticWideModule, tokenExpiredError, type FakeModule } from "./rebuild.fake.js";
 
@@ -102,10 +104,13 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
   const openScript = new Map(Object.entries(options.openScript ?? {}).map(([k, v]) => [k, [...v]]));
   const closeScript = new Map(Object.entries(options.closeScript ?? {}).map(([k, v]) => [k, [...v]]));
   let maxRunOwned = 0;
+  /** Every raw input osopener's `openModule` handler received. */
+  const openInputs: Record<string, unknown>[] = [];
 
   const tools = {
     async open(input: Record<string, unknown>): Promise<unknown> {
       const name = String(input.name);
+      openInputs.push(input);
       events.push(`open:${name}`);
       const scripted = openScript.get(name)?.shift();
       if (scripted !== undefined) return scripted;
@@ -153,8 +158,8 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
   // Track the most tabs this process ever owned at once.
   const opener: OsopenerAdapter = {
     ...adapter,
-    open: async (m) => {
-      const r = await adapter.open(m);
+    open: async (m, o) => {
+      const r = await adapter.open(m, o);
       maxRunOwned = Math.max(maxRunOwned, adapter.ownedModules().length);
       return r;
     },
@@ -174,6 +179,7 @@ function fakeStudio(modules: FakeModule[], options: StudioOptions = {}) {
     studio,
     reader,
     events,
+    openInputs,
     inFlightAtClose,
     screenshots,
     opener,
@@ -889,6 +895,302 @@ describe("refreshModule: --module M", () => {
 });
 
 /* -------------------------------------------------------------------------------------------- */
+/* #65: --modules and --changed                                                                  */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("decideChange: the one comparison behind --changed", () => {
+  it("equal version is the only unchanged case", () => {
+    expect(decideChange({ exists: true, version: "1.0" }, "1.0")).toMatchObject({ read: false, reason: "unchanged" });
+    expect(decideChange({ exists: true, version: "1.0" }, "1.1")).toMatchObject({ read: true, reason: "changed" });
+  });
+  it("an unknown version is never unchanged, on either side", () => {
+    expect(decideChange({ exists: true, version: null }, "1.0")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: null }, null)).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "1.0" }, undefined)).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "1.0" }, "")).toMatchObject({ read: true, reason: "unknown" });
+  });
+  it("no capture is a read", () => {
+    expect(decideChange({ exists: false, version: null }, "1.0")).toMatchObject({ read: true, reason: "no capture" });
+  });
+  it('"0" is unknown on either side (a recent-list open lists version "0"), so "0" == "0" is still a read', () => {
+    expect(decideChange({ exists: true, version: "0" }, "0")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "0" }, "8")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "8" }, "0")).toMatchObject({ read: true, reason: "unknown" });
+    expect(decideChange({ exists: true, version: "8" }, "8")).toMatchObject({ read: false, reason: "unchanged" });
+  });
+});
+
+describe("osgraph run opens through Open from Environment", () => {
+  it("runScope passes source 'environment' on every open", async () => {
+    const s = fakeStudio(mods());
+    await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
+    expect(s.openInputs.length).toBeGreaterThan(0);
+    for (const input of s.openInputs) expect(input.source).toBe("environment");
+  });
+
+  it("refreshModules (--changed) passes source 'environment' on every open", async () => {
+    const graphDir = tmp();
+    const scope = { name: "demo", modules: ["alpha", "beta"] };
+    await runScope({ ...common(graphDir, fakeStudio(mods().slice(0, 2)), []), scope });
+    const s = fakeStudio(mods().slice(0, 2));
+    await refreshModules({ ...common(graphDir, s, [], T1), scope, changed: true });
+    expect(s.openInputs.map((i) => [i.name, i.source])).toEqual([
+      ["alpha", "environment"],
+      ["beta", "environment"]
+    ]);
+  });
+
+  it("the adapter omits source when the caller gives none (osopener's default applies)", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const adapter = createOsopenerAdapter(
+      {
+        async open(input) {
+          inputs.push(input);
+          return { opened: true, alreadyOpen: false };
+        },
+        async close() {
+          return { closed: true };
+        }
+      },
+      "fake-dist"
+    );
+    await adapter.open("alpha");
+    await adapter.open("beta", { source: "environment" });
+    expect("source" in inputs[0]).toBe(false);
+    expect(inputs[1].source).toBe("environment");
+  });
+});
+
+describe("osgraph run opens through Open from Environment", () => {
+  it("runScope passes source 'environment' on every open", async () => {
+    const s = fakeStudio(mods());
+    await runScope({ ...common(tmp(), s, []), maxOpen: 2 });
+    expect(s.openInputs.length).toBeGreaterThan(0);
+    for (const input of s.openInputs) expect(input.source).toBe("environment");
+  });
+
+  it("refreshModules (--changed) passes source 'environment' on every open", async () => {
+    const graphDir = tmp();
+    const scope = { name: "demo", modules: ["alpha", "beta"] };
+    await runScope({ ...common(graphDir, fakeStudio(mods().slice(0, 2)), []), scope });
+    const s = fakeStudio(mods().slice(0, 2));
+    await refreshModules({ ...common(graphDir, s, [], T1), scope, changed: true });
+    expect(s.openInputs.map((i) => [i.name, i.source])).toEqual([
+      ["alpha", "environment"],
+      ["beta", "environment"]
+    ]);
+  });
+
+  it("the adapter omits source when the caller gives none (osopener's default applies)", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const adapter = createOsopenerAdapter(
+      {
+        async open(input) {
+          inputs.push(input);
+          return { opened: true, alreadyOpen: false };
+        },
+        async close() {
+          return { closed: true };
+        }
+      },
+      "fake-dist"
+    );
+    await adapter.open("alpha");
+    await adapter.open("beta", { source: "environment" });
+    expect("source" in inputs[0]).toBe(false);
+    expect(inputs[1].source).toBe("environment");
+  });
+});
+
+describe("refreshModules: --changed", () => {
+  const readModules = (s: ReturnType<typeof fakeStudio>): Set<string> =>
+    new Set(s.reader.calls.filter((c) => c.module !== "*").map((c) => c.module));
+  const openCloseEvents = (s: ReturnType<typeof fakeStudio>): string[] =>
+    s.events.filter((e) => e.startsWith("open:") || e.startsWith("close:"));
+  const scope3 = { name: "demo", modules: ["alpha", "beta", "gamma"] };
+  async function baseline(): Promise<string> {
+    const graphDir = tmp();
+    await runScope({ ...common(graphDir, fakeStudio(mods().slice(0, 3)), []), scope: scope3 });
+    return graphDir;
+  }
+
+  it("reads only the module whose listed version changed (1 of 3), opens and closes each tab it opened", async () => {
+    const graphDir = await baseline();
+    const fresh = mods().slice(0, 3);
+    fresh[1].app.version = "2.0";
+    const s = fakeStudio(fresh);
+    const logs: string[] = [];
+    const result = await refreshModules({ ...common(graphDir, s, logs, T1), scope: scope3, changed: true });
+    expect(readModules(s)).toEqual(new Set(["beta"]));
+    expect(result.rows.map((r) => [r.module, r.reason, r.read])).toEqual([
+      ["alpha", "unchanged", false],
+      ["beta", "changed", true],
+      ["gamma", "unchanged", false]
+    ]);
+    expect(result.readCount).toBe(1);
+    expect(result.reextract).toBeDefined();
+    expect(readStage(graphDir, "demo").entries).toEqual([]);
+    expect(openCloseEvents(s)).toEqual(["open:alpha", "close:alpha", "open:beta", "close:beta", "open:gamma", "close:gamma"]);
+    expect(s.inFlightAtClose.every((n) => n === 0)).toBe(true);
+    expect(logs.some((l) => l.includes("beta") && l.includes("changed"))).toBe(true);
+    // The re-read capture now records the new version, so the next --changed run reads nothing.
+    const s2 = fakeStudio(fresh);
+    const again = await refreshModules({ ...common(graphDir, s2, [], T1), scope: scope3, changed: true });
+    expect(again.readCount).toBe(0);
+    expect(readModules(s2)).toEqual(new Set());
+  });
+
+  it("an old-schema manifest (no version) is read, never reused", async () => {
+    const graphDir = await baseline();
+    const mp = rawManifestPath(graphDir, "demo", "alpha");
+    const m = JSON.parse(read(mp)) as Record<string, unknown>;
+    m.schemaVersion = 1;
+    delete m.moduleKey;
+    delete m.moduleVersion;
+    delete m.moduleIdentityReason;
+    writeFileSync(mp, JSON.stringify(m));
+    const s = fakeStudio(mods().slice(0, 3));
+    const result = await refreshModules({ ...common(graphDir, s, [], T1), scope: scope3, changed: true });
+    expect(readModules(s)).toEqual(new Set(["alpha"]));
+    expect(result.rows.find((r) => r.module === "alpha")).toMatchObject({ reason: "unknown", read: true });
+  });
+
+  /** Rewrites the `moduleVersion` a capture recorded; `undefined` deletes the field. */
+  function setCaptureVersion(graphDir: string, module: string, version: string | undefined): void {
+    const mp = rawManifestPath(graphDir, "demo", module);
+    const m = JSON.parse(read(mp)) as Record<string, unknown>;
+    if (version === undefined) delete m.moduleVersion;
+    else m.moduleVersion = version;
+    writeFileSync(mp, JSON.stringify(m));
+  }
+
+  it('a listed or captured version of "0", "" or missing is unknown: re-read, with one warning line; equal real versions are skipped', async () => {
+    const graphDir = await baseline(); // every capture records "1.0"
+    // alpha: Studio lists "0" now (recent-list open) while the capture says "1.0".
+    // beta : capture says "0", Studio lists "0" too — "0" == "0" must NOT be unchanged.
+    // gamma: equal real versions ("1.0" both sides) — the only skip.
+    setCaptureVersion(graphDir, "beta", "0");
+    const fresh = mods().slice(0, 3);
+    fresh[0].app.version = "0";
+    fresh[1].app.version = "0";
+    const s = fakeStudio(fresh);
+    const logs: string[] = [];
+    const result = await refreshModules({ ...common(graphDir, s, logs, T1), scope: scope3, changed: true });
+    expect(result.rows.map((r) => [r.module, r.reason, r.read])).toEqual([
+      ["alpha", "unknown", true],
+      ["beta", "unknown", true],
+      ["gamma", "unchanged", false]
+    ]);
+    expect(readModules(s)).toEqual(new Set(["alpha", "beta"]));
+    const warnings = logs.filter((l) => l.startsWith("WARNING:"));
+    expect(warnings).toEqual(['WARNING: 2 module(s) re-read because their version was unknown ("0", empty or missing)']);
+  });
+
+  it("an empty listed version and a missing captured version are unknown too", async () => {
+    const graphDir = await baseline();
+    setCaptureVersion(graphDir, "beta", undefined);
+    const fresh = mods().slice(0, 3);
+    fresh[0].app.version = "";
+    const s = fakeStudio(fresh);
+    const logs: string[] = [];
+    const result = await refreshModules({ ...common(graphDir, s, logs, T1), scope: scope3, changed: true });
+    expect(result.rows.map((r) => [r.module, r.reason, r.read])).toEqual([
+      ["alpha", "unknown", true],
+      ["beta", "unknown", true],
+      ["gamma", "unchanged", false]
+    ]);
+    expect(logs.filter((l) => l.startsWith("WARNING:"))).toEqual([
+      'WARNING: 2 module(s) re-read because their version was unknown ("0", empty or missing)'
+    ]);
+  });
+
+  it("no unknown-version warning when every version is known", async () => {
+    const graphDir = await baseline();
+    const logs: string[] = [];
+    await refreshModules({ ...common(graphDir, fakeStudio(mods().slice(0, 3)), logs, T1), scope: scope3, changed: true });
+    expect(logs.some((l) => l.startsWith("WARNING:"))).toBe(false);
+  });
+
+  it("a module with no capture is read and reported as no capture", async () => {
+    const graphDir = await baseline();
+    rmSync(rawModuleDir(graphDir, "demo", "gamma"), { recursive: true, force: true });
+    const s = fakeStudio(mods().slice(0, 3));
+    const result = await refreshModules({ ...common(graphDir, s, [], T1), scope: scope3, changed: true });
+    expect(readModules(s)).toEqual(new Set(["gamma"]));
+    expect(result.rows.find((r) => r.module === "gamma")).toMatchObject({ reason: "no capture", read: true });
+    expect(result.reextract).toBeDefined();
+  });
+
+  it("leaves a user-opened tab open and does not read it when unchanged", async () => {
+    const graphDir = await baseline();
+    const s = fakeStudio(mods().slice(0, 3), { userOpen: ["beta"] });
+    const result = await refreshModules({ ...common(graphDir, s, [], T1), scope: scope3, changed: true });
+    expect(readModules(s)).toEqual(new Set());
+    expect(openCloseEvents(s)).toEqual(["open:alpha", "close:alpha", "open:gamma", "close:gamma"]);
+    expect(result.rows.find((r) => r.module === "beta")).toMatchObject({ openedHere: false, reason: "unchanged" });
+  });
+
+  it("skips the re-extract when an open fails, and says so", async () => {
+    const graphDir = await baseline();
+    const s = fakeStudio(mods().slice(0, 3), {
+      openScript: { beta: [{ opened: false, error: { code: "UIA_ELEMENT_NOT_FOUND", message: "row not found" } }] }
+    });
+    const before = read(resolveScopeArtifactPaths(graphDir, "demo").graph);
+    const result = await refreshModules({ ...common(graphDir, s, [], T1), scope: scope3, changed: true });
+    expect(result.failures).toBe(1);
+    expect(result.reextract).toBeUndefined();
+    expect(read(resolveScopeArtifactPaths(graphDir, "demo").graph)).toBe(before);
+  });
+});
+
+describe("refreshModules: --modules", () => {
+  it("validates names case-exactly against the scope before touching Studio", async () => {
+    const s = fakeStudio(mods());
+    await expect(refreshModules({ ...common(tmp(), s, []), modules: ["Beta"] })).rejects.toMatchObject({ code: "SCOPE_INVALID" });
+    await expect(refreshModules({ ...common(tmp(), s, []), modules: ["alpha", "nope"] })).rejects.toMatchObject({ code: "SCOPE_INVALID" });
+    expect(s.events).toEqual([]);
+  });
+
+  it("requires a capture for every module not named, before touching Studio", async () => {
+    const s = fakeStudio(mods());
+    await expect(refreshModules({ ...common(tmp(), s, []), modules: ["alpha", "beta"] })).rejects.toMatchObject({
+      code: "RUN_CAPTURES_MISSING"
+    });
+    expect(s.events).toEqual([]);
+  });
+
+  it("opens and reads only the named modules, then one re-extract equal to a plain offline one", async () => {
+    const graphDir = tmp();
+    await runScope({ ...common(graphDir, fakeStudio(mods()), []) });
+    const changed = [
+      syntheticWideModule(2, "alpha"),
+      syntheticWideModule(3, "beta"),
+      syntheticWideModule(2, "gamma"),
+      syntheticWideModule(4, "delta")
+    ];
+    const s = fakeStudio(changed);
+    const result = await refreshModules({ ...common(graphDir, s, [], T1), modules: ["beta", "delta"] });
+    expect(new Set(s.reader.calls.filter((c) => c.module !== "*").map((c) => c.module))).toEqual(new Set(["beta", "delta"]));
+    expect(s.events.filter((e) => e.startsWith("open:") || e.startsWith("close:"))).toEqual([
+      "open:beta",
+      "close:beta",
+      "open:delta",
+      "close:delta"
+    ]);
+    expect(s.inFlightAtClose.every((n) => n === 0)).toBe(true);
+    expect(result.rows.map((r) => [r.module, r.reason])).toEqual([
+      ["beta", "requested"],
+      ["delta", "requested"]
+    ]);
+    const paths = resolveScopeArtifactPaths(graphDir, "demo");
+    const after = read(paths.graph);
+    expect(after).toContain("A_Act02");
+    reextractScope({ scope: SCOPE, graphDir, snapshotPath: paths.graph, rules, now: () => T1 });
+    expect(read(paths.graph)).toBe(after);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
 /* The CLI: the site URL comes first                                                             */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -896,7 +1198,9 @@ describe("osgraph run (CLI)", () => {
   const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
   const runCli = (args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> =>
     new Promise((resolve) => {
-      const child = spawn(process.execPath, [cli, ...args], { env: { ...process.env, ...env } });
+      // #64: a private lockfile per spawn, so parallel test files never contend on the machine-wide default.
+      const lock = join(mkdtempSync(join(tmpdir(), "osgraph-run-lock-")), "studio.lock");
+      const child = spawn(process.execPath, [cli, ...args], { env: { ...process.env, OSGRAPH_STUDIO_LOCK: lock, ...env } });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d) => (stdout += String(d)));
@@ -933,6 +1237,49 @@ describe("osgraph run (CLI)", () => {
     expect(existsSync(join(root, "graphs", "demo", "stage"))).toBe(false);
   }, 30_000);
 
+  it("fails closed with BUSY, before the site or osopener, when another process holds the Studio lock (#64)", async () => {
+    const root = tmp();
+    const scopesDir = join(root, "scopes");
+    mkdirSync(scopesDir, { recursive: true });
+    writeFileSync(join(scopesDir, "demo.json"), JSON.stringify({ name: "demo", modules: ["alpha"] }));
+    const lock = join(root, "held.lock");
+    // this test process is alive, so the lock is a live holder's
+    const held = { pid: process.pid, command: "mcp rebuild demo", startedAt: "2026-11-21T10:00:00.000Z" };
+    writeFileSync(lock, JSON.stringify(held));
+    const r = await runCli(["run", "--scope", "demo"], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_SCOPES_DIR: scopesDir,
+      OSGRAPH_GRAPH_DIR: join(root, "graphs"),
+      OSGRAPH_OSOPENER_DIST: join(root, "no-osopener"),
+      OSGRAPH_PROGRESS_SITE: "off",
+      OSGRAPH_STUDIO_LOCK: lock
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("BUSY");
+    expect(r.stderr).toContain(`pid ${process.pid}`);
+    expect(r.stderr).toContain("mcp rebuild demo");
+    expect(r.stderr).not.toContain("OSOPENER_UNAVAILABLE"); // refused before osopener was even loaded
+    expect(JSON.parse(readFileSync(lock, "utf8"))).toEqual(held); // the holder's lock is untouched
+  }, 30_000);
+
+  it("releases the Studio lock on its failure path (#64)", async () => {
+    const root = tmp();
+    const scopesDir = join(root, "scopes");
+    mkdirSync(scopesDir, { recursive: true });
+    writeFileSync(join(scopesDir, "demo.json"), JSON.stringify({ name: "demo", modules: ["alpha"] }));
+    const lock = join(root, "free.lock");
+    const r = await runCli(["run", "--scope", "demo"], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_SCOPES_DIR: scopesDir,
+      OSGRAPH_GRAPH_DIR: join(root, "graphs"),
+      OSGRAPH_OSOPENER_DIST: join(root, "no-osopener"),
+      OSGRAPH_PROGRESS_SITE: "off",
+      OSGRAPH_STUDIO_LOCK: lock
+    });
+    expect(r.stderr).toContain("OSOPENER_UNAVAILABLE");
+    expect(existsSync(lock)).toBe(false);
+  }, 30_000);
+
   it("rejects a bad --max-open as a usage error", async () => {
     const r = await runCli(["run", "--scope", "demo", "--max-open", "0"], {
       OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
@@ -940,6 +1287,30 @@ describe("osgraph run (CLI)", () => {
     });
     expect(r.code).toBe(64);
     expect(r.stderr).toContain("--max-open must be an integer >= 1");
+  });
+
+    it.each([
+    [["--module", "a", "--changed"], "cannot be combined"],
+    [["--module", "a", "--modules", "b"], "cannot be combined"],
+    [["--modules"], "--modules needs"],
+    [["--changed=yes"], "--changed takes no value"]
+  ])("rejects %j as a usage error", async (args, text) => {
+    const r = await runCli(["run", "--scope", "demo", ...args], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_PROGRESS_SITE: "off"
+    });
+    expect(r.code).toBe(64);
+    expect(r.stderr).toContain(text);
+  });
+
+  it("OSGRAPH_DISABLE_CHANGED=1 turns --changed into a clear error", async () => {
+    const r = await runCli(["run", "--scope", "demo", "--changed"], {
+      OSGRAPH_SERVICESTUDIO_URL: "http://127.0.0.1:9/mcp",
+      OSGRAPH_PROGRESS_SITE: "off",
+      OSGRAPH_DISABLE_CHANGED: "1"
+    });
+    expect(r.code).toBe(64);
+    expect(r.stderr).toContain("CHANGED_DISABLED");
   });
 
   it.each([" ", "0x10", "1e2", "-1"])("rejects --max-consecutive-failures %j instead of reading it as a number", async (value) => {

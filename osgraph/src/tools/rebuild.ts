@@ -7,6 +7,7 @@ import {
   type RebuildResult,
   type StageOutcome
 } from "../rebuild/rebuild.js";
+import type { StudioLockHandle } from "../lock/studioLock.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
 import { ensureSite, siteInfo, type SiteInfo } from "../progress/site.js";
 import { writeTimings } from "../progress/timings.js";
@@ -126,7 +127,13 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
       }
       // Declared outside the try so the catch below can mark where the run died.
       let site: Awaited<ReturnType<typeof ensureSite>> | undefined;
+      let studioHold: StudioLockHandle | undefined;
       try {
+        // #64: the cross-process lock, taken before the first Studio call (and before the site is
+        // raised, so a BUSY refusal leaves nothing behind). A second *process* fails closed with BUSY.
+        studioHold = ctx.studioLock.acquire(
+          `mcp rebuild ${input.scope}${input.module !== undefined ? ` --module ${input.module}` : ""}`
+        );
         const definition = ctx.scopeStore.read(input.scope);
 
         // Raised BEFORE any Service Studio call, so the page is already up and showing the whole
@@ -154,7 +161,8 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
             now: ctx.now,
             onProgress,
             fetchReferencedElements: fetchReferencedElements(ctx),
-            fetchConcurrency: ctx.config.fetchConcurrency
+            fetchConcurrency: ctx.config.fetchConcurrency,
+            skipKinds: ctx.config.skipKinds
           });
           // The snapshot and meta stay on disk: a tool response must never carry the whole graph.
           const { outcome: finalized, ...rest } = staged;
@@ -179,6 +187,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
           fetchReferencedElements: fetchReferencedElements(ctx),
           // OSG-016 §C1: the same width the client's gate is set to, from one config field.
           fetchConcurrency: ctx.config.fetchConcurrency,
+          skipKinds: ctx.config.skipKinds,
           // F0: capture every element text under `<graphDir>/<scope>/raw/`, so flow extraction can be
           // re-run offline (`reextract`) instead of re-reading the scope live.
           rawGraphDir: ctx.config.graphDir
@@ -197,6 +206,7 @@ export const rebuild: OsgraphTool<typeof inputSchema> = {
         );
         throw err;
       } finally {
+        studioHold?.release();
         ctx.rebuildGate.release();
       }
     });

@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveTokenFile } from "./doctor/token.js";
+import { parseSkipKinds, PRUNABLE_KINDS, type PrunableKind } from "./rebuild/readKinds.js";
 import type { OsgraphErrorCode } from "./types.js";
 
 /** Thrown by `loadConfig` when the environment cannot yield a usable configuration. */
@@ -21,7 +23,12 @@ export interface OsgraphConfig {
    * which raises the same `CONFIG_MISSING` / `CONFIG_INVALID` errors process start used to.
    */
   serviceStudioUrl: string | undefined;
-  /** Hook-saved session token file, read-only (ADR-0004). Undefined = interactive token mode. */
+  /**
+   * Hook-saved session token file, read-only (ADR-0004). `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` when it
+   * names an existing file; otherwise the nearest `token.txt` at or above the working directory (the
+   * same `resolveTokenFile` rule `osgraph doctor` and osopener use). Undefined only when neither is
+   * found = interactive token mode.
+   */
   tokenFile: string | undefined;
   /** Where snapshots live: `<graphDir>/<scope>/graph.json`. */
   graphDir: string;
@@ -40,6 +47,13 @@ export interface OsgraphConfig {
    * pre-OSG-016 serial behaviour**, which is the escape hatch if a different Studio build regresses.
    */
   fetchConcurrency: number;
+  /**
+   * Kinds a rebuild does not read (#69; `OSGRAPH_SKIP_KINDS`, e.g. `Structure,ClientAction`). Default
+   * none: the default is meant to come from a measured read-cost profile (`osgraph kinds`), and that
+   * measurement is a live-Studio step. Only `PRUNABLE_KINDS` are accepted; `Screen` and `Block` feed
+   * the extractor's flow index and cannot be switched off without changing other kinds' edges.
+   */
+  skipKinds: PrunableKind[];
   /** Live progress site. Raised automatically by `rebuild`/`reextract` unless disabled. */
   site: SiteConfig;
 }
@@ -78,6 +92,7 @@ export const ENV_GRAPH_DIR = "OSGRAPH_GRAPH_DIR";
 export const ENV_SCOPES_DIR = "OSGRAPH_SCOPES_DIR";
 export const ENV_GRAPHIFY_BIN = "OSGRAPH_GRAPHIFY_BIN";
 export const ENV_MAX_CONCURRENCY = "OSGRAPH_MAX_CONCURRENCY";
+export const ENV_SKIP_KINDS = "OSGRAPH_SKIP_KINDS";
 export const ENV_PROGRESS_SITE = "OSGRAPH_PROGRESS_SITE";
 export const ENV_PROGRESS_HOST = "OSGRAPH_PROGRESS_HOST";
 export const ENV_PROGRESS_PORT = "OSGRAPH_PROGRESS_PORT";
@@ -202,17 +217,31 @@ export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphCo
 
   const graphDir = nonEmpty(env[ENV_GRAPH_DIR]) ?? join(cwd, ".osgraph");
 
+  // Unlike the width knob, a bad kind list IS an error: silently ignoring a typo would run the full,
+  // slow rebuild the operator meant to avoid, and ignoring `Screen` would hide why it cannot be pruned.
+  const skip = parseSkipKinds(env[ENV_SKIP_KINDS]);
+  if (skip.rejected.length > 0) {
+    throw new OsgraphConfigError(
+      "CONFIG_INVALID",
+      `${ENV_SKIP_KINDS} names kind(s) that cannot be switched off: ${skip.rejected.join(", ")}. ` +
+        `Allowed: ${PRUNABLE_KINDS.join(", ")}.`
+    );
+  }
+
   const scopesDir =
     nonEmpty(env[ENV_SCOPES_DIR]) ??
     (exists(join(cwd, "osgraph")) ? join(cwd, "osgraph", "scopes") : join(cwd, "scopes"));
 
   return {
     serviceStudioUrl,
-    tokenFile: nonEmpty(env[ENV_SERVICESTUDIO_TOKEN_FILE]),
+    // One discovery rule for config and doctor: explicit existing file > nearest token.txt above cwd >
+    // the explicit (missing) path, which then fails TOKEN_EXPIRED > none (interactive).
+    tokenFile: resolveTokenFile(env, { cwd, exists }).path,
     graphDir,
     scopesDir,
     graphifyBin: nonEmpty(env[ENV_GRAPHIFY_BIN]) ?? "graphify",
     fetchConcurrency: parseFetchConcurrency(env[ENV_MAX_CONCURRENCY]),
+    skipKinds: skip.kinds,
     site: {
       enabled: !SITE_OFF.has((nonEmpty(env[ENV_PROGRESS_SITE]) ?? "on").toLowerCase()),
       host: nonEmpty(env[ENV_PROGRESS_HOST]) ?? DEFAULT_SITE_HOST,

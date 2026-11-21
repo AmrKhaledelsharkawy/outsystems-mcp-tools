@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { loadLayerRules } from "../src/layers/rules.js";
 import { rebuildScope, stageModule, type RebuildResult } from "../src/rebuild/rebuild.js";
 import { reextractScope } from "../src/reextract.js";
+import { listRawModules, rawManifestPath } from "../src/rebuild/raw.js";
 import { flowsPath, readFlowsState, requireFlows, type FlowsArtifact } from "../src/flows/index.js";
 import { metaPath } from "../src/graph/io.js";
 import { OsgraphToolError } from "../src/servicestudio/types.js";
@@ -164,6 +165,22 @@ describe("reextract reproduces a live rebuild offline", () => {
     expect(result.flowNodeCount).toBe(live.result.flows?.flowNodeCount);
     expect(result.missingCaptures).toEqual([]);
     expect(result.modules.map((m) => m.module)).toEqual(["demoportal", "x"]);
+  });
+
+  it("is byte-identical whether the captures are schema 2 or older schema 1 (#61)", async () => {
+    const live = await liveRebuild();
+    // Downgrade every manifest to schema 1: no identity fields, as an old capture would be.
+    for (const name of listRawModules(live.graphDir, "demo")) {
+      const path = rawManifestPath(live.graphDir, "demo", name);
+      const m = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      delete m.moduleKey;
+      delete m.moduleVersion;
+      delete m.moduleIdentityReason;
+      writeFileSync(path, JSON.stringify({ ...m, schemaVersion: 1 }), "utf8");
+    }
+    reextractScope({ scope, graphDir: live.graphDir, snapshotPath: live.snapshotPath, rules, now: fixedNow });
+    expect(readFileSync(live.snapshotPath, "utf8")).toBe(live.graph);
+    expect(JSON.parse(readFileSync(flowsPath(live.snapshotPath), "utf8"))).toEqual(live.flows);
   });
 
   it("differs from the live run only in meta's clock, never in the snapshot", async () => {

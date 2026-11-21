@@ -47,6 +47,10 @@ export interface SearchFlowsResult {
   hits: FlowHit[];
   /** Hits found before `limit` was applied. */
   totalHits: number;
+  /** Same as `totalHits`; the name shared with the other limited query tools (#70). */
+  total: number;
+  /** The `limit` that was applied (default 200). */
+  limit: number;
   truncated: boolean;
   flowsBuiltAt: string;
 }
@@ -167,6 +171,8 @@ export function searchArtifact(
     in: fields,
     hits,
     totalHits,
+    total: totalHits,
+    limit,
     truncated: totalHits > hits.length,
     flowsBuiltAt: artifact.builtAt
   };
@@ -183,7 +189,7 @@ export const searchFlows: OsgraphTool<typeof inputSchema> = {
     "statements of an unrecognised node type (`properties`). Matching is CASE-INSENSITIVE by default. " +
     "Each hit names the module, the element, the action, the node, the field and the matched text verbatim, so a " +
     "nodeId can be handed straight to getFlow. Expressions are never parsed — this regex IS the query over them. " +
-    "Returns at most `limit` hits (default 200) with `totalHits` reporting the true count. " +
+    "Returns at most `limit` hits (default 200) with `totalHits` (alias `total`) reporting the true count and `truncated` saying whether any were dropped. " +
     "Errors: INPUT_INVALID (including an invalid regex), SCOPE_INVALID (a scope name that is not a single safe path segment), SCOPE_NOT_FOUND, FLOWS_NOT_BUILT " +
     "(run `osgraph reextract --scope <name>`, which is offline and takes seconds).",
   inputSchema,

@@ -3,14 +3,20 @@ import { loadConfig, OsgraphConfigError, requireServiceStudioUrl, type OsgraphCo
 import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
+import { computeGraphStatus, formatGraphStatus } from "./status/graphStatus.js";
+import { auditScope, DEFAULT_K, DEFAULT_SEED, formatReport } from "./audit/index.js";
+import { buildKindReport, formatKindReport } from "./report/kinds.js";
 import { readScope } from "./scopes/index.js";
+import { renderDoctorReport, runDoctor } from "./doctor/doctor.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
+import { CliUsageError, formatQueryResponse, isQueryCommand, runQueryCommand, type QueryCommand } from "./cli/query.js";
+import { defaultStudioLockPath, createFileStudioLock } from "./lock/studioLock.js";
 import { closeSite, ensureSite } from "./progress/site.js";
 import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js";
 import { createServiceStudioClient } from "./servicestudio/token.js";
-import { createSharedSessionFactory } from "./tools/tool.js";
-import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, runScope } from "./run/run.js";
+import { createSharedSessionFactory, createToolContext } from "./tools/tool.js";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, refreshModules, runScope } from "./run/run.js";
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
@@ -90,6 +96,58 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+/** #66 `osgraph status`: offline, read-only freshness report for one scope's local snapshot. */
+function runStatus(config: OsgraphConfig, options: Record<string, string>): void {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `status needs --scope <name>.
+${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const result = computeGraphStatus(graphDir, scope.name, scope.modules);
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(result, null, 2)}
+` : `${formatGraphStatus(result)}
+`);
+}
+
+/** #69 `osgraph kinds`: the offline read-cost report. */
+async function runKinds(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `kinds needs --scope <name>.\n${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const report = buildKindReport({
+    graphDir,
+    scope: scope.name,
+    snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name)
+  });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}\n` : `${formatKindReport(report)}\n`);
+}
+
+/** #70 `osgraph impact | flow | path`: offline mirrors of the MCP query tools. */
+async function runQuery(command: QueryCommand, config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const ctx = createToolContext(options["graph-dir"] !== undefined ? { ...config, graphDir: options["graph-dir"] } : config);
+  let response;
+  try {
+    response = await runQueryCommand(command, options, ctx);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      fail(EXIT_USAGE, `${err.message}\n${USAGE}`);
+      return;
+    }
+    throw err;
+  }
+  process.stdout.write(
+    options.json === "true" ? `${JSON.stringify(response, null, 2)}\n` : `${formatQueryResponse(command, response)}\n`
+  );
+  if (response.error) process.exitCode = EXIT_FATAL;
+}
+
 /** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
 function intFlag(value: string | undefined, fallback: number): number | null {
   if (value === undefined) return fallback;
@@ -98,6 +156,32 @@ function intFlag(value: string | undefined, fallback: number): number | null {
   if (!/^\d+$/.test(value)) return null;
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
+}
+
+/** #67 `osgraph audit`: offline accuracy audit of a scope's snapshot against its raw texts. */
+function runAudit(config: OsgraphConfig, options: Record<string, string>): void {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `audit needs --scope <name>.
+${USAGE}`);
+    return;
+  }
+  const k = intFlag(options.k, DEFAULT_K);
+  if (k === null || k < 1) {
+    fail(EXIT_USAGE, `--k must be an integer >= 1.
+${USAGE}`);
+    return;
+  }
+  if (options.seed === "true") {
+    fail(EXIT_USAGE, `--seed needs a value.
+${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const report = auditScope({ graphDir, scope: scope.name, k, seed: options.seed ?? DEFAULT_SEED });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}
+` : formatReport(report));
 }
 
 /**
@@ -115,6 +199,29 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     fail(EXIT_USAGE, `--module needs a module name.\n${USAGE}`);
     return;
   }
+  if (options.modules === "true" || options.modules === "") {
+    fail(EXIT_USAGE, `--modules needs a comma-separated list of module names.
+${USAGE}`);
+    return;
+  }
+  if (options.module !== undefined && (options.modules !== undefined || options.changed !== undefined)) {
+    fail(EXIT_USAGE, `--module cannot be combined with --modules or --changed.
+${USAGE}`);
+    return;
+  }
+  if (options.changed !== undefined && options.changed !== "true") {
+    fail(EXIT_USAGE, `--changed takes no value.
+${USAGE}`);
+    return;
+  }
+  if (options.changed === "true" && process.env.OSGRAPH_DISABLE_CHANGED === "1") {
+    fail(
+      EXIT_USAGE,
+      "CHANGED_DISABLED: --changed is switched off (OSGRAPH_DISABLE_CHANGED=1), because the listed-module-version signal " +
+        "failed or has not passed its live probe. Use --modules <names> or a full run instead."
+    );
+    return;
+  }
   const maxOpen = intFlag(options["max-open"], DEFAULT_MAX_OPEN);
   const maxFailures = intFlag(options["max-consecutive-failures"], DEFAULT_MAX_CONSECUTIVE_FAILURES);
   if (maxOpen === null || maxOpen < 1 || maxFailures === null) {
@@ -127,6 +234,50 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     process.stderr.write(`${line}\n`);
   };
 
+  // #64: the cross-process Studio lock comes first: before the site is raised, before osopener is
+  // loaded, before any Studio call. A contender throws BUSY here and costs nothing. Released on every
+  // exit path: after the Studio work below, in the `finally`, on process exit, and on SIGINT/SIGTERM.
+  const studioHold = createFileStudioLock({ path: defaultStudioLockPath(process.env) }).acquire(
+    `osgraph run --scope ${scopeName}${options.module !== undefined ? ` --module ${options.module}` : ""}`
+  );
+  const onExit = (): void => studioHold.release();
+  const onSignal = (): void => {
+    studioHold.release();
+    process.exit(130);
+  };
+  process.on("exit", onExit);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  const releaseStudio = (): void => {
+    studioHold.release();
+    process.off("exit", onExit);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  };
+  try {
+    await runRunLocked(config, options, { scopeName, graphDir, scope, log, maxOpen, maxFailures }, releaseStudio);
+  } finally {
+    releaseStudio();
+  }
+}
+
+interface RunLockedArgs {
+  scopeName: string;
+  graphDir: string;
+  scope: ReturnType<typeof readScope>;
+  log: (line: string) => void;
+  maxOpen: number;
+  maxFailures: number;
+}
+
+/** The Studio-touching body of `run`; `releaseStudio` is called the moment the Studio work is over. */
+async function runRunLocked(
+  config: OsgraphConfig,
+  options: Record<string, string>,
+  args: RunLockedArgs,
+  releaseStudio: () => void
+): Promise<void> {
+  const { graphDir, scope, log, maxOpen, maxFailures } = args;
   // The URL is printed before any other work: a multi-hour run must never be unobservable.
   const site = await ensureSite({ ...config, graphDir });
   for (const line of site.banner.split("\n")) log(line);
@@ -152,14 +303,44 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     state: site.state,
     log,
     fetchConcurrency: config.fetchConcurrency,
+    skipKinds: config.skipKinds,
     fetchReferencedElements: process.env.OSGRAPH_FETCH_REFERENCED_ELEMENTS === "1"
   };
 
   let exitCode = 0;
   let payload: unknown;
   const lines: string[] = [];
-  if (options.module !== undefined) {
+  if (options.modules !== undefined || options.changed === "true") {
+    const result = await refreshModules({
+      ...common,
+      ...(options.modules !== undefined ? { modules: options.modules.split(",").map((m) => m.trim()).filter((m) => m !== "") } : {}),
+      changed: options.changed === "true",
+      maxOpen,
+      maxConsecutiveFailures: maxFailures
+    });
+    payload = result;
+    lines.push(
+      `scope '${result.scope}': ${result.readCount} module(s) read of ${result.rows.length} considered, ${result.failures} failure(s)`
+    );
+    for (const r of result.rows) {
+      const tagText = r.error !== undefined ? "FAILED " : r.read ? "read   " : "reused ";
+      const errText = r.error !== undefined ? ` -- ${r.error.code}: ${r.error.message}` : "";
+      lines.push(`  ${tagText} ${r.module}  [${r.reason}] ${r.detail}${errText}`);
+    }
+    if (result.stoppedEarly !== undefined) lines.push(`  STOPPED: ${result.stoppedEarly}`);
+    if (result.reextract !== undefined) {
+      lines.push(
+        `  graph.json  ${result.reextract.nodeCount} nodes, ${result.reextract.edgeCount} edges, ${result.reextract.violationCount} violation(s)`,
+        `  flows.json  ${result.reextract.flowActionCount} actions, ${result.reextract.flowNodeCount} flow nodes`
+      );
+    } else {
+      lines.push("  not re-extracted: fix the failures and run the same command again");
+      exitCode = 1;
+    }
+    lines.push(`  log ${result.logPath}`);
+  } else if (options.module !== undefined) {
     const result = await refreshModule({ ...common, module: options.module });
+    releaseStudio();
     payload = result;
     lines.push(
       `scope '${result.scope}': refreshed '${result.module}' (nodes ${result.staged.nodeCount}, edges ${result.staged.edgeCount}), ` +
@@ -171,6 +352,7 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
   } else {
     const result = await runScope({ ...common, maxOpen, maxConsecutiveFailures: maxFailures });
+    releaseStudio();
     payload = result;
     const staged = result.rows.filter((r) => r.outcome === "staged").length;
     lines.push(
@@ -209,6 +391,25 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
   process.exitCode = exitCode;
 }
 
+/** #63 `osgraph doctor`: read-only; exit 1 when any check fails. */
+async function runDoctorCommand(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  if (options.scope === "true" || options["graph-dir"] === "true") {
+    fail(EXIT_USAGE, `--scope and --graph-dir need a value.
+${USAGE}`);
+    return;
+  }
+  const report = await runDoctor({
+    config,
+    env: process.env,
+    cwd: process.cwd(),
+    ...(options.scope !== undefined ? { scope: options.scope } : {}),
+    ...(options["graph-dir"] !== undefined ? { graphDir: options["graph-dir"] } : {})
+  });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}
+` : renderDoctorReport(report));
+  process.exitCode = report.ok ? 0 : 1;
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 
 if (options.help === "true" || command === "help") {
@@ -224,6 +425,32 @@ if (options.help === "true" || command === "help") {
   if (config !== undefined) {
     if (command === "reextract") {
       runReextract(config, options).catch((err: unknown) => {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      });
+    } else if (command === "doctor") {
+      runDoctorCommand(config, options).catch((err: unknown) => {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      });
+    } else if (command === "status") {
+      try {
+        runStatus(config, options);
+      } catch (err) {
+        const code = (err as { code?: unknown } | null)?.code;
+        fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (command === "audit") {
+      try {
+        runAudit(config, options);
+      } catch (err) {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      }
+    } else if (command === "kinds") {
+      runKinds(config, options).catch((err: unknown) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
+      });
+    } else if (isQueryCommand(command)) {
+      runQuery(command, config, options).catch((err: unknown) => {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       });
     } else if (command === "run") {

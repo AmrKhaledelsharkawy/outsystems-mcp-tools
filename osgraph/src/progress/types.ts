@@ -14,6 +14,7 @@
  */
 
 import type { RebuildPhase } from "../rebuild/rebuild.js";
+import type { ModuleKindStats } from "../rebuild/readKinds.js";
 
 /** A module's state in the run, as the page colours its row. */
 export type ModuleState = "pending" | "running" | "done" | "failed";
@@ -133,6 +134,11 @@ export interface ModuleCost {
   phases: Partial<Record<RebuildPhase, number>>;
   nodes?: number;
   edges?: number;
+  /**
+   * Per-kind read cost in this module (#69): call count, total and p50/p95 latency per kind read.
+   * Latency here is one logical call, retry time included, so read it against the run's width.
+   */
+  kinds?: ModuleKindStats;
 }
 
 /** `<graphDir>/<scope>/timings.json`. */

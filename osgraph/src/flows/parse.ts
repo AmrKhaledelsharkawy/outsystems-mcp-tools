@@ -141,7 +141,13 @@ function actionKindFor(method: string, ownerKind: ElementKind | "module"): FlowA
       return "BlockAction";
     case "CreateClientAction":
       return ownerKind === "module" ? "ClientAction" : "ScreenAction";
+    // A Service Action text declares itself with `CreateServiceAction`. Its flow has the same shape
+    // as a server action's, and the graph already files service actions under kind ServerAction
+    // (`normalizeKind`), so the action keeps that kind and the element id it has in graph.json. The
+    // `<var>.Nodes.ToList().ForEach(x => x.Delete())` line that follows matches no statement form
+    // and is ignored, which is right: it only clears Studio's default nodes before re-creating them.
     case "CreateServerAction":
+    case "CreateServiceAction":
       return "ServerAction";
     case "CreateDataAction":
       return "DataAction";

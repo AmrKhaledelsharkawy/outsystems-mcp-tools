@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { canonicalJson, writeFileAtomic } from "../graph/io.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
 import { SCOPE_NAME_RE, assertScopeName } from "./name.js";
+import { didYouMean, suggestNames } from "../suggest.js";
 
 export { SCOPE_NAME_RE, assertScopeName };
 
@@ -82,13 +83,24 @@ export class ScopeStore {
     return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
-  /** Throws `SCOPE_NOT_FOUND` when the file is missing, `SCOPE_INVALID` when it is malformed. */
+  /** Names of the scope files on disk (no parsing), used for did-you-mean. Missing directory -> `[]`. */
+  private scopeNames(): string[] {
+    if (!existsSync(this.scopesDir)) return [];
+    return readdirSync(this.scopesDir)
+      .filter((f) => f.endsWith(".json") && !f.includes(".tmp-"))
+      .map((f) => f.slice(0, -".json".length))
+      .filter((n) => SCOPE_NAME_RE.test(n));
+  }
+
+  /** Throws `SCOPE_NOT_FOUND` (with ranked `suggestions`) when the file is missing, `SCOPE_INVALID` when it is malformed. */
   read(name: string): ScopeEntry {
     const path = this.scopePath(name);
     if (!existsSync(path)) {
-      throw new OsgraphToolError("SCOPE_NOT_FOUND", `scope '${name}' is not defined (expected ${path})`, {
+      const suggestions = suggestNames(name, this.scopeNames());
+      throw new OsgraphToolError("SCOPE_NOT_FOUND", `scope '${name}' is not defined (expected ${path}).${didYouMean(suggestions)}`, {
         scope: name,
-        path
+        path,
+        suggestions
       });
     }
     let parsed: unknown;

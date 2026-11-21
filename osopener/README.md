@@ -31,8 +31,8 @@ keyboard), because Service Studio exposes no API for opening a module.
 
 | Tool | Input | Does |
 |---|---|---|
-| `listOpenModules` | — | Lists every open module, plus a `tabs[]` row per module giving its **application** name and which Studio window holds its tab |
-| `openModule` | `name`, `focusPolicy?` | Opens a module by exact name; returns once `listApps` confirms it |
+| `listOpenModules` | — | Lists every open module, plus a `tabs[]` row per module giving its **application** name, which Studio window holds its tab, and `modified: true` when the tab carries Studio's `* ` unsaved-changes marker |
+| `openModule` | `name`, `focusPolicy?`, `source?` | Opens a module by exact name; returns once `listApps` confirms it |
 | `closeModule` | `name` | Closes a module's tab |
 | `focusStudio` | — | Brings Service Studio to the front. Opens nothing |
 
@@ -55,6 +55,12 @@ keystrokes unless it really has focus. For that one step:
 | `brief` (default) | The dialog takes the foreground for about a second (name + Enter), then your window gets it back. If Studio grabs the foreground again while the module loads, osopener returns it once more at the end, but only from a Studio window, never from another app you switched to |
 | `never` | Fails with `FOREGROUND_REQUIRED` and closes the dialog. Open that module once by hand; it then sits in the recent list, which opens fully in the background |
 
+`source` picks the path for a module that is not open yet. `recent` (default) clicks its
+recent-list entry when there is one, else uses *Open from Environment*. `environment` never
+looks at the recent list and always types the name into *Open from Environment* (so it needs
+`focusPolicy: brief`). Use it when you need the module's real server version: `listApps`
+reports that only for an environment open; a recent-list open reports version `"0"`.
+
 Avoid typing *into Service Studio* while a `brief` open runs: during that second your
 keystrokes and osopener's go to the same dialog.
 
@@ -74,7 +80,9 @@ keystrokes and osopener's go to the same dialog.
 work, so the guard lives in the code and cannot be configured away:
 
 - it **never** closes Service Studio itself;
-- it **never** closes a module with unsaved changes;
+- it **never** closes a module with unsaved changes: Studio labels such a tab
+  `* <Module> (<Application>)`, and a tab carrying that leading `* ` is refused with
+  `UNSAVED_CHANGES_DIALOG` before anything is clicked (the module is left open);
 - it **never** answers a save prompt — it cancels it through UI Automation (its Cancel
   button, else the window's own close), leaves the module open, and fails with
   `UNSAVED_CHANGES_DIALOG`.

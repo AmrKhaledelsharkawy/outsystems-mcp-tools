@@ -17,6 +17,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import type { RebuildPhase } from "../rebuild/rebuild.js";
+import type { ModuleKindStats } from "../rebuild/readKinds.js";
 import { SCOPE_NAME_RE } from "../scopes/name.js";
 import type { ModuleCost, TimingsFile } from "./types.js";
 
@@ -79,6 +80,7 @@ export interface TimingInput {
   phaseDurationsMs?: Partial<Record<RebuildPhase, number>>;
   nodeCount?: number;
   edgeCount?: number;
+  kinds?: ModuleKindStats;
 }
 
 /**
@@ -100,7 +102,8 @@ export function writeTimings(graphDir: string, scope: string, runs: readonly Tim
       ms: run.durationMs,
       phases: run.phaseDurationsMs ?? {},
       ...(run.nodeCount === undefined ? {} : { nodes: run.nodeCount }),
-      ...(run.edgeCount === undefined ? {} : { edges: run.edgeCount })
+      ...(run.edgeCount === undefined ? {} : { edges: run.edgeCount }),
+      ...(run.kinds === undefined || Object.keys(run.kinds).length === 0 ? {} : { kinds: run.kinds })
     };
   }
   const file: TimingsFile = { schemaVersion: 1, writtenAt: new Date().toISOString(), modules };

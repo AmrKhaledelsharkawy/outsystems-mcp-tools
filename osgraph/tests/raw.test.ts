@@ -6,12 +6,14 @@
  * `reextract` can disagree with a live rebuild without anybody noticing.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadLayerRules } from "../src/layers/rules.js";
 import { rebuildScope, stageModule } from "../src/rebuild/rebuild.js";
 import {
+  IDENTITY_UNKNOWN_NOT_LISTED,
+  IDENTITY_UNKNOWN_OLD_SCHEMA,
   RAW_SCHEMA_VERSION,
   RawCaptureError,
   RawModuleWriter,
@@ -21,6 +23,7 @@ import {
   rawModuleDir,
   rawRelativeFile,
   readRawModule,
+  recoverRawDir,
   type RawManifest
 } from "../src/rebuild/raw.js";
 import { demoPortalModule, fakeSession, syntheticXModule } from "./rebuild.fake.js";
@@ -127,12 +130,12 @@ describe("RawModuleWriter", () => {
 });
 
 describe("readRawModule failure modes", () => {
-  it("treats files without a manifest as an aborted capture, not a complete one", () => {
+  it("treats a never-finished capture as no capture: texts live in a staging directory, not in raw/<module>", () => {
     const dir = tmp();
     const w = new RawModuleWriter(dir, "s", "M");
     w.add({ kind: "ServerAction", manifestKind: "ServerAction", call: "getServerAction", name: "A", text: "x" });
     // No writeManifest: exactly the state an aborted rebuild leaves behind.
-    expect(existsSync(join(rawModuleDir(dir, "s", "M"), "ServerAction", "A.txt"))).toBe(true);
+    expect(existsSync(rawModuleDir(dir, "s", "M"))).toBe(false);
     expect(() => readRawModule(dir, "s", "M")).toThrowError(RawCaptureError);
     try {
       readRawModule(dir, "s", "M");
@@ -281,5 +284,228 @@ describe("rebuild captures raw texts", () => {
       return out;
     };
     expect(await run()).toEqual(await run());
+  });
+});
+
+describe("module identity in the manifest (#61)", () => {
+  const base = { moduleType: "Reactive", capturedAt: "2026-10-30T12:00:00.000Z", referencedOnlyCount: 0, skipped: [] };
+
+  it("round-trips the key and version exactly as given, under schema 2", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "k-123", moduleVersion: "7.4" });
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.moduleKey).toBe("k-123");
+    expect(manifest.moduleVersion).toBe("7.4");
+    expect(manifest.moduleIdentityReason).toBeNull();
+  });
+
+  it("stores null plus a reason, and does not fail, when the listing lacked them", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "", moduleVersion: undefined });
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.moduleKey).toBeNull();
+    expect(manifest.moduleVersion).toBeNull();
+    expect(manifest.moduleIdentityReason).toBe(IDENTITY_UNKNOWN_NOT_LISTED);
+  });
+
+  it("reads a schema-1 manifest as explicit unknown, leaving the file untouched", () => {
+    const dir = tmp();
+    new RawModuleWriter(dir, "s", "M").writeManifest({ ...base, moduleKey: "k", moduleVersion: "1" });
+    const path = rawManifestPath(dir, "s", "M");
+    const m = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    delete m.moduleKey;
+    delete m.moduleVersion;
+    delete m.moduleIdentityReason;
+    const old = JSON.stringify({ ...m, schemaVersion: 1 });
+    writeFileSync(path, old, "utf8");
+    const { manifest } = readRawModule(dir, "s", "M");
+    expect(manifest.moduleKey).toBeNull();
+    expect(manifest.moduleVersion).toBeNull();
+    expect(manifest.moduleIdentityReason).toBe(IDENTITY_UNKNOWN_OLD_SCHEMA);
+    expect(readFileSync(path, "utf8")).toBe(old);
+  });
+
+  it("a full rebuild persists the listing's key and version for every module", async () => {
+    const dir = tmp();
+    const session = fakeSession([demoPortalModule({ referencedOnly: false }), syntheticXModule()]);
+    await rebuildScope({
+      scope: { name: "demo", modules: ["demoportal", "x"] },
+      snapshotPath: join(dir, "demo", "graph.json"),
+      session,
+      rules,
+      retryDelayMs: 0,
+      rawGraphDir: dir
+    });
+    for (const name of listRawModules(dir, "demo")) {
+      const { manifest } = readRawModule(dir, "demo", name);
+      expect(manifest.moduleKey).toBe(`key-${name}`);
+      expect(manifest.moduleVersion).toBe("1.0");
+      expect(manifest.moduleIdentityReason).toBeNull();
+    }
+  });
+});
+
+/** Every file under `dir` (relative path -> bytes), for byte-identity assertions. */
+function snapshotDir(dir: string, prefix = ""): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) Object.assign(out, snapshotDir(join(dir, entry.name), `${rel}/`));
+    else out[rel] = readFileSync(join(dir, entry.name), "utf8");
+  }
+  return out;
+}
+
+const meta = { moduleType: "Reactive", capturedAt: "2026-10-30T12:00:00.000Z", referencedOnlyCount: 0, skipped: [] };
+
+function capture(dir: string, texts: Record<string, string>, finish = true): RawModuleWriter {
+  const w = new RawModuleWriter(dir, "s", "M");
+  for (const [name, text] of Object.entries(texts)) {
+    w.add({ kind: "ServerAction", manifestKind: "ServerAction", call: "getServerAction", name, text });
+  }
+  if (finish) w.writeManifest(meta);
+  return w;
+}
+
+describe("atomic per-module capture (ADR-0015)", () => {
+  it("a successful capture fully replaces the previous one", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a", B: "old-b" });
+    capture(dir, { A: "new-a", C: "new-c" });
+    const read = readRawModule(dir, "s", "M");
+    expect(read.texts.map((t) => [t.name, t.text]).sort()).toEqual([["A", "new-a"], ["C", "new-c"]]);
+    // No staging or aside directory is left beside the capture.
+    expect(readdirSync(join(rawModuleDir(dir, "s", "M"), ".."))).toEqual(["M"]);
+    expect(snapshotDir(rawModuleDir(dir, "s", "M"))["ServerAction/B.txt"]).toBeUndefined();
+  });
+
+  it("records a sha256 and byte length per text", () => {
+    const dir = tmp();
+    capture(dir, { A: "héllo" });
+    const entry = readRawModule(dir, "s", "M").manifest.texts[0];
+    expect(entry?.bytes).toBe(Buffer.byteLength("héllo", "utf8"));
+    expect(entry?.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("an abort mid-capture leaves the previous capture byte-identical and readable", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a", B: "old-b" });
+    const before = snapshotDir(rawModuleDir(dir, "s", "M"));
+    // Texts arrive, then the process "dies": the writer is never finished.
+    capture(dir, { A: "new-a", Z: "new-z" }, false);
+    expect(snapshotDir(rawModuleDir(dir, "s", "M"))).toEqual(before);
+    expect(readRawModule(dir, "s", "M").texts.map((t) => t.text).sort()).toEqual(["old-a", "old-b"]);
+    expect(listRawModules(dir, "s")).toEqual(["M"]);
+  });
+
+  it("leftover staging directories are never read, even one holding a finished manifest", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    const parent = join(rawModuleDir(dir, "s", "M"), "..");
+    const stale = join(parent, "%tmp-Other-1-1");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, "manifest.json"), JSON.stringify({ schemaVersion: RAW_SCHEMA_VERSION, module: "Other", texts: [] }), "utf8");
+    expect(listRawModules(dir, "s")).toEqual(["M"]);
+  });
+
+  it("a new capture of the same module clears that module's stale staging directory", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    capture(dir, { A: "never-finished" }, false);
+    const parent = join(rawModuleDir(dir, "s", "M"), "..");
+    expect(readdirSync(parent).filter((n) => n.startsWith("%tmp-"))).toHaveLength(1);
+    capture(dir, { A: "next" });
+    expect(readdirSync(parent)).toEqual(["M"]);
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("next");
+  });
+
+  it("recovers a swap killed between the two renames (old aside, no live capture)", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    const live = rawModuleDir(dir, "s", "M");
+    const before = snapshotDir(live);
+    renameSync(live, join(live, "..", "%old-M"));
+    expect(existsSync(live)).toBe(false);
+    expect(listRawModules(dir, "s")).toEqual(["M"]);
+    expect(snapshotDir(live)).toEqual(before);
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("old-a");
+  });
+
+  it("recovery at the next writer start restores the old capture, and a finished swap's aside is dropped", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    const live = rawModuleDir(dir, "s", "M");
+    renameSync(live, join(live, "..", "%old-M"));
+    capture(dir, { A: "newer" }, false); // the constructor recovers
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("old-a");
+    // Aside left beside a live capture (killed after the second rename, before the rm).
+    mkdirSync(join(live, "..", "%old-M"), { recursive: true });
+    recoverRawDir(dir, "s");
+    expect(readdirSync(join(live, "..")).filter((n) => n.startsWith("%old-"))).toEqual([]);
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("old-a");
+  });
+
+  it("refuses to swap in a capture whose text fails the hash check and keeps the previous capture", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    const before = snapshotDir(rawModuleDir(dir, "s", "M"));
+    const w = capture(dir, { A: "new-a" }, false);
+    const parent = join(rawModuleDir(dir, "s", "M"), "..");
+    const staged = readdirSync(parent).find((n) => n.startsWith("%tmp-M-"));
+    writeFileSync(join(parent, staged as string, "ServerAction", "A.txt"), "tampered", "utf8");
+    try {
+      w.writeManifest(meta);
+      throw new Error("expected RAW_FILE_CORRUPT");
+    } catch (err) {
+      expect((err as RawCaptureError).code).toBe("RAW_FILE_CORRUPT");
+    }
+    expect(snapshotDir(rawModuleDir(dir, "s", "M"))).toEqual(before);
+    expect(readdirSync(parent)).toEqual(["M"]);
+  });
+
+  it("readers reject a live capture whose file no longer matches its manifest hash", () => {
+    const dir = tmp();
+    capture(dir, { A: "old-a" });
+    writeFileSync(join(rawModuleDir(dir, "s", "M"), "ServerAction", "A.txt"), "tampered", "utf8");
+    try {
+      readRawModule(dir, "s", "M");
+      throw new Error("expected RAW_FILE_CORRUPT");
+    } catch (err) {
+      expect((err as RawCaptureError).code).toBe("RAW_FILE_CORRUPT");
+    }
+  });
+
+  it("still reads a capture written before hashes were recorded (no sha256 in the manifest)", () => {
+    const dir = tmp();
+    capture(dir, { A: "legacy" });
+    const path = rawManifestPath(dir, "s", "M");
+    const manifest = JSON.parse(readFileSync(path, "utf8")) as RawManifest;
+    for (const t of manifest.texts) delete t.sha256;
+    writeFileSync(path, JSON.stringify(manifest), "utf8");
+    expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("legacy");
+  });
+
+  it("a rebuild aborted by a kind-level read failure leaves the previous capture byte-identical", async () => {
+    const graphDir = join(tmp(), "graphs");
+    const sc = { name: "demo", modules: ["x"] };
+    const snapshotPath = join(graphDir, "demo", "graph.json");
+    await rebuildScope({ scope: sc, snapshotPath, session: fakeSession([syntheticXModule()]), rules, now: fixedNow, retryDelayMs: 0, rawGraphDir: graphDir });
+    const before = snapshotDir(rawModuleDir(graphDir, "demo", "x"));
+
+    const changed = syntheticXModule();
+    for (const key of Object.keys(changed.texts)) changed.texts[key] = `${changed.texts[key]}\n// changed`;
+    const failing = fakeSession([changed], { failures: { "getStructures:x:": Infinity } });
+    await expect(
+      rebuildScope({ scope: sc, snapshotPath, session: failing, rules, now: fixedNow, retryDelayMs: 0, rawGraphDir: graphDir })
+    ).rejects.toMatchObject({ code: "KIND_READ_FAILED" });
+    expect(snapshotDir(rawModuleDir(graphDir, "demo", "x"))).toEqual(before);
+    expect(readRawModule(graphDir, "demo", "x").manifest.module).toBe("x");
+
+    // A subsequent successful capture is the fully new one.
+    await rebuildScope({ scope: sc, snapshotPath, session: fakeSession([changed]), rules, now: fixedNow, retryDelayMs: 0, rawGraphDir: graphDir });
+    const after = snapshotDir(rawModuleDir(graphDir, "demo", "x"));
+    expect(after).not.toEqual(before);
+    expect(Object.values(after).some((t) => t.includes("// changed"))).toBe(true);
   });
 });

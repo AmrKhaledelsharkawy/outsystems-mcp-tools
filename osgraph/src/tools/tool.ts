@@ -1,3 +1,4 @@
+import { createFileStudioLock, defaultStudioLockPath, type StudioLock } from "../lock/studioLock.js";
 import { z, type ZodRawShape, type ZodType } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { OsgraphConfigError, requireServiceStudioUrl, type OsgraphConfig } from "../config.js";
@@ -78,6 +79,8 @@ export interface ToolContext {
   runGraphifyPath: (options: RunGraphifyPathOptions) => Promise<GraphifyPathResult>;
   /** Process-wide `rebuild` serialization (ADR-0007/F1, ADR-0013: budget-sharing, not a race). */
   rebuildGate: RebuildGate;
+  /** #64: cross-process Service Studio lock; taken by `rebuild` after the in-process gate. */
+  studioLock: StudioLock;
   /**
    * ADR-0004 secrecy: replaces every session token this process has held with `[redacted]`.
    * Identity until a servicestudio client exists (no token can have leaked before then).
@@ -152,6 +155,8 @@ export function createToolContext(config: OsgraphConfig, overrides: ToolContextO
     createSession: overrides.createSession ?? sharedSession,
     runGraphifyPath: overrides.runGraphifyPath ?? runGraphifyPath,
     rebuildGate: overrides.rebuildGate ?? createRebuildGate(),
+    studioLock:
+      overrides.studioLock ?? createFileStudioLock({ path: defaultStudioLockPath(overrides.env ?? process.env) }),
     redactSecrets: overrides.redactSecrets ?? ((text: string) => client?.redact(text) ?? text)
   };
   return ctx;

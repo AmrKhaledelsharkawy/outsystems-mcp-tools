@@ -16,14 +16,22 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: [
+      "tests/accuracy.gate.test.ts",
+      "tests/audit.test.ts",
       "tests/config.test.ts",
+      "tests/config.tokenDiscovery.test.ts",
+      "tests/doctor.test.ts",
+      "tests/extractor.nodeOrder.test.ts",
+      "tests/flows.serviceAction.test.ts",
       "tests/graph.test.ts",
       "tests/graphify.test.ts",
       "tests/layers.test.ts",
       "tests/progress.discover.test.ts",
       "tests/progress.server.test.ts",
       "tests/progress.state.test.ts",
+      "tests/query.ergonomics.test.ts",
       "tests/raw.test.ts",
+      "tests/readKinds.test.ts",
       "tests/rebuild.test.ts",
       "tests/reextract.test.ts",
       "tests/run.test.ts",
@@ -32,6 +40,8 @@ export default defineConfig({
       "tests/servicestudio.token.test.ts",
       "tests/servicestudio.unwrap.test.ts",
       "tests/smoke.test.ts",
+      "tests/status.test.ts",
+      "tests/studioLock.test.ts",
       "tests/tools.test.ts"
     ]
   }

@@ -62,6 +62,8 @@ export interface ModuleTab {
   /** Which top-level Studio window holds it — past ~30 modules Studio uses several. */
   windowHwnd: number;
   offscreen: boolean;
+  /** True when Studio marks the tab with a leading `* ` (unsaved changes); `module` excludes the marker. */
+  modified?: boolean;
 }
 
 export interface CloseModuleResult {

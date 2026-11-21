@@ -1,7 +1,8 @@
 /**
  * Session-token providers (S10). ADR-0004 / OSG-015 / OSG-004.
  *
- *  - File mode (`config.tokenFile` set): the hook-saved `token.txt` is the single source; osgraph only
+ *  - File mode (`config.tokenFile` set - explicitly, or discovered as the nearest `token.txt` at or
+ *    above the working directory by `loadConfig`): the hook-saved `token.txt` is the single source; osgraph only
  *    READS it, validates with `listApps`, and NEVER calls `createSessionToken`. Invalid / missing /
  *    empty -> `OsgraphToolError("TOKEN_EXPIRED")`. Mid-run auth failure -> re-read the file once.
  *  - Interactive mode (no token file): OSG-004 — one fresh `createSessionToken` per `acquire()`
@@ -19,6 +20,8 @@ import { OsgraphToolError, type ServiceStudioClientOptions, type TokenProvider }
 export interface TokenProviderOptions {
   /** Injectable file reader (tests). Defaults to `fs/promises.readFile(path, "utf8")`. */
   readFile?: (path: string) => Promise<string>;
+  /** One-line diagnostic sink (which token file is used - never its contents). Defaults to stderr. */
+  log?: (line: string) => void;
 }
 
 /** ADR-0004: the message is always exactly `TOKEN_EXPIRED_MESSAGE`; the reason goes into `details`. */
@@ -188,10 +191,15 @@ export function createTokenProvider(
   options: TokenProviderOptions = {}
 ): TokenProvider {
   const readFile = options.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
-  const provider: TokenProvider =
-    config.tokenFile !== undefined
-      ? new FileTokenProvider(config.tokenFile, client, readFile)
-      : new InteractiveTokenProvider(client);
+  const log = options.log ?? ((line: string) => process.stderr.write(`${line}
+`));
+  let provider: TokenProvider;
+  if (config.tokenFile !== undefined) {
+    log(`osgraph: session token file: ${config.tokenFile}`);
+    provider = new FileTokenProvider(config.tokenFile, client, readFile);
+  } else {
+    provider = new InteractiveTokenProvider(client);
+  }
   client.setTokenProvider(provider);
   return provider;
 }
@@ -212,6 +220,6 @@ export function createServiceStudioClient(
     // client's own default (4), so a caller that knows nothing about the config is still correct.
     maxConcurrent: options.maxConcurrent ?? config.fetchConcurrency
   });
-  const tokenProvider = createTokenProvider(config, client, { readFile: options.readFile });
+  const tokenProvider = createTokenProvider(config, client, { readFile: options.readFile, log: options.log });
   return { client, tokenProvider };
 }
