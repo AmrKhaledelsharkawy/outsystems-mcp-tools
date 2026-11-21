@@ -232,16 +232,17 @@ export class RunState {
   }
 
   /**
-   * The run aborted. The module that was running is marked failed so the page shows *where* it
-   * died rather than silently freezing on "running" — a rebuild aborts the whole walk on a
-   * kind-level read failure (ADR-0011), so there is exactly one such module.
+   * The run aborted. Every module that was running is marked failed so the page shows *where* it
+   * died rather than silently freezing on "running". A sequential rebuild has exactly one such
+   * module (it aborts the whole walk on a kind-level read failure, ADR-0011); a pipelined run
+   * (`--pipeline-depth` >= 2) can have several in flight, and none may be left looking alive.
    */
   failRun(code: string, message: string): void {
     this.complete = true;
     this.finalized = false;
     this.lastActivityAt = this.now();
-    const running = this.modules.find((m) => m.state === "running");
-    if (running) {
+    for (const running of this.modules) {
+      if (running.state !== "running") continue;
       running.state = "failed";
       running.error = code;
       running.errorMessage = message;
@@ -323,6 +324,9 @@ export class RunState {
     });
 
     const current = isActive ? this.currentInfo(now, expected) : null;
+    // Pipelined runs read several modules at once; `current` stays the first for the legacy view.
+    const runningNow = isActive ? this.modules.filter((x) => x.state === "running") : [];
+    const activeModules = runningNow.length > 0 ? runningNow.map((x) => this.infoOf(x, now, expected)) : undefined;
 
     // Weight by expected duration so one huge module cannot read as "1 of 30"; a module with no
     // history counts as the average known one.
@@ -377,6 +381,7 @@ export class RunState {
         etaAt: etaMs ? now + etaMs : null
       },
       current,
+      ...(activeModules !== undefined ? { activeModules } : {}),
       modules: rows,
       snapshot: {
         exists: graphM !== null,
@@ -392,7 +397,10 @@ export class RunState {
 
   private currentInfo(now: number, expected: Map<string, ModuleCost>): StatusCurrent | null {
     const m = this.modules.find((x) => x.state === "running");
-    if (!m) return null;
+    return m ? this.infoOf(m, now, expected) : null;
+  }
+
+  private infoOf(m: LiveModule, now: number, expected: Map<string, ModuleCost>): StatusCurrent {
     const exp = expected.get(m.module.toLowerCase());
     const elapsed = m.startedAt === null ? null : now - m.startedAt;
     const phaseElapsed = m.phaseStartedAt === null ? null : now - m.phaseStartedAt;

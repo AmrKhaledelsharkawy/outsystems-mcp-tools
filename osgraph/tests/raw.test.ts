@@ -420,6 +420,85 @@ describe("atomic per-module capture (ADR-0015)", () => {
     expect(readRawModule(dir, "s", "M").texts[0]?.text).toBe("next");
   });
 
+  describe("staging cleanup is exact-module (concurrent writers)", () => {
+    const add = (w: RawModuleWriter, name: string, text: string): void => {
+      w.add({ kind: "ServerAction", manifestKind: "ServerAction", call: "getServerAction", name, text });
+    };
+    const stagingNames = (dir: string): string[] =>
+      readdirSync(join(rawModuleDir(dir, "s", "X"), "..")).filter((n) => n.startsWith("%tmp-"));
+
+    it("starting X does not delete the unfinished staging of X-Y; both finish correctly", () => {
+      const dir = tmp();
+      const xy = new RawModuleWriter(dir, "s", "X-Y");
+      add(xy, "A", "xy-a");
+      const x = new RawModuleWriter(dir, "s", "X");
+      add(x, "B", "x-b");
+      expect(stagingNames(dir)).toHaveLength(2);
+      add(xy, "C", "xy-c");
+      xy.writeManifest(meta);
+      x.writeManifest(meta);
+      expect(readRawModule(dir, "s", "X-Y").texts.map((t) => t.text).sort()).toEqual(["xy-a", "xy-c"]);
+      expect(readRawModule(dir, "s", "X").texts.map((t) => t.text)).toEqual(["x-b"]);
+      expect(readdirSync(join(rawModuleDir(dir, "s", "X"), "..")).sort()).toEqual(["X", "X-Y"]);
+    });
+
+    it("starting X-Y does not delete the unfinished staging of X (reverse order)", () => {
+      const dir = tmp();
+      const x = new RawModuleWriter(dir, "s", "X");
+      add(x, "B", "x-b");
+      const xy = new RawModuleWriter(dir, "s", "X-Y");
+      add(xy, "A", "xy-a");
+      expect(stagingNames(dir)).toHaveLength(2);
+      x.writeManifest(meta);
+      xy.writeManifest(meta);
+      expect(readRawModule(dir, "s", "X").texts.map((t) => t.text)).toEqual(["x-b"]);
+      expect(readRawModule(dir, "s", "X-Y").texts.map((t) => t.text)).toEqual(["xy-a"]);
+    });
+
+    it("sibling modules whose encoded names share a numeric tail are not matched", () => {
+      const dir = tmp();
+      const a = new RawModuleWriter(dir, "s", "X-1");
+      add(a, "A", "a");
+      const b = new RawModuleWriter(dir, "s", "X");
+      add(b, "B", "b");
+      expect(stagingNames(dir)).toHaveLength(2);
+      a.writeManifest(meta);
+      b.writeManifest(meta);
+      expect(readRawModule(dir, "s", "X-1").texts[0]?.text).toBe("a");
+      expect(readRawModule(dir, "s", "X").texts[0]?.text).toBe("b");
+    });
+
+    it("stale exact-module staging is still removed, and other modules' staging is left alone", () => {
+      const dir = tmp();
+      const live = rawModuleDir(dir, "s", "X");
+      const parent = join(live, "..");
+      mkdirSync(parent, { recursive: true });
+      mkdirSync(join(parent, "%tmp-X-999-1"), { recursive: true });
+      mkdirSync(join(parent, "%tmp-X-Y-999-2"), { recursive: true });
+      const x = new RawModuleWriter(dir, "s", "X");
+      expect(existsSync(join(parent, "%tmp-X-999-1"))).toBe(false);
+      expect(existsSync(join(parent, "%tmp-X-Y-999-2"))).toBe(true);
+      x.abort();
+    });
+
+    it("an aborted writer leaves the previous live capture unchanged and does not disturb a sibling", () => {
+      const dir = tmp();
+      const prior = new RawModuleWriter(dir, "s", "X");
+      add(prior, "A", "old-a");
+      prior.writeManifest(meta);
+      const before = snapshotDir(rawModuleDir(dir, "s", "X"));
+      const xy = new RawModuleWriter(dir, "s", "X-Y");
+      add(xy, "A", "xy-a");
+      const x = new RawModuleWriter(dir, "s", "X");
+      add(x, "A", "new-a");
+      x.abort();
+      expect(snapshotDir(rawModuleDir(dir, "s", "X"))).toEqual(before);
+      xy.writeManifest(meta);
+      expect(readRawModule(dir, "s", "X-Y").texts[0]?.text).toBe("xy-a");
+      expect(readRawModule(dir, "s", "X").texts[0]?.text).toBe("old-a");
+    });
+  });
+
   it("recovers a swap killed between the two renames (old aside, no live capture)", () => {
     const dir = tmp();
     capture(dir, { A: "old-a" });

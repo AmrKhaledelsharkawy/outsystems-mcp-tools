@@ -36,6 +36,18 @@ export interface ServiceStudioReader {
    * but the session-level aborts above it would otherwise return while reads were still in flight.
    */
   drain?(): Promise<void>;
+  /**
+   * Module-scoped `drain()` (plan v3 section 4): resolves once every logical read for `module`
+   * (case-insensitive) has settled, whatever other modules still have queued. Optional so fixture fakes
+   * need no change; a pipeline that closes one module while another reads must treat its absence as
+   * "cannot close safely" (fail closed), not as idle.
+   *
+   * The walker's own retry (the `retryDelayMs` back-off in rebuild.ts) sits OUTSIDE the client, between
+   * two separate client calls, so a drainModule taken while that sleep is pending would see zero ops.
+   * That is safe only because callers drain after the module's walk promise has settled (the walk
+   * awaits its retries), so settling of the walk already covers it. Never call this mid-walk.
+   */
+  drainModule?(module: string): Promise<void>;
 }
 
 /** What the orchestration needs from the session layer: acquire once, release at the end. */

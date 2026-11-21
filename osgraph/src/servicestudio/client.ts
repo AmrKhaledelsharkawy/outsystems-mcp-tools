@@ -96,6 +96,12 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
+/** Case-insensitive module key of a tool input, or undefined when the call is not module-addressed. */
+function moduleKey(input: Record<string, unknown>): string | undefined {
+  const name = input.eSpaceName;
+  return typeof name === "string" && name.length > 0 ? name.toLowerCase() : undefined;
+}
+
 export class ServiceStudioClient {
   readonly url: string;
   private readonly fetchImpl: FetchLike;
@@ -111,6 +117,10 @@ export class ServiceStudioClient {
   private readonly waiters: Array<() => void> = [];
   /** FIFO of `drain()` callers waiting for the client to go idle. */
   private readonly idleWaiters: Array<() => void> = [];
+  /** Logical operations not yet settled, per module (`moduleKey`); see `drainModule`. */
+  private readonly moduleOps = new Map<string, number>();
+  /** `drainModule()` callers waiting for their module's count to reach zero. */
+  private readonly moduleWaiters = new Map<string, Array<() => void>>();
   private nextId = 1;
 
   constructor(options: ServiceStudioClientOptions) {
@@ -147,6 +157,20 @@ export class ServiceStudioClient {
    * `OsgraphToolError("TOKEN_EXPIRED")`.
    */
   async callTool(name: string, input: Record<string, unknown> = {}): Promise<string> {
+    // The module count is taken here, before the FIFO and before any token acquire/recover, and released
+    // only when this outermost promise settles (plan v3 section 4). `listApps` has no `eSpaceName`, so it
+    // stays untracked by module and is covered by the global `drain()` only.
+    const key = moduleKey(input);
+    if (key === undefined) return this.callToolUntracked(name, input);
+    this.opStart(key);
+    try {
+      return await this.callToolUntracked(name, input);
+    } finally {
+      this.opEnd(key);
+    }
+  }
+
+  private async callToolUntracked(name: string, input: Record<string, unknown>): Promise<string> {
     const provider = this.tokenProvider;
     if (!provider) {
       throw new OsgraphToolError("TOKEN_EXPIRED", TOKEN_EXPIRED_MESSAGE, {
@@ -385,6 +409,43 @@ export class ServiceStudioClient {
     while (this.active > 0 || this.waiters.length > 0) {
       await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
     }
+  }
+
+  /**
+   * Resolves once every logical operation addressed to `module` (case-insensitive `eSpaceName`) has
+   * settled: queued, in flight, in its transient temp-OML back-off, or in token recovery. Unlike
+   * `drain()` it ignores other modules' work, so a pipeline can close A's tab while B is still reading.
+   * Never rejects. A module with no operations resolves immediately.
+   *
+   * Counts are taken in `callTool` (before the FIFO) and released when that outermost promise settles;
+   * the typed helpers' parsing after `callTool` is synchronous, so nothing is left to await. Operations
+   * started AFTER this call are not waited for (same contract as `drain()`).
+   */
+  async drainModule(module: string): Promise<void> {
+    const key = module.toLowerCase();
+    while ((this.moduleOps.get(key) ?? 0) > 0) {
+      await new Promise<void>((resolve) => {
+        const list = this.moduleWaiters.get(key);
+        if (list) list.push(resolve);
+        else this.moduleWaiters.set(key, [resolve]);
+      });
+    }
+  }
+
+  private opStart(key: string): void {
+    this.moduleOps.set(key, (this.moduleOps.get(key) ?? 0) + 1);
+  }
+
+  private opEnd(key: string): void {
+    const n = (this.moduleOps.get(key) ?? 1) - 1;
+    if (n > 0) {
+      this.moduleOps.set(key, n);
+      return;
+    }
+    this.moduleOps.delete(key);
+    const waiters = this.moduleWaiters.get(key);
+    this.moduleWaiters.delete(key);
+    if (waiters) for (const resolve of waiters) resolve();
   }
 
   private async withTransientRetry<T>(name: string, attempt: () => Promise<T>): Promise<T> {

@@ -14,6 +14,7 @@ import {
   resolveScopeModules,
   formatProgress,
   stageModule,
+  finalizeStage,
   type RebuildProgressEvent
 } from "../src/rebuild/rebuild.js";
 import { rawManifestPath, rawModuleDir } from "../src/rebuild/raw.js";
@@ -1286,5 +1287,111 @@ describe("extractOpenModule — single-module extraction primitive (#5)", () => 
     expect(reader.inFlightAtDrain[0]).toBeGreaterThan(0);
     expect(reader.inFlight).toBe(0);
     expect(reader.completions.some((c) => c.tool === "getScreen" && c.name === "orphan")).toBe(true);
+  });
+});
+
+describe("stageModule — pipeline mode (finalize: false, plan v3 section 5)", () => {
+  const graphDir = (): string => join(tmp(), "graphs");
+  const mods = (): FakeModule[] => [demoPortalModule(), syntheticXModule()];
+  /** A fake session whose reader also has the module-scoped barrier, recording what was drained. */
+  function pipelineSession() {
+    const session = fakeSession(mods());
+    const drained: string[] = [];
+    (session.reader as { drainModule?: (m: string) => Promise<void> }).drainModule = async (m) => {
+      drained.push(m);
+    };
+    return { session, drained };
+  }
+  const run = (dir: string, module: string, session: ReturnType<typeof fakeSession>, finalize?: boolean) =>
+    stageModule({
+      scope,
+      module,
+      graphDir: dir,
+      snapshotPath: join(dir, "demo", "graph.json"),
+      session,
+      rules,
+      now: fixedNow,
+      retryDelayMs: 0,
+      ...(finalize === undefined ? {} : { finalize })
+    });
+
+  it("default mode still finalizes on the last module and never touches drainModule", async () => {
+    const dir = graphDir();
+    const { session, drained } = pipelineSession();
+    await run(dir, "demoportal", session);
+    const last = await run(dir, "x", session);
+    expect(last.finalized).toBe(true);
+    expect(drained).toEqual([]);
+    expect(session.reader.drainCalls).toBe(2);
+  });
+
+  it("never finalizes, drains only the module, and keeps acquire/release balanced", async () => {
+    const dir = graphDir();
+    const { session, drained } = pipelineSession();
+    await run(dir, "demoportal", session, false);
+    const last = await run(dir, "x", session, false);
+    expect(last.finalized).toBe(false);
+    expect(last.missingModules).toEqual([]); // complete, yet not finalized
+    expect(existsSync(join(dir, "demo", "graph.json"))).toBe(false);
+    expect(drained).toEqual(["demoportal", "x"]);
+    expect(session.reader.drainCalls).toBe(0);
+    expect(session.acquired).toBe(2);
+    expect(session.released).toBe(2);
+  });
+
+  it("fails closed when the reader has no drainModule", async () => {
+    const dir = graphDir();
+    const session = fakeSession(mods());
+    await expect(run(dir, "demoportal", session, false)).rejects.toThrow(/drainModule/);
+    expect(session.reader.calls).toEqual([]);
+    expect(existsSync(join(dir, "demo", "stage"))).toBe(false);
+  });
+
+  it("finalizeStage afterwards yields the same graph as the sequential path", async () => {
+    const seqDir = graphDir();
+    const seq = fakeSession(mods());
+    await run(seqDir, "demoportal", seq);
+    await run(seqDir, "x", seq);
+
+    const dir = graphDir();
+    const { session } = pipelineSession();
+    await run(dir, "x", session, false); // out of scope order on purpose
+    await run(dir, "demoportal", session, false);
+    const fin = finalizeStage({
+      scope,
+      graphDir: dir,
+      snapshotPath: join(dir, "demo", "graph.json"),
+      rules,
+      now: fixedNow
+    });
+    expect(fin.outcome).toBeDefined();
+    expect(readFileSync(join(dir, "demo", "graph.json"), "utf8")).toBe(
+      readFileSync(join(seqDir, "demo", "graph.json"), "utf8")
+    );
+  });
+});
+
+describe("writeStageEntry — atomic write", () => {
+  it("ignores a leftover temp file and leaves no temp behind", async () => {
+    const dir = join(tmp(), "graphs");
+    const { session } = { session: fakeSession([demoPortalModule(), syntheticXModule()]) };
+    (session.reader as { drainModule?: (m: string) => Promise<void> }).drainModule = async () => undefined;
+    await stageModule({
+      scope,
+      module: "demoportal",
+      graphDir: dir,
+      snapshotPath: join(dir, "demo", "graph.json"),
+      session,
+      rules,
+      now: fixedNow,
+      retryDelayMs: 0,
+      finalize: false
+    });
+    const stage = join(dir, "demo", "stage");
+    expect(readdirSync(stage).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    writeFileSync(join(stage, "x.json.123.0.tmp"), '{"module":"x"', "utf8");
+    const { entries, unreadable } = readStage(dir, "demo");
+    expect(entries.map((e) => e.module)).toEqual(["demoportal"]);
+    expect(unreadable).toEqual([]);
   });
 });
