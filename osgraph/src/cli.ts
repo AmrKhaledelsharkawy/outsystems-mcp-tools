@@ -4,6 +4,7 @@ import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
 import { readScope } from "./scopes/index.js";
+import { renderDoctorReport, runDoctor } from "./doctor/doctor.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
 import { closeSite, ensureSite } from "./progress/site.js";
@@ -209,6 +210,25 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
   process.exitCode = exitCode;
 }
 
+/** #63 `osgraph doctor`: read-only; exit 1 when any check fails. */
+async function runDoctorCommand(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  if (options.scope === "true" || options["graph-dir"] === "true") {
+    fail(EXIT_USAGE, `--scope and --graph-dir need a value.
+${USAGE}`);
+    return;
+  }
+  const report = await runDoctor({
+    config,
+    env: process.env,
+    cwd: process.cwd(),
+    ...(options.scope !== undefined ? { scope: options.scope } : {}),
+    ...(options["graph-dir"] !== undefined ? { graphDir: options["graph-dir"] } : {})
+  });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}
+` : renderDoctorReport(report));
+  process.exitCode = report.ok ? 0 : 1;
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 
 if (options.help === "true" || command === "help") {
@@ -224,6 +244,10 @@ if (options.help === "true" || command === "help") {
   if (config !== undefined) {
     if (command === "reextract") {
       runReextract(config, options).catch((err: unknown) => {
+        fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      });
+    } else if (command === "doctor") {
+      runDoctorCommand(config, options).catch((err: unknown) => {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
       });
     } else if (command === "run") {

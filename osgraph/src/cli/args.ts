@@ -11,6 +11,8 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
+  osgraph doctor [--scope <name>]         read-only local checks: token, Studio endpoint, osopener,
+                                          scope module names, graph directory (exit 1 if any check fails)
   osgraph --help
 
 reextract options:
@@ -19,6 +21,12 @@ reextract options:
   --json             print the full result as JSON instead of a summary
   --quiet            no per-module progress on stderr
   --serve            keep a live progress / graph-explorer site running afterwards
+
+doctor options (read-only: calls only listApps, never creates a session token, writes nothing,
+opens or closes no module):
+  --scope <name>     check this scope's module names (case-exactly) and its snapshot age
+  --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
+  --json             print the report as JSON on stdout
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -72,6 +80,7 @@ export function parseArgs(argv: string[]): { command: string; options: Record<st
 export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
   serve: false,
   reextract: false,
+  doctor: false,
   run: true
 };
 
