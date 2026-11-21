@@ -664,9 +664,48 @@ describe("OSG-016 — concurrent element fetches", () => {
     });
   });
 
-  // "A6.2b: the 4 listings are one wave and the two module texts are another" is NOT here. It is the
-  // documented pre-existing failure, kept verbatim and local-only in `rebuild.wave-order.test.ts` so
-  // the published set neither carries it nor weakens it (see PROVENANCE.md, "The known failure").
+  // A6.2b — the listing wave and the module texts are separate waves. The contract (#59): a
+  // non-Service module lists four kinds, a Service module five (the extra one is the service
+  // listing), and in both cases the two module texts follow the last listing and precede any
+  // element fetch. Dispatch order is what is asserted, so the fake answers in reverse of it.
+  describe("A6.2b: the listings are one wave and the two module texts are another", () => {
+    const dispatchOrder = async (service: boolean): Promise<string[]> => {
+      const base = syntheticWideModule(10);
+      const mod: FakeModule = service ? { ...base, app: { ...base.app, moduleType: "Service" } } : base;
+      const session = fakeSession([mod], { delayMs: () => 2 });
+      await rebuildScope({
+        scope: wideScope,
+        snapshotPath: join(tmp(), "demo", "graph.json"),
+        session,
+        rules,
+        retryDelayMs: 0,
+        fetchConcurrency: 4
+      });
+      return session.reader.calls.map((c) => c.tool);
+    };
+
+    it("non-Service module: 4 listings, then the two module texts, then element fetches", async () => {
+      const order = await dispatchOrder(false);
+      expect(order[0]).toBe("listApps");
+      expect(order.slice(1, 5).sort()).toEqual(["getActionNames", "getActionNames", "getScreenNames", "getWebBlockNames"]);
+      expect(order.slice(5, 7)).toEqual(["getDataModel", "getStructures"]);
+      expect(order.slice(7).every((t) => t === "getClientAction")).toBe(true);
+    });
+
+    it("Service module: 5 listings, then the two module texts, then element fetches", async () => {
+      const order = await dispatchOrder(true);
+      expect(order[0]).toBe("listApps");
+      expect(order.slice(1, 6).sort()).toEqual([
+        "getActionNames",
+        "getActionNames",
+        "getActionNames",
+        "getScreenNames",
+        "getWebBlockNames"
+      ]);
+      expect(order.slice(6, 8)).toEqual(["getDataModel", "getStructures"]);
+      expect(order.slice(8).every((t) => t === "getClientAction")).toBe(true);
+    });
+  });
 
   it("A6.2c: the synthetic module has enough of every kind to fill the width-4 pool, element phase included", async () => {
     const session = fakeSession([demoPortalModule()], { delayMs: () => 2 });
