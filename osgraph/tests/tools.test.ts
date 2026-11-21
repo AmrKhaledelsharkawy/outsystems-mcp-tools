@@ -96,9 +96,10 @@ describe("INPUT_INVALID (F2)", () => {
       expect.stringContaining("Scope"),
       expect.stringContaining("Source node id"),
       expect.stringContaining("Target node id"),
-      expect.stringContaining("edge direction")
+      expect.stringContaining("edge direction"),
+      expect.stringContaining("Maximum path steps")
     ]);
-    expect(described("queryImpact")).toHaveLength(4);
+    expect(described("queryImpact")).toHaveLength(5);
     for (const line of described("queryImpact")) expect(line.length).toBeGreaterThan(0);
     expect(described("defineScope")).toHaveLength(2);
     expect(described("listViolations")).toHaveLength(1);
@@ -270,7 +271,7 @@ describe("queryImpact", () => {
     installViolationGraph(ctx);
     const r = await call("queryImpact", { scope: "demo", nodeId: "osgraph://Demo_UI/Screen/Nope", direction: "dependents" }, ctx);
     expect(r.error?.code).toBe("UNKNOWN_NODE");
-    expect(r.error?.details).toEqual({ nodeId: "osgraph://Demo_UI/Screen/Nope" });
+    expect(r.error?.details).toMatchObject({ nodeId: "osgraph://Demo_UI/Screen/Nope", suggestions: expect.any(Array) });
     expect(r.graphCompleteness).toEqual({ skippedCount: 3, lastRebuildAt: "2026-10-29T00:00:00.000Z" });
   });
 
@@ -314,7 +315,7 @@ describe("queryPath (handler with injected graphify runner)", () => {
     const { ctx } = makeCtx({ runGraphifyPath: async () => ({ found: false, raw: "No directed path found" }) });
     installViolationGraph(ctx);
     const r = await call<Record<string, unknown>>("queryPath", { scope: "demo", from: FROM, to: TO }, ctx);
-    expect(r.result).toEqual({ found: false, from: FROM, to: TO, undirected: false, raw: "No directed path found", graphifyVersion: null });
+    expect(r.result).toEqual({ found: false, total: 0, limit: 200, truncated: false, from: FROM, to: TO, undirected: false, raw: "No directed path found", graphifyVersion: null });
 
     const { ctx: ctx2 } = makeCtx({
       runGraphifyPath: async () => {

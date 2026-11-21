@@ -4,6 +4,7 @@ import { renderBinding, renderFlow, walkFlow } from "../flows/render.js";
 import { requireFlows, type FlowsArtifact } from "../flows/index.js";
 import type { Binding, FlowAction } from "../flows/types.js";
 import { OsgraphToolError } from "../servicestudio/types.js";
+import { DEFAULT_SUGGESTION_LIMIT, didYouMean, suggestNames } from "../suggest.js";
 import { parseInput, permissiveShape, runTool, scopeArg, type OsgraphTool, type ToolContext } from "./tool.js";
 
 const strictSchema = z.object({
@@ -124,11 +125,12 @@ export function resolveElement(
   }
   const suffix = all.filter((o) => o.id.toLowerCase().endsWith(`/${lower}`));
   if (suffix.length === 1) return suffix[0];
+  const suggestions = suggestNames(element, all.map((o) => o.id), DEFAULT_SUGGESTION_LIMIT);
   throw new OsgraphToolError(
     "UNKNOWN_NODE",
     `scope '${scope}': no element '${element}' has flow data${module !== undefined ? ` in module '${module}'` : ""}. ` +
-      `An element with no actions and no UI wiring has no entry here; check the name against graph.json.`,
-    { scope, element, ...(module !== undefined ? { module } : {}) }
+      `An element with no actions and no UI wiring has no entry here; check the name against graph.json.${didYouMean(suggestions)}`,
+    { scope, element, ...(module !== undefined ? { module } : {}), suggestions }
   );
 }
 

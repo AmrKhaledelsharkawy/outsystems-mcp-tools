@@ -374,6 +374,14 @@ node dist/cli.js --help
 
 Live check (human, with Service Studio open): after a real `osgraph run --scope <name>`, compare `osgraph status --scope <name> --json` with each `<graphDir>/<scope>/raw/<module>/manifest.json` (`capturedAt`, `moduleVersion`, `skipped.length`, `referencedOnlyCount`); they must match exactly.
 
+### Query ergonomics (offline)
+
+- **Did-you-mean.** `UNKNOWN_NODE` and `SCOPE_NOT_FOUND` carry up to 5 ranked `details.suggestions` (case-insensitive match, then prefix, substring, edit distance) and name them in the message. Suggestions are advice only: the exact name is still required for a lookup to succeed.
+- **Result limits.** `queryImpact` (`limit`, default 500 nodes, nearest first), `searchFlows` (`limit`, default 200 hits) and `queryPath` (`limit`, default 200 steps) report `total` and `truncated`. Calls without `limit` keep working; `queryImpact.count` is still the true total. When `queryPath` truncates, `raw` is returned empty.
+- **CLI.** `osgraph impact --scope <s> --node <id> --direction dependents|dependencies [--max-depth n] [--limit n]`, `osgraph flow --scope <s> --element <id|name> [--action a] [--module m]`, `osgraph path --scope <s> --from <id> --to <id> [--undirected] [--limit n]`, each with `--json` (the MCP tool's response envelope, verbatim) or human-readable output; exit code 1 on an error response. They call the same handlers as the MCP tools, need no Service Studio and no token, and only read a snapshot that `run` / `rebuild` (osopener and the token manager) already produced. `path` still needs the pinned graphify.
+
+Live check (human, local): run the three CLI commands and the matching MCP tools against a large installed snapshot (hundreds of modules) with Service Studio shut, and record the timings. Until recorded, issue #70 stays unverified.
+
 ---
 
 ## Configuration
