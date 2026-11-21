@@ -28,6 +28,15 @@ const openModuleShape = {
       "Whether osopener may take the foreground. Everything except typing a name into the CEF 'Open from Environment' " +
         "dialog runs in the background (no cursor, no focus change). 'brief' (default): for that one step Studio takes " +
         "the foreground for about a second and then gives it back. 'never': fail with FOREGROUND_REQUIRED instead."
+    ),
+  source: z
+    .enum(["recent", "environment"])
+    .optional()
+    .describe(
+      "How to open a module that is not open yet. 'recent' (default): click its entry in Studio's recent list when " +
+        "there is one (no keyboard), else Open from Environment. 'environment': always go through Open from Environment " +
+        "(name typed into the CEF dialog; needs a brief focus). Only an environment open makes servicestudio listApps " +
+        "report the module's real server version; a recent-list open reports version '0'."
     )
 };
 const openModuleInput = z.object(openModuleShape);
@@ -261,6 +270,8 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
     "foreground), and polls listApps until the module appears or timeoutMs elapses. A module in Studio's recent list " +
     "opens with no keyboard at all; any other needs its name typed into a CEF dialog, which takes the foreground for " +
     "about a second (focusPolicy 'brief', default) or fails FOREGROUND_REQUIRED (focusPolicy 'never'). " +
+    "source 'environment' skips the recent list and always uses Open from Environment, so listApps reports the " +
+    "module's real server version (a recent-list open reports '0'). " +
     "Never closes Studio or discards changes; aborts with UNSAVED_CHANGES_DIALOG when a save prompt is up.",
   inputSchema: openModuleShape,
   async handler(rawArgs, ctx): Promise<OpenModuleResult> {
@@ -283,6 +294,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
     }
     const { name } = parsed.data;
     const focusPolicy = parsed.data.focusPolicy ?? "brief";
+    const source = parsed.data.source ?? "recent";
     const timeoutMs = parsed.data.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const deadline = t0 + timeoutMs;
     const sendKeys = async (keys: string, step: string): Promise<void> => {
@@ -326,6 +338,12 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       if (open.includes(name)) {
         return { opened: true, alreadyOpen: true, studioLaunched, durationMs: Date.now() - t0, steps };
       }
+      steps.push({
+        step: "source",
+        ok: true,
+        ms: 0,
+        detail: source === "environment" ? "environment: recent list not consulted" : "recent: recent-list entry first, else Open from Environment"
+      });
 
       // (2)+(3) Process only — no foreground (2026-11-20): the user keeps their window, keyboard and cursor.
       const studio = await ensureStudioReady(ctx, steps, Math.max(10_000, deadline - Date.now()));
@@ -423,9 +441,11 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       // (5a-ii) The dropdown is a menu, not the module browser. Two ways on from here (live 2026-10-30):
       //   - a recent-modules entry `<Module>@<environment>` opens the module directly (no typing, no browser);
       //   - otherwise `Open from Environment...` opens the real dialog window.
+      // source 'environment' never looks at the recent list: only an environment open makes listApps report the
+      // module's real server version (live 2026-11-21: a recent-list open reports version "0").
       if (viaMenu) {
         const mruRe = mnemonicNameRegex(name);
-        const mruHit = (await uiaCount(ctx, { Name: mruRe, ControlType: "MenuItem" })) > 0;
+        const mruHit = source === "recent" && (await uiaCount(ctx, { Name: mruRe, ControlType: "MenuItem" })) > 0;
         if (mruHit) {
           const clicked = await timed(
             steps,
