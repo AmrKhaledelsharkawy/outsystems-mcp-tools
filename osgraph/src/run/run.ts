@@ -274,7 +274,9 @@ function setup(options: RunCommonOptions): {
     screenshotDir: join(runDir, "screenshots"),
     // Always Open from Environment: a recent-list open makes Studio list the module's version as "0",
     // which `--changed` cannot compare (it reads it as unknown, so the module is always re-read).
-    source: "environment"
+    source: "environment",
+    // A confirmed Save prompt is dismissed via its exact Cancel button (never Save/Discard) and retried once.
+    cancelSavePrompt: true
   });
   const onProgress = (event: RebuildProgressEvent): void => options.state?.handle(event);
   const listApps = (): Promise<ServiceStudioApp[]> => session.reader.listApps();
