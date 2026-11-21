@@ -157,6 +157,8 @@ export type OpenSource = "recent" | "environment";
 export interface OpenOptions {
   /** Omitted: osopener's own default (`recent`). */
   source?: OpenSource;
+  /** Cancel a verified Save prompt via its Cancel button, once, only for OSGraph-initiated opens. */
+  cancelSavePrompt?: boolean;
 }
 
 export interface OsopenerAdapter {
@@ -438,7 +440,8 @@ export function createOsopenerAdapter(tools: OsopenerTools, dist: string, ui?: S
         result = await tools.open({
           name: module,
           timeoutMs: OPEN_TIMEOUT_MS,
-          ...(options?.source !== undefined ? { source: options.source } : {})
+          ...(options?.source !== undefined ? { source: options.source } : {}),
+          ...(options?.cancelSavePrompt === true ? { cancelSavePrompt: true } : {})
         });
       } catch (err) {
         return { ok: false, failure: thrownFailure(err) };
