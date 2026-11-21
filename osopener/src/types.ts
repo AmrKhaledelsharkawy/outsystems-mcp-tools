@@ -12,6 +12,8 @@ export type OsopenerErrorCode =
   | "UIA_ELEMENT_NOT_FOUND"
   | "UNSAVED_CHANGES_DIALOG"
   | "OPEN_TIMEOUT"
+  /** focusPolicy "never" and the step needs the keyboard (typing into the CEF open-module dialog). */
+  | "FOREGROUND_REQUIRED"
   | "HELPER_FAILED";
 
 export interface OsopenerError {

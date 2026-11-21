@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { assertHelperOk, HelperError, type HelperResult } from "../helper.js";
 import { readTrack, writeTrack } from "../track.js";
 import type { OpenModuleResult, Step, Track } from "../types.js";
-import { ensureStudioForeground, timed } from "./focusStudio.js";
+import { ensureStudioReady, timed, withBriefFocus } from "./focusStudio.js";
 import { defaultSleep, toOsopenerError, type OsopenerTool, type ToolContext } from "./tool.js";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -20,7 +20,15 @@ const openModuleShape = {
     .int()
     .positive()
     .optional()
-    .describe(`Overall deadline for the module to appear in listApps (default ${DEFAULT_TIMEOUT_MS}).`)
+    .describe(`Overall deadline for the module to appear in listApps (default ${DEFAULT_TIMEOUT_MS}).`),
+  focusPolicy: z
+    .enum(["brief", "never"])
+    .optional()
+    .describe(
+      "Whether osopener may take the foreground. Everything except typing a name into the CEF 'Open from Environment' " +
+        "dialog runs in the background (no cursor, no focus change). 'brief' (default): for that one step Studio takes " +
+        "the foreground for about a second and then gives it back. 'never': fail with FOREGROUND_REQUIRED instead."
+    )
 };
 const openModuleInput = z.object(openModuleShape);
 
@@ -88,10 +96,10 @@ export function isAllowedTrackStrategy(openDialog: Track["openDialog"] | undefin
 export function dialogStrategies(track: Track | undefined): DialogStrategy[] {
   const list: DialogStrategy[] = [];
   if (track && isAllowedTrackStrategy(track.openDialog)) {
+    // A recorded Ctrl+O is NOT promoted to the front (2026-11-20): it needs the foreground, and one run that fell
+    // back to it must not make every later open steal focus. It stays where it always is — last.
     if (track.openDialog.strategy === "uia") {
       list.push({ kind: "uia", label: "track", automationId: track.openDialog.automationId, controlType: track.openDialog.controlType });
-    } else {
-      list.push({ kind: "ctrl-o", label: "track" });
     }
   }
   // Tightened 2026-10-30 against the live tree: the previous `(?i)^open( module)?\b|open module` name pattern also
@@ -117,8 +125,12 @@ interface Foreground {
   isStudio: boolean;
 }
 
+/**
+ * The topmost Studio dialog window, else the main window (helper `studio-dialog`). Found by enumerating Studio's own
+ * windows, so it does not depend on — or change — which window the user has in the foreground (2026-11-20).
+ */
 async function foregroundTitle(ctx: ToolContext): Promise<Foreground> {
-  const r = assertHelperOk(await ctx.helper.run("foreground-title"), "foreground-title");
+  const r = assertHelperOk(await ctx.helper.run("studio-dialog"), "studio-dialog");
   return { title: String(r.title ?? ""), hwnd: Number(r.hwnd ?? 0), isStudio: r.isStudio === true };
 }
 
@@ -244,8 +256,11 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
   name: "openModule",
   description:
     "Open a named OutSystems 11 module in the running Service Studio. Returns alreadyOpen=true with no UI action when " +
-    "servicestudio listApps already lists it; otherwise launches/focuses Studio, drives the open-module UI " +
-    "(UI Automation first, keyboard second), and polls listApps until the module appears or timeoutMs elapses. " +
+    "servicestudio listApps already lists it; otherwise launches Studio if needed and drives the open-module UI in the " +
+    "BACKGROUND (UI Automation patterns and posted clicks: the user's cursor never moves and their window keeps the " +
+    "foreground), and polls listApps until the module appears or timeoutMs elapses. A module in Studio's recent list " +
+    "opens with no keyboard at all; any other needs its name typed into a CEF dialog, which takes the foreground for " +
+    "about a second (focusPolicy 'brief', default) or fails FOREGROUND_REQUIRED (focusPolicy 'never'). " +
     "Never closes Studio or discards changes; aborts with UNSAVED_CHANGES_DIALOG when a save prompt is up.",
   inputSchema: openModuleShape,
   async handler(rawArgs, ctx): Promise<OpenModuleResult> {
@@ -267,6 +282,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       };
     }
     const { name } = parsed.data;
+    const focusPolicy = parsed.data.focusPolicy ?? "brief";
     const timeoutMs = parsed.data.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const deadline = t0 + timeoutMs;
     const sendKeys = async (keys: string, step: string): Promise<void> => {
@@ -274,9 +290,31 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
     };
     /** True once a dropdown or dialog we opened is on screen; drives the single cleanup Esc on failure. */
     let uiOpen = false;
+    /** The user's window, captured the first time this call takes the foreground; given back when the call ends. */
+    const focusState: { userHwnd?: number } = {};
+    const brief = <T>(hwnd: number, fn: () => Promise<T>) => withBriefFocus(ctx, steps, hwnd, fn, focusState);
+    /**
+     * Live 2026-11-20: once osopener has typed into Studio, Windows lets Studio re-activate itself when the module
+     * finishes loading — seconds after the brief focus ended. So the call ends by handing the foreground back once
+     * more, but only if a Studio window holds it (never pulling the user out of another app they switched to).
+     */
+    const giveBackForeground = async () => {
+      if (!focusState.userHwnd) return;
+      try {
+        await timed(steps, "return-foreground", () => ctx.helper.run("refocus", { Hwnd: focusState.userHwnd!, IfStudio: true }), (r) =>
+          r.restored === true ? `foreground returned to hwnd ${focusState.userHwnd}` : String(r.reason ?? "left as is")
+        );
+      } catch {
+        /* best effort */
+      }
+    };
+    /** Hwnd of the dialog we opened, when it is a window (the dropdown menu lives inside the main window). */
+    let openDialogHwnd: number | undefined;
+    // Dismissed without a keystroke: WindowPattern.Close on our dialog, or a posted click on the dropdown's Toggle.
     const escapeDialog = (label: string) => {
       uiOpen = false;
-      return timed(steps, label, () => ctx.helper.run("send-keys", { Keys: "{ESC}" }), (r) => (r.ok ? "esc sent" : String(r.error?.code)));
+      const args: Record<string, number> = openDialogHwnd ? { Hwnd: openDialogHwnd } : {};
+      return timed(steps, label, () => ctx.helper.run("dismiss", args), (r) => (r.ok ? String(r.method ?? "dismissed") : String(r.error?.code)));
     };
 
     const settle = (ss: Step[], mainHwnd: number | undefined, dl: number, sl: (ms: number) => Promise<void>) =>
@@ -289,8 +327,16 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
         return { opened: true, alreadyOpen: true, studioLaunched, durationMs: Date.now() - t0, steps };
       }
 
-      // (2)+(3) Process + foreground.
-      const studio = await ensureStudioForeground(ctx, steps, Math.max(10_000, deadline - Date.now()));
+      // (2)+(3) Process only — no foreground (2026-11-20): the user keeps their window, keyboard and cursor.
+      const studio = await ensureStudioReady(ctx, steps, Math.max(10_000, deadline - Date.now()));
+      // Remember whose window has the foreground now: Studio re-activates itself for a moment when a module finishes
+      // loading (live 2026-11-21), and the call ends by handing the foreground back (only from a Studio window).
+      try {
+        const r = await ctx.helper.run("foreground-title");
+        if (r.ok && r.isStudio !== true && typeof r.hwnd === "number" && r.hwnd !== 0) focusState.userHwnd = r.hwnd;
+      } catch {
+        /* best effort */
+      }
       studioLaunched = studio.studioLaunched;
       const version = studio.studioVersion;
       const mainHwnd = studio.hwnd;
@@ -311,15 +357,20 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       let viaMenu = false;
       for (const strategy of dialogStrategies(track)) {
         if (Date.now() > deadline) break;
+        // Ctrl+O is a keystroke: it needs the foreground, so it is only tried when a brief focus is allowed.
+        if (strategy.kind === "ctrl-o" && focusPolicy === "never") continue;
         const result = await timed(
           steps,
           `open-dialog:${strategy.label}`,
           async (): Promise<Foreground | "menu" | undefined> => {
             if (strategy.kind === "uia") {
-              const args: Record<string, string | number> = { Depth: 10 };
+              const args: Record<string, string | number | boolean> = { Depth: 10 };
               if (strategy.name) args.Name = strategy.name;
               if (strategy.automationId) args.AutomationId = strategy.automationId;
               if (strategy.controlType) args.ControlType = strategy.controlType;
+              // Live 2026-11-20: the shell Toggle's TogglePattern flips its state without opening the dropdown while
+              // Studio is in the background; a posted click opens it every time.
+              if (strategy.automationId === "^Toggle$") args.Post = true;
               const r = await ctx.helper.run("uia-click", args);
               if (!r.ok) {
                 // Audit item 6: a save prompt seen by the helper is the tool's error, never a reason to try the next strategy.
@@ -327,7 +378,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
                 return undefined;
               }
             } else {
-              await sendKeys("^o", "send-keys ctrl+o");
+              await brief(mainHwnd ?? 0, () => sendKeys("^o", "send-keys ctrl+o"));
             }
             await sleep(track?.timings.afterOpenDialogMs ?? 800);
             const fg = await foregroundTitle(ctx);
@@ -380,7 +431,8 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
             steps,
             "menu:recent-module",
             async () => {
-              const r = await ctx.helper.run("uia-click", { Name: mruRe, ControlType: "MenuItem", Depth: 12 });
+              // Avalonia MenuItems expose no Invoke pattern: a posted click, never the real mouse.
+              const r = await ctx.helper.run("uia-click", { Name: mruRe, ControlType: "MenuItem", Depth: 12, Post: true });
               if (!r.ok && r.error?.code === "UNSAVED_CHANGES_DIALOG") assertHelperOk(r, "uia-click");
               return r.ok;
             },
@@ -395,13 +447,14 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
             );
             if (appearedFromMru) {
               await settle(steps, mainHwnd, deadline, sleep);
+              await giveBackForeground();
               return { opened: true, alreadyOpen: false, studioLaunched, durationMs: Date.now() - t0, steps };
             }
           }
           // Fall through to the environment browser; the menu may already be gone, so re-open it below.
           steps.push({ step: "menu:recent-module", ok: false, ms: 0, detail: "recent entry did not open the module; using Open from Environment" });
           if ((await uiaCount(ctx, { ControlType: "MenuItem" })) === 0) {
-            assertHelperOk(await ctx.helper.run("uia-click", { AutomationId: "^Toggle$", ControlType: "Button", Depth: 10 }), "uia-click");
+            assertHelperOk(await ctx.helper.run("uia-click", { AutomationId: "^Toggle$", ControlType: "Button", Depth: 10, Post: true }), "uia-click");
             await sleep(track?.timings.afterOpenDialogMs ?? 800);
           }
         }
@@ -409,10 +462,19 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
           steps,
           "menu:open-from-environment",
           async (): Promise<Foreground> => {
-            assertHelperOk(
-              await ctx.helper.run("uia-click", { Name: OPEN_FROM_ENVIRONMENT_RE, ControlType: "MenuItem", Depth: 12 }),
-              "uia-click"
-            );
+            // Live 2026-11-21: the item can be missing for a moment right after the dropdown opens (or the popup can
+            // close under us). Retry a few times, re-opening the dropdown when it is gone.
+            let clickedOfe: HelperResult | undefined;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              clickedOfe = await ctx.helper.run("uia-click", { Name: OPEN_FROM_ENVIRONMENT_RE, ControlType: "MenuItem", Depth: 12, Post: true });
+              if (clickedOfe.ok || clickedOfe.error?.code !== "UIA_ELEMENT_NOT_FOUND") break;
+              await sleep(700);
+              if ((await uiaCount(ctx, { ControlType: "MenuItem" })) === 0) {
+                await ctx.helper.run("uia-click", { AutomationId: "^Toggle$", ControlType: "Button", Depth: 10, Post: true });
+                await sleep(track?.timings.afterOpenDialogMs ?? 800);
+              }
+            }
+            assertHelperOk(clickedOfe!, "uia-click");
             await sleep(track?.timings.afterOpenDialogMs ?? 800);
             const fg = await waitForDialog(ctx, mainHwnd, Math.min(deadline, Date.now() + 60_000), sleep);
             if (!fg) {
@@ -431,14 +493,32 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       }
       const dlg: Foreground = dialog;
       uiOpen = true;
+      openDialogHwnd = dlg.hwnd;
 
-      // (5b) Enter the module name: UIA Edit under the dialog first, raw typing second.
+      /**
+       * Runs `fn` — a keystroke into the dialog — with the dialog briefly in the foreground, or refuses under
+       * focusPolicy "never" (closing the dialog first so Studio is left usable).
+       */
+      const withKeyboard = async <T>(why: string, fn: () => Promise<T>): Promise<T> => {
+        if (focusPolicy === "never") {
+          await escapeDialog("dismiss-dialog");
+          throw err(
+            "FOREGROUND_REQUIRED",
+            `${why} needs the keyboard, and focusPolicy is 'never'. Open the module once by hand (it then appears in ` +
+              "Studio's recent list, which osopener opens in the background) or call again with focusPolicy 'brief'."
+          );
+        }
+        return brief(dlg.hwnd, fn);
+      };
+
+      // (5b) Enter the module name: UIA Edit under the dialog first (no focus needed), typing second.
       let searchStrategy: Track["search"]["strategy"] = "type";
       let searchId: string | undefined;
-      await timed(
+      const nameRe = `^${escapeRegex(name)}$`;
+      const viaUia = await timed(
         steps,
         "enter-name",
-        async () => {
+        async (): Promise<string | undefined> => {
           const r: HelperResult = await ctx.helper.run("uia-settext", { Text: name, First: true, ControlType: "Edit", Depth: 12, Hwnd: dlg.hwnd });
           if (r.ok) {
             searchStrategy = "uia-edit";
@@ -446,46 +526,66 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
             return `uia ${String(r.method)}`;
           }
           if (r.error?.code === "UNSAVED_CHANGES_DIALOG") assertHelperOk(r, "uia-settext");
-          await sendKeys(escapeSendKeys(name), "send-keys name");
-          return "typed";
+          return undefined;
         },
-        (d) => d
+        (d) => d ?? "no UIA Edit: the name must be typed"
       );
-      await sleep(track?.timings.afterTypeMs ?? 700);
 
       // (5c) Audit item 1: when the dialog exposes a UIA list, an absent match is MODULE_NOT_FOUND. A UIA-blind
       // (CEF-rendered) dialog exposes nothing, so only OPEN_TIMEOUT is reachable there.
-      const nameRe = `^${escapeRegex(name)}$`;
+      if (viaUia) await sleep(track?.timings.afterTypeMs ?? 700);
       const listExposed = (await uiaCount(ctx, { ControlType: "List", Hwnd: dlg.hwnd })) > 0 ||
         (await uiaCount(ctx, { ControlType: "ListItem", Hwnd: dlg.hwnd })) > 0 ||
         (await uiaCount(ctx, { ControlType: "DataGrid", Hwnd: dlg.hwnd })) > 0;
-      const matches = listExposed ? await uiaCount(ctx, { Name: nameRe, Hwnd: dlg.hwnd }) : 0;
+      const matches = listExposed && viaUia ? await uiaCount(ctx, { Name: nameRe, Hwnd: dlg.hwnd }) : 0;
       steps.push({
         step: "result-list",
         ok: true,
         ms: 0,
         detail: listExposed ? `UIA list exposed, ${matches} item(s) named '${name}'` : "dialog is UIA-blind (no list exposed)"
       });
-      if (listExposed && matches === 0) {
+      if (viaUia && listExposed && matches === 0) {
         await escapeDialog("dismiss-dialog");
         throw err("MODULE_NOT_FOUND", `no item named '${name}' in the open-module dialog; dialog closed, Studio left usable`);
       }
 
-      // (5d) Select the match: UIA item named exactly `name` + Enter, else Enter.
+      // (5d) Select the match and confirm. Selecting is a UIA pattern; the confirming Enter (and, for a CEF dialog,
+      // the typed name) is the only keyboard input osopener still sends — inside one brief focus window.
       await timed(
         steps,
         "select-match",
         async () => {
+          if (!viaUia) {
+            if (focusPolicy === "never") await withKeyboard("typing the module name into the CEF 'Open from Environment' dialog", async () => undefined);
+            // One helper call: take the foreground, type the name, wait for the list to filter, press Enter, give the
+            // foreground back. The guard inside refuses to type if the user's window wins the race.
+            const r = await ctx.helper.run(
+              "send-keys",
+              { Keys: escapeSendKeys(name), Then: "{ENTER}", ThenDelayMs: track?.timings.afterTypeMs ?? 700, TakeFocus: true, Hwnd: dlg.hwnd },
+              30_000
+            );
+            if (!r.ok && r.error?.code === "STUDIO_NOT_FOREGROUND") {
+              throw err(
+                "FOREGROUND_REQUIRED",
+                "Windows would not keep Service Studio in the foreground long enough to type (you are probably actively using another window). " +
+                  "Nothing was typed into it. Stop clicking for a few seconds and retry, or open this module by hand once so it is in the recent list."
+              );
+            }
+            assertHelperOk(r, "send-keys name");
+            if (typeof r.previous === "number" && r.previous && !focusState.userHwnd) focusState.userHwnd = r.previous;
+            steps.push({ step: "typed-in-one-call", ok: true, ms: 0, detail: r.returned === true ? "foreground returned to your window" : "foreground not returned" });
+            return "typed + enter";
+          }
           if (matches > 0) {
             const r = await ctx.helper.run("uia-click", { Name: nameRe, Depth: 12, Hwnd: dlg.hwnd });
             if (!r.ok && r.error?.code === "UNSAVED_CHANGES_DIALOG") assertHelperOk(r, "uia-click");
             if (r.ok) {
               await sleep(200);
-              await sendKeys("{ENTER}", "send-keys enter");
+              await withKeyboard("confirming the selected module", () => sendKeys("{ENTER}", "send-keys enter"));
               return `uia ${String(r.method)} + enter`;
             }
           }
-          await sendKeys("{ENTER}", "send-keys enter");
+          await withKeyboard("confirming the open-module dialog", () => sendKeys("{ENTER}", "send-keys enter"));
           return "enter";
         },
         (d) => d
@@ -500,8 +600,8 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
         (r) => (r ? "module listed" : "timeout")
       );
       if (!appeared) {
-        screenshotPath = await captureScreenshot(ctx, steps);
-        // Leave Studio usable: one Esc closes a still-open dialog; never Alt+F4, never a Close button.
+        screenshotPath = await captureScreenshot(ctx, steps, dlg.hwnd);
+        // Leave Studio usable: close a still-open dialog through UIA; never Alt+F4, never a keystroke.
         await escapeDialog("dismiss-dialog");
         const blind = listExposed
           ? ""
@@ -512,6 +612,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
       // (6b) OSG-014 §8(d): listApps answers before Studio has finished loading, so settle before returning —
       // otherwise the caller's next openModule starts while a `Progress` window owns the foreground.
       await settle(steps, mainHwnd, deadline, sleep);
+      await giveBackForeground();
 
       // (7) Record / refresh the track (only when the Studio version is known: never tracks/unknown.json).
       const durationMs = Date.now() - t0;
@@ -553,6 +654,7 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
           /* best effort only */
         }
       }
+      await giveBackForeground();
       return {
         opened: false,
         alreadyOpen: false,
@@ -566,11 +668,11 @@ export const openModule: OsopenerTool<typeof openModuleShape> = {
   }
 };
 
-async function captureScreenshot(ctx: ToolContext, steps: Step[]): Promise<string | undefined> {
+async function captureScreenshot(ctx: ToolContext, steps: Step[], hwnd?: number): Promise<string | undefined> {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const out = join(ctx.config.dataDir, "screenshots", `${stamp}.png`);
   try {
-    const r = await timed(steps, "screenshot", () => ctx.helper.run("screenshot", { Out: out }), (r) => String(r.path ?? out));
+    const r = await timed(steps, "screenshot", () => ctx.helper.run("screenshot", hwnd ? { Out: out, Hwnd: hwnd } : { Out: out }), (r) => String(r.path ?? out));
     return r.ok ? String(r.path ?? out) : undefined;
   } catch {
     return undefined;

@@ -32,12 +32,31 @@ keyboard), because Service Studio exposes no API for opening a module.
 | Tool | Input | Does |
 |---|---|---|
 | `listOpenModules` | — | Lists every open module, plus a `tabs[]` row per module giving its **application** name and which Studio window holds its tab |
-| `openModule` | `name` | Opens a module by exact name; returns once `listApps` confirms it |
+| `openModule` | `name`, `focusPolicy?` | Opens a module by exact name; returns once `listApps` confirms it |
 | `closeModule` | `name` | Closes a module's tab |
 | `focusStudio` | — | Brings Service Studio to the front. Opens nothing |
 
 `name` is an **exact, case-sensitive** match on the `name` field that `listApps`
 returns — *not* the application name shown in brackets on the tab.
+
+### Working alongside you (background mode)
+
+`openModule` and `closeModule` do not move your cursor or take your keyboard, so you can
+keep working (on another monitor, or in another app) while they run. Clicks are UI
+Automation patterns or click messages posted to Studio's window, never real mouse input.
+Neither tool brings Studio to the front; only `focusStudio` does.
+
+The exception is typing. A module that is **not** in Studio's recent list must be typed into
+the *Open from Environment* dialog. That dialog is an embedded Chromium page, which ignores
+keystrokes unless it really has focus. For that one step:
+
+| `focusPolicy` | Behaviour |
+|---|---|
+| `brief` (default) | The dialog takes the foreground for about a second (name + Enter), then your window gets it back. If Studio grabs the foreground again while the module loads, osopener returns it once more at the end, but only from a Studio window, never from another app you switched to |
+| `never` | Fails with `FOREGROUND_REQUIRED` and closes the dialog. Open that module once by hand; it then sits in the recent list, which opens fully in the background |
+
+Avoid typing *into Service Studio* while a `brief` open runs: during that second your
+keystrokes and osopener's go to the same dialog.
 
 ### Typical timings
 
@@ -56,8 +75,9 @@ work, so the guard lives in the code and cannot be configured away:
 
 - it **never** closes Service Studio itself;
 - it **never** closes a module with unsaved changes;
-- it **never** answers a save prompt — it cancels with `Esc`, leaves the module open,
-  and fails with `UNSAVED_CHANGES_DIALOG`.
+- it **never** answers a save prompt — it cancels it through UI Automation (its Cancel
+  button, else the window's own close), leaves the module open, and fails with
+  `UNSAVED_CHANGES_DIALOG`.
 
 ---
 
