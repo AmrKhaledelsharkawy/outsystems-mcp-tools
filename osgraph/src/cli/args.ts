@@ -8,6 +8,8 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph                                 start the MCP server on stdio (default)
   osgraph reextract --scope <name>        rebuild graph.json + flows.json from <graphDir>/<scope>/raw/
                                           with NO Service Studio and no session token
+  osgraph status --scope <name>           report how fresh and complete the local snapshot is
+                                          (offline, read-only; no Service Studio, no token)
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
@@ -19,6 +21,11 @@ reextract options:
   --json             print the full result as JSON instead of a summary
   --quiet            no per-module progress on stderr
   --serve            keep a live progress / graph-explorer site running afterwards
+
+status options:
+  --scope <name>     required; the scope to report on
+  --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
+  --json             print the stable JSON result (same shape as the graphStatus MCP tool)
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -72,6 +79,7 @@ export function parseArgs(argv: string[]): { command: string; options: Record<st
 export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
   serve: false,
   reextract: false,
+  status: false,
   run: true
 };
 
