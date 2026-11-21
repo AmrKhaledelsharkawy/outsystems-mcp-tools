@@ -354,6 +354,13 @@ the same as a full run. The comparison is one function (`decideChange` in `src/r
 stronger change signal can replace it later. Like every `osgraph run` mode this needs osopener and the
 token manager's session token. A failed module skips the re-extract and exits 1.
 
+**Safe Save-dialog recovery for `osgraph run`.** OSGraph explicitly asks osopener to cancel one
+*confirmed* Studio Save dialog using only its exact **Cancel** button, verifies that the prompt
+closed, then retries opening the same module once. This never clicks Save, Don't Save or Discard
+and never closes a modified module tab. Unknown dialogs, a missing Cancel action or a recurring
+prompt stop the run with diagnostics; previous completed captures remain resumable. Standalone
+osopener `openModule` retains fail-closed behavior unless a caller opts in.
+
 **Verifying `--changed` (human, live Service Studio required).** The listed version is trusted only
 after this probe passes: (1) publish a throwaway module and confirm the version `listApps` reports for
 it changes; (2) close and reopen an unchanged module (through *Open from Environment*) and confirm its
