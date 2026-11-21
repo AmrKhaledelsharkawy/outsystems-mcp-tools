@@ -367,6 +367,23 @@ node dist/cli.js reextract --scope <name> --json   # full result as JSON
 node dist/cli.js --help
 ```
 
+### Read cost per kind
+
+Every rebuild records, in `<graphDir>/<scope>/timings.json`, how many read calls each element kind
+cost in each module and their p50/p95 latency. `osgraph kinds` joins that to what each kind yielded
+and lists kinds with read time but zero edges and zero flows:
+
+```bash
+node dist/cli.js kinds --scope <name>          # offline: no Service Studio, no session token
+node dist/cli.js kinds --scope <name> --json
+```
+
+A kind found there can be switched off with `OSGRAPH_SKIP_KINDS` (e.g. `Structure,ClientAction`).
+The snapshot is then partial by configuration and says so (`skippedKinds` in `meta.json`); edges that
+target the unread elements point at placeholders. Concurrency is unchanged (4). Nothing is switched off
+by default. Rationale and limits: [ADR-0016](docs/adr/0016-read-cost-per-kind-and-opt-out-of-zero-yield-kinds.md).
+Recording the before/after profile on a real 30-module scope is a live-Studio step for a person.
+
 ---
 
 ## Configuration
@@ -379,6 +396,7 @@ node dist/cli.js --help
 | `OSGRAPH_SCOPES_DIR` | no | `<package>/scopes` | Where scope files live |
 | `OSGRAPH_GRAPHIFY_BIN` | no | `graphify` | The pinned graphify executable used by `queryPath` |
 | `OSGRAPH_MAX_CONCURRENCY` | no | `4` | Reads in flight at once |
+| `OSGRAPH_SKIP_KINDS` | no | none | Kinds a rebuild does not read: any of `Entity`, `Structure`, `ClientAction`, `ServerAction` (comma separated). `Screen` and `Block` cannot be switched off. The default is empty until a live read-cost profile justifies a change — see [Read cost per kind](#read-cost-per-kind) |
 | `OSGRAPH_FETCH_REFERENCED_ELEMENTS` | no | — | Also fetch elements referenced from outside the scope |
 | `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |

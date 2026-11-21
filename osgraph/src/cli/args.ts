@@ -8,6 +8,9 @@ export const USAGE = `osgraph — MCP server and offline tools
   osgraph                                 start the MCP server on stdio (default)
   osgraph reextract --scope <name>        rebuild graph.json + flows.json from <graphDir>/<scope>/raw/
                                           with NO Service Studio and no session token
+  osgraph kinds --scope <name>            read-cost report: per element kind, read time against the edges
+                                          and flows it yielded (offline: reads timings.json, graph.json,
+                                          flows.json; no Service Studio, no session token)
   osgraph run --scope <name>              build a scope module by module: open -> stage -> drain -> close
                                           (needs Service Studio, osopener and the session token)
   osgraph run --scope <name> --module <m> re-read ONE module, then re-extract the scope offline from raw/
@@ -19,6 +22,13 @@ reextract options:
   --json             print the full result as JSON instead of a summary
   --quiet            no per-module progress on stderr
   --serve            keep a live progress / graph-explorer site running afterwards
+
+kinds options:
+  --scope <name>     required
+  --graph-dir <dir>  override OSGRAPH_GRAPH_DIR
+  --json             print the report as JSON
+  A kind with read time and zero edges and zero flows is a candidate for OSGRAPH_SKIP_KINDS
+  (Entity, Structure, ClientAction, ServerAction; Screen and Block cannot be switched off).
 
 run options (osgraph is not standalone: run opens and closes modules through osopener, and every
 read needs the human-approved session token the token manager keeps in token.txt):
@@ -72,6 +82,7 @@ export function parseArgs(argv: string[]): { command: string; options: Record<st
 export const REQUIRES_SERVICESTUDIO_AT_START: Readonly<Record<string, boolean>> = {
   serve: false,
   reextract: false,
+  kinds: false,
   run: true
 };
 

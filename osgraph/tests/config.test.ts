@@ -185,7 +185,7 @@ describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start wi
     loadConfig2({}, { cwd: "C:/w", existsSync: () => false, requireServiceStudio: requiresServiceStudioAtStart(command, table) });
 
   it2("serve and reextract start without an endpoint", () => {
-    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, run: true });
+    expect2(REQUIRES_SERVICESTUDIO_AT_START).toEqual({ serve: false, reextract: false, kinds: false, run: true });
     expect2(requiresServiceStudioAtStart("serve")).toBe(false);
     expect2(requiresServiceStudioAtStart("reextract")).toBe(false);
     expect2(load("serve").serviceStudioUrl).toBeUndefined();

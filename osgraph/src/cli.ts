@@ -3,6 +3,7 @@ import { loadConfig, OsgraphConfigError, requireServiceStudioUrl, type OsgraphCo
 import { resolveScopeSnapshotPath } from "./graph/io.js";
 import { loadLayerRules } from "./layers/rules.js";
 import { reextractScope } from "./reextract.js";
+import { buildKindReport, formatKindReport } from "./report/kinds.js";
 import { readScope } from "./scopes/index.js";
 import { parseArgs, requiresServiceStudioAtStart, USAGE } from "./cli/args.js";
 import { startServer } from "./server.js";
@@ -90,6 +91,23 @@ async function runReextract(config: OsgraphConfig, options: Record<string, strin
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+/** #69 `osgraph kinds`: the offline read-cost report. */
+async function runKinds(config: OsgraphConfig, options: Record<string, string>): Promise<void> {
+  const scopeName = options.scope;
+  if (scopeName === undefined || scopeName === "true") {
+    fail(EXIT_USAGE, `kinds needs --scope <name>.\n${USAGE}`);
+    return;
+  }
+  const graphDir = options["graph-dir"] ?? config.graphDir;
+  const scope = readScope(config.scopesDir, scopeName);
+  const report = buildKindReport({
+    graphDir,
+    scope: scope.name,
+    snapshotPath: resolveScopeSnapshotPath(graphDir, scope.name)
+  });
+  process.stdout.write(options.json === "true" ? `${JSON.stringify(report, null, 2)}\n` : `${formatKindReport(report)}\n`);
+}
+
 /** A non-negative integer flag, or `fallback` when absent; `null` when present but not a number. */
 function intFlag(value: string | undefined, fallback: number): number | null {
   if (value === undefined) return fallback;
@@ -152,6 +170,7 @@ async function runRun(config: OsgraphConfig, options: Record<string, string>): P
     state: site.state,
     log,
     fetchConcurrency: config.fetchConcurrency,
+    skipKinds: config.skipKinds,
     fetchReferencedElements: process.env.OSGRAPH_FETCH_REFERENCED_ELEMENTS === "1"
   };
 
@@ -225,6 +244,11 @@ if (options.help === "true" || command === "help") {
     if (command === "reextract") {
       runReextract(config, options).catch((err: unknown) => {
         fail(EXIT_FATAL, err instanceof Error ? err.message : String(err));
+      });
+    } else if (command === "kinds") {
+      runKinds(config, options).catch((err: unknown) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        fail(EXIT_FATAL, `${typeof code === "string" ? `${code}: ` : ""}${err instanceof Error ? err.message : String(err)}`);
       });
     } else if (command === "run") {
       runRun(config, options).catch((err: unknown) => {
