@@ -112,6 +112,11 @@ export class RunState {
     return this.scope;
   }
 
+  /** A previously finalized snapshot remains previous after a stopped or failed rebuild. */
+  snapshotIsPrevious(scope: string): boolean {
+    return this.scope === scope && this.runStartedAt !== null && !this.finalized;
+  }
+
   /**
    * Starts a run. `modules` is the resolved walk order, so every row exists as `pending` from the
    * first poll — the page shows the whole plan immediately rather than growing a list.
