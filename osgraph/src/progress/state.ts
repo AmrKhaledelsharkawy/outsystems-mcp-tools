@@ -129,6 +129,11 @@ export class RunState {
     return this.scope;
   }
 
+  /** True for any unfinalized or failed run that still displays the last finalized graph. */
+  snapshotIsPrevious(scope: string): boolean {
+    return this.scope === scope && this.runStartedAt !== null && !this.finalized;
+  }
+
   /**
    * Starts a run. `modules` is the resolved walk order, so every row exists as `pending` from the
    * first poll — the page shows the whole plan immediately rather than growing a list.
@@ -300,9 +305,11 @@ export class RunState {
       }
       case "module-done": {
         const m = this.ensure(event.module);
-        m.state = "done";
-        m.lifecycle = "staging"; // Read completed; the coordinator still must commit the stage entry.
-        m.finishedAt = at;
+        // A successful read is not yet a committed stage. Do not count it as done before the
+        // coordinator has written the stage entry; a stage-write failure must stay visible.
+        m.state = "running";
+        m.lifecycle = "staging";
+        m.finishedAt = null;
         m.actualMs = event.durationMs;
         m.skipped = event.skippedCount;
         m.phase = null;
