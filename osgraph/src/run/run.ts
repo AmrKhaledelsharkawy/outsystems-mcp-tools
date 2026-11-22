@@ -417,7 +417,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   };
   const record = (row: RunModuleRow): void => {
     rows.push(row);
-    options.state?.recordOutcome(row.module, row.outcome, {
+    options.state?.recordOutcome?.(row.module, row.outcome, {
       ...(row.openedHere !== undefined ? { openedHere: row.openedHere } : {}),
       ...(row.error !== undefined ? { error: row.error } : {}),
       ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}),
@@ -487,7 +487,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
         if (stoppedEarly === undefined) {
           stoppedEarly = RUN_CANCELLED_MESSAGE;
           log(`CANCELLED: ${stoppedEarly}`);
-          options.state?.markCancelling();
+          options.state?.markCancelling?.();
         }
         record({ module: mod, outcome: "not-started" });
         continue;
@@ -527,7 +527,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
             log(`STOPPED: ${stoppedEarly}`);
             stopForRoom = true;
           } else {
-            options.state?.setModuleLifecycle(mod, "opening");
+            options.state?.setModuleLifecycle?.(mod, "opening");
             const opened = await s.openWithRetry(mod);
             if (!opened.ok) {
               log(`${tag} open FAILED ${describeOsopenerFailure(opened.failure)}`);
@@ -579,7 +579,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
       consecutiveOpenFailures = 0;
 
       // 2. Stage it. `stageModule` drains the reader on every path out.
-      options.state?.setModuleLifecycle(mod, "queued-for-read", { openedHere });
+      options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere });
       let row: RunModuleRow;
       let fatal: unknown;
       try {
@@ -628,7 +628,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
 
       // 3. Give the tab back if this process took it — after the drain, success or not.
       if (openedHere) {
-        options.state?.setModuleLifecycle(mod, "closing", { openedHere });
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         await s.sleep(s.gapMs);
         const closed = await s.closeAfterDrain(mod);
         row.closed = closed.ok;
@@ -846,7 +846,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     if (cancelled) return;
     cancelled = true;
     abort = true;
-    options.state?.markCancelling();
+    options.state?.markCancelling?.();
     log(`CANCELLING: opening nothing more; ${running.size} module(s) in flight will finish, drain and close`);
     signal();
   };
@@ -958,7 +958,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
         log(`   drain ${mod} FAILED ${errorOf(err).message}`);
       }
       if (openedHere) {
-        options.state?.setModuleLifecycle(mod, "closing", { openedHere });
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         const c0 = Date.now();
         if (!drained) {
           row.closed = false;
@@ -1058,11 +1058,11 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     active.add(lower(mod));
     if (already) {
       consecutiveOpenFailures = 0;
-      options.state?.setModuleLifecycle(mod, "queued-for-read", { openedHere: false });
+      options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere: false });
       startTask(mod, false, undefined);
       continue;
     }
-    options.state?.setModuleLifecycle(mod, "opening");
+    options.state?.setModuleLifecycle?.(mod, "opening");
     const o0 = Date.now();
     let opened: Awaited<ReturnType<typeof s.openWithRetry>>;
     try {
@@ -1103,7 +1103,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
       queue.unshift(mod);
       break;
     }
-    options.state?.setModuleLifecycle(mod, "queued-for-read", { openedHere: opened.openedHere });
+    options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere: opened.openedHere });
     startTask(mod, opened.openedHere, opened.attempts);
   }
 
@@ -1454,7 +1454,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
   const record = (row: RefreshModulesRow): void => {
     rows.push(row);
     const outcome = row.error !== undefined ? "stage-failed" : row.read ? "staged" : "reused";
-    options.state?.recordOutcome(row.module, outcome, {
+    options.state?.recordOutcome?.(row.module, outcome, {
       versionReason: row.reason,
       ...(row.moduleVersion !== undefined ? { moduleVersion: row.moduleVersion } : {}),
       ...(row.previousCaptureVersion !== undefined ? { previousCaptureVersion: row.previousCaptureVersion } : {}),
@@ -1500,7 +1500,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
             log(`STOPPED: ${stoppedEarly}`);
             break;
           }
-          options.state?.setModuleLifecycle(mod, "opening");
+          options.state?.setModuleLifecycle?.(mod, "opening");
           const opened = await s.openWithRetry(mod);
           if (!opened.ok) {
             const msg = describeOsopenerFailure(opened.failure);
@@ -1534,7 +1534,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
 
       const listed = apps.find((a) => a.isOpen === true && lower(a.name) === lower(mod))?.version;
       if (changedMode) {
-        options.state?.setModuleLifecycle(mod, "version-check", {
+        options.state?.setModuleLifecycle?.(mod, "version-check", {
           moduleVersion: listed ?? null,
           previousCaptureVersion: capture.version
         });
@@ -1550,7 +1550,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
       };
       let fatal: unknown;
       if (decision.read) {
-        options.state?.setModuleLifecycle(mod, "queued-for-read", { openedHere, versionReason: decision.reason });
+        options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere, versionReason: decision.reason });
         const stagedBefore = stagedNames(graphDir, scope.name).has(lower(mod));
         let staged: StageOutcome | undefined;
         try {
@@ -1585,7 +1585,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
       }
       // Give the tab back if this process took it, after the drain.
       if (openedHere) {
-        options.state?.setModuleLifecycle(mod, "closing", { openedHere });
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         await s.sleep(s.gapMs);
         const closed = await s.closeAfterDrain(mod);
         row.closed = closed.ok;
