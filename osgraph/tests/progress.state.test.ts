@@ -78,9 +78,15 @@ describe("RunState", () => {
     s.handle({ type: "module-done", module: "MOD_A_BL", durationMs: 5_000, skippedCount: 1 });
 
     let st = s.status("sc", MODULES, null, null);
-    expect(st.modules[0]?.state).toBe("done");
+    expect(st.modules[0]?.state).toBe("running");
+    expect(st.modules[0]?.lifecycle).toBe("staging");
     expect(st.modules[0]?.actualMs).toBe(5_000);
     expect(st.modules[0]?.skipped).toBe(1);
+    expect(st.modules[0]?.stagedAt).toBeNull();
+    // A completed read is not a completed stage; only the coordinator can mark it committed.
+    s.recordOutcome("MOD_A_BL", "staged", { durationMs: 5_000 });
+    st = s.status("sc", MODULES, null, null);
+    expect(st.modules[0]?.state).toBe("done");
     expect(st.modules[0]?.stagedAt).toBe(new Date(clock).toISOString());
     // Counts are not in the event stream; they arrive with the result.
     expect(st.modules[0]?.nodes).toBeNull();
@@ -265,6 +271,7 @@ describe("RunState", () => {
       // A finishes in 20s — this run is pacing at 2x its history.
       s.handle({ type: "module-start", module: "MOD_A_BL", index: 1, total: 2, moduleType: "eSpace" });
       s.handle({ type: "module-done", module: "MOD_A_BL", durationMs: 20_000, skippedCount: 0 });
+      s.recordOutcome("MOD_A_BL", "staged", { durationMs: 20_000 });
 
       const st = s.status("sc", MODULES, null, null);
       expect(st.progress.pace).toBe(2);
