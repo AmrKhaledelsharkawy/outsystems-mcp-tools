@@ -389,7 +389,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           res.writeHead(200, {
             ...securityHeaders,
             "content-type": "application/json",
-            "x-graph-which": options.state.activeScope === scope && options.state.rebuildActive ? "previous" : "current"
+            "x-graph-which": options.state.snapshotIsPrevious(scope) ? "previous" : "current"
           });
           createReadStream(file).pipe(res);
           return;
