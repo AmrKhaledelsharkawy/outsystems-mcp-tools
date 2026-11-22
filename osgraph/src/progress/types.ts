@@ -19,6 +19,14 @@ import type { ModuleKindStats } from "../rebuild/readKinds.js";
 /** A module's state in the run, as the page colours its row. */
 export type ModuleState = "pending" | "running" | "done" | "failed";
 
+/** Authoritative lifecycle; v1 `state` is a compatibility projection of these values. */
+export type ModuleLifecycle =
+  | "pending" | "opening" | "version-check" | "queued-for-read" | "reading"
+  | "staging" | "closing" | "reused" | "completed" | "failed" | "cancelled" | "not-started";
+export type CaptureOutcome = "new" | "reused" | "already-staged" | "none";
+export type RunMode = "full" | "pipeline" | "changed" | "modules" | "module" | "reextract" | "idle";
+export type RunLifecycle = "idle" | "running" | "cancelling" | "cancelled" | "completed" | "failed" | "stopped";
+
 /** One row of the Modules table. */
 export interface StatusModuleRow {
   /** 1-based position in the scope file — the order a rebuild walks them. */
@@ -27,6 +35,15 @@ export interface StatusModuleRow {
   /** Layer suffix (`BL`, `CW`, …) or `other`. Drives the row's colour, never any logic. */
   layer: string;
   state: ModuleState;
+  /** Additive v2 fields; consumers of v1 can keep reading `state`. */
+  lifecycle?: ModuleLifecycle;
+  captureOutcome?: CaptureOutcome;
+  versionReason?: string | null;
+  moduleVersion?: string | null;
+  previousCaptureVersion?: string | null;
+  openedHere?: boolean | null;
+  startedAt?: number | null;
+  finishedAt?: number | null;
   /** What this run actually took; null until the module finishes. */
   actualMs: number | null;
   /** What it took last time, from the persisted timings; null on a first-ever run. */
@@ -66,6 +83,17 @@ export interface StatusCurrent {
 }
 
 export interface StatusRun {
+  /** Additive v2 metadata. */
+  mode?: RunMode;
+  status?: RunLifecycle;
+  runId?: string | null;
+  sequence?: number;
+  pipelineDepth?: number;
+  readLimit?: number;
+  traceEnabled?: boolean;
+  finishedAt?: number | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
   startedAt: number | null;
   elapsedMs: number | null;
   /** The walk finished. */
@@ -80,6 +108,15 @@ export interface StatusRun {
 }
 
 export interface StatusProgress {
+  /** v2 counters. Done includes verified reuse and already-staged captures. */
+  completed?: number;
+  newlyCaptured?: number;
+  reused?: number;
+  alreadyStaged?: number;
+  notStarted?: number;
+  activeReading?: number;
+  activeOpening?: number;
+  activeClosing?: number;
   modulesDone: number;
   modulesTotal: number;
   modulesFailed: number;
@@ -117,6 +154,11 @@ export interface StatusLogLine {
 
 /** The whole `/api/status` body. */
 export interface Status {
+  /** Additive v2 contract; status, snapshot and legacy keys remain supported. */
+  schemaVersion?: 2;
+  runId?: string | null;
+  sequence?: number;
+  serverNow?: number;
   now: number;
   scope: string;
   run: StatusRun;

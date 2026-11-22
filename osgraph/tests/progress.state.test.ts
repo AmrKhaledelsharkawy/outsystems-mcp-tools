@@ -78,9 +78,15 @@ describe("RunState", () => {
     s.handle({ type: "module-done", module: "MOD_A_BL", durationMs: 5_000, skippedCount: 1 });
 
     let st = s.status("sc", MODULES, null, null);
-    expect(st.modules[0]?.state).toBe("done");
+    expect(st.modules[0]?.state).toBe("running");
+    expect(st.modules[0]?.lifecycle).toBe("staging");
     expect(st.modules[0]?.actualMs).toBe(5_000);
     expect(st.modules[0]?.skipped).toBe(1);
+    expect(st.modules[0]?.stagedAt).toBeNull();
+    // A completed read is not a completed stage; only the coordinator can mark it committed.
+    s.recordOutcome("MOD_A_BL", "staged", { durationMs: 5_000 });
+    st = s.status("sc", MODULES, null, null);
+    expect(st.modules[0]?.state).toBe("done");
     expect(st.modules[0]?.stagedAt).toBe(new Date(clock).toISOString());
     // Counts are not in the event stream; they arrive with the result.
     expect(st.modules[0]?.nodes).toBeNull();
@@ -153,6 +159,81 @@ describe("RunState", () => {
     expect(st.snapshot.writtenAt).toBeGreaterThan(0);
   });
 
+  describe("v2 coordinator-sourced status", () => {
+    it("reports all simultaneous active modules with independent clocks and one run id", () => {
+      const s = state();
+      s.beginRun("sc", ["MOD_A_BL", "MOD_B_CW", "MOD_C_SL"], { mode: "pipeline", pipelineDepth: 4 });
+      s.setModuleLifecycle("MOD_A_BL", "opening");
+      clock += 1000;
+      s.handle({ type: "module-start", module: "MOD_B_CW", index: 2, total: 3, moduleType: "eSpace" });
+      clock += 2000;
+      s.handle({ type: "module-start", module: "MOD_C_SL", index: 3, total: 3, moduleType: "eSpace" });
+      const p = s.status("sc", ["MOD_A_BL", "MOD_B_CW", "MOD_C_SL"], null, null);
+      expect(p.schemaVersion).toBe(2);
+      expect(p.run.mode).toBe("pipeline");
+      expect(p.run.status).toBe("running");
+      expect(p.run.pipelineDepth).toBe(4);
+      expect(p.activeModules?.map((m) => m.module)).toEqual(["MOD_A_BL", "MOD_B_CW", "MOD_C_SL"]);
+      expect(p.activeModules?.map((m) => m.elapsedMs)).toEqual([3000, 2000, 0]);
+      expect(p.progress.etaMs).toBeNull();
+      expect(p.progress.activeOpening).toBe(1);
+      expect(p.progress.activeReading).toBe(2);
+      expect(p.sequence).toBeGreaterThan(1);
+      expect(p.runId).toBe(p.run.runId);
+    });
+
+    it("marks a fully unchanged run reused rather than leaving all rows pending", () => {
+      const s = state();
+      s.beginRun("sc", MODULES, { mode: "changed" });
+      for (const m of MODULES) {
+        s.setModuleLifecycle(m, "version-check", { moduleVersion: "12", previousCaptureVersion: "12" });
+        s.recordOutcome(m, "reused", { versionReason: "unchanged", moduleVersion: "12", previousCaptureVersion: "12" });
+      }
+      s.finishRun([]);
+      const p = s.status("sc", MODULES, null, null);
+      expect(p.modules.map((m) => [m.state, m.lifecycle, m.captureOutcome])).toEqual([
+        ["done", "reused", "reused"], ["done", "reused", "reused"]
+      ]);
+      expect(p.progress).toMatchObject({ modulesDone: 2, reused: 2, newlyCaptured: 0, completed: 2, pctByTime: 1, etaMs: 0 });
+      expect(p.run.status).toBe("completed");
+    });
+
+    it("distinguishes resumed stage, read success, failure after module-done and cancellation", () => {
+      const s = state();
+      s.beginRun("sc", ["A", "B", "C", "D"], { mode: "pipeline", pipelineDepth: 2 });
+      s.recordOutcome("A", "skipped");
+      s.handle({ type: "module-start", module: "B", index: 2, total: 4, moduleType: "eSpace" });
+      s.handle({ type: "module-done", module: "B", durationMs: 100, skippedCount: 0 });
+      s.recordOutcome("B", "stage-failed", { error: { code: "WRITE_FAILED", message: "staging failed" } });
+      s.setModuleLifecycle("C", "reading");
+      s.markCancelling();
+      s.recordOutcome("D", "not-started");
+      s.failRun("RUN_CANCELLED", "cancelled by operator");
+      const p = s.status("sc", ["A", "B", "C", "D"], null, null);
+      expect(p.run.status).toBe("cancelled");
+      expect(p.run.finalized).toBe(false);
+      expect(p.modules.map((m) => m.lifecycle)).toEqual(["reused", "failed", "cancelled", "not-started"]);
+      expect(p.modules.map((m) => m.captureOutcome)).toEqual(["already-staged", "none", "none", "none"]);
+      expect(p.progress.modulesFailed).toBe(1);
+      expect(p.progress.notStarted).toBe(2);
+      expect(p.progress.etaMs).toBeNull();
+      expect(p.progress.pctByTime).toBeLessThan(1);
+    });
+
+    it("does not confuse a stopped run with successful finalization", () => {
+      const s = state();
+      s.beginRun("sc", MODULES);
+      s.setModuleLifecycle("MOD_A_BL", "opening");
+      s.failRun("RUN_STOPPED", "Studio modal blocked opening");
+      const p = s.status("sc", MODULES, null, null);
+      expect(p.run.status).toBe("stopped");
+      expect(p.run.errorCode).toBe("RUN_STOPPED");
+      expect(p.modules[0]?.state).toBe("failed");
+      expect(p.run.finalized).toBe(false);
+      expect(p.progress.etaMs).toBeNull();
+    });
+  });
+
   describe("ETA", () => {
     it("is null while any unfinished module has no history", () => {
       const s = state();
@@ -171,6 +252,7 @@ describe("RunState", () => {
       // A finishes in 20s — this run is pacing at 2x its history.
       s.handle({ type: "module-start", module: "MOD_A_BL", index: 1, total: 2, moduleType: "eSpace" });
       s.handle({ type: "module-done", module: "MOD_A_BL", durationMs: 20_000, skippedCount: 0 });
+      s.recordOutcome("MOD_A_BL", "staged", { durationMs: 20_000 });
 
       const st = s.status("sc", MODULES, null, null);
       expect(st.progress.pace).toBe(2);
