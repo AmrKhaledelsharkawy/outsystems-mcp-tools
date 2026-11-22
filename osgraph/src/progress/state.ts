@@ -501,7 +501,7 @@ export class RunState {
     // Existing timing history was collected sequentially. It cannot predict rolling overlap or
     // version-aware reuse honestly; Ticket B will calibrate those modes from compatible traces.
     const etaMs =
-      !isActive || (this.complete && !this.finalized) ? null
+      !isActive || (this.complete && !this.finalized && this.lifecycle !== "running") ? null
         : this.finalized || this.complete ? 0
           : this.mode !== "full" || this.pipelineDepth > 1 ? null
             : etaKnown ? Math.round(remainingExp * (pace ?? 1)) : null;
