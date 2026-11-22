@@ -20,7 +20,7 @@ import { statSync } from "node:fs";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import { REBUILD_PHASES, type RebuildPerModule, type RebuildPhase, type RebuildProgressEvent, formatProgress } from "../rebuild/rebuild.js";
 import { readAllTimings } from "./timings.js";
-import type { ModuleCost, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
+import type { CaptureOutcome, ModuleCost, ModuleLifecycle, RunLifecycle, RunMode, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
 
 /** Silence longer than this reads as stalled. A fetch phase is legitimately quiet for 20+ minutes. */
 export const STALL_AFTER_MS = 30 * 60_000;
@@ -49,6 +49,12 @@ interface LiveModule {
   module: string;
   index: number;
   state: "pending" | "running" | "done" | "failed";
+  lifecycle: ModuleLifecycle;
+  captureOutcome: CaptureOutcome;
+  versionReason: string | null;
+  moduleVersion: string | null;
+  previousCaptureVersion: string | null;
+  openedHere: boolean | null;
   startedAt: number | null;
   finishedAt: number | null;
   actualMs: number | null;
@@ -93,6 +99,17 @@ export class RunState {
   private runStartedAt: number | null = null;
   private complete = false;
   private finalized = false;
+  private runSerial = 0;
+  private runId: string | null = null;
+  private sequence = 0;
+  private mode: RunMode = "idle";
+  private lifecycle: RunLifecycle = "idle";
+  private pipelineDepth = 1;
+  private readLimit = 4;
+  private traceEnabled = false;
+  private runFinishedAt: number | null = null;
+  private errorCode: string | null = null;
+  private errorMessage: string | null = null;
   private lastActivityAt: number | null = null;
   private log: StatusLogLine[] = [];
   /** Cached history, re-read at the start of each run (not per request: it is a file scan). */
@@ -116,9 +133,23 @@ export class RunState {
    * Starts a run. `modules` is the resolved walk order, so every row exists as `pending` from the
    * first poll — the page shows the whole plan immediately rather than growing a list.
    */
-  beginRun(scope: string, modules: readonly string[]): void {
+  beginRun(
+    scope: string,
+    modules: readonly string[],
+    config: { mode?: RunMode; pipelineDepth?: number; readLimit?: number; traceEnabled?: boolean } = {}
+  ): void {
     this.scope = scope;
     this.runStartedAt = this.now();
+    this.runId = `${this.runStartedAt}-${++this.runSerial}`;
+    this.sequence = 1;
+    this.mode = config.mode ?? "full";
+    this.lifecycle = "running";
+    this.pipelineDepth = Number.isInteger(config.pipelineDepth) && (config.pipelineDepth ?? 0) > 0 ? config.pipelineDepth! : 1;
+    this.readLimit = Number.isInteger(config.readLimit) && (config.readLimit ?? 0) > 0 ? config.readLimit! : 4;
+    this.traceEnabled = config.traceEnabled === true;
+    this.runFinishedAt = null;
+    this.errorCode = null;
+    this.errorMessage = null;
     this.complete = false;
     this.finalized = false;
     this.lastActivityAt = this.runStartedAt;
@@ -128,6 +159,12 @@ export class RunState {
       module,
       index: i + 1,
       state: "pending",
+      lifecycle: "pending",
+      captureOutcome: "none",
+      versionReason: null,
+      moduleVersion: null,
+      previousCaptureVersion: null,
+      openedHere: null,
       startedAt: null,
       finishedAt: null,
       actualMs: null,
@@ -145,10 +182,75 @@ export class RunState {
     this.byKey = new Map(this.modules.map((m) => [m.module.toLowerCase(), m]));
   }
 
+  /** Coordinator-sourced transition; never infer GUI state from which row is pending. */
+  setModuleLifecycle(
+    module: string,
+    lifecycle: ModuleLifecycle,
+    detail: { openedHere?: boolean; versionReason?: string; moduleVersion?: string | null; previousCaptureVersion?: string | null } = {}
+  ): void {
+    if (this.runStartedAt === null || this.complete) return;
+    const m = this.ensure(module);
+    const at = this.now();
+    m.lifecycle = lifecycle;
+    m.state = lifecycle === "completed" || lifecycle === "reused" ? "done"
+      : lifecycle === "failed" ? "failed"
+      : lifecycle === "pending" || lifecycle === "not-started" || lifecycle === "cancelled" ? "pending" : "running";
+    if (m.startedAt === null && lifecycle !== "pending" && lifecycle !== "not-started") m.startedAt = at;
+    if (detail.openedHere !== undefined) m.openedHere = detail.openedHere;
+    if (detail.versionReason !== undefined) m.versionReason = detail.versionReason;
+    if (detail.moduleVersion !== undefined) m.moduleVersion = detail.moduleVersion;
+    if (detail.previousCaptureVersion !== undefined) m.previousCaptureVersion = detail.previousCaptureVersion;
+    if (lifecycle === "completed" || lifecycle === "reused" || lifecycle === "failed" || lifecycle === "cancelled" || lifecycle === "not-started") {
+      m.finishedAt = at;
+      m.phase = null;
+    }
+    this.sequence++;
+    this.lastActivityAt = at;
+  }
+
+  /** Final outcome only after the coordinator has committed or reused a valid capture. */
+  recordOutcome(
+    module: string,
+    outcome: "staged" | "skipped" | "open-failed" | "stage-failed" | "not-started" | "reused",
+    detail: {
+      error?: { code: string; message: string };
+      openedHere?: boolean;
+      durationMs?: number;
+      nodeCount?: number;
+      edgeCount?: number;
+      versionReason?: string;
+      moduleVersion?: string | null;
+      previousCaptureVersion?: string | null;
+    } = {}
+  ): void {
+    const stage = outcome === "staged" ? "completed" : outcome === "skipped" || outcome === "reused" ? "reused"
+      : outcome === "not-started" ? "not-started" : "failed";
+    this.setModuleLifecycle(module, stage, detail);
+    const m = this.byKey.get(module.toLowerCase());
+    if (!m) return;
+    m.captureOutcome = outcome === "staged" ? "new" : outcome === "skipped" ? "already-staged" : outcome === "reused" ? "reused" : "none";
+    if (detail.durationMs !== undefined) m.actualMs = detail.durationMs;
+    if (detail.nodeCount !== undefined) m.nodes = detail.nodeCount;
+    if (detail.edgeCount !== undefined) m.edges = detail.edgeCount;
+    if (detail.error) {
+      m.error = detail.error.code;
+      m.errorMessage = detail.error.message;
+    }
+    this.sequence++;
+  }
+
+  markCancelling(): void {
+    if (!this.complete && this.runStartedAt !== null) {
+      this.lifecycle = "cancelling";
+      this.sequence++;
+    }
+  }
+
   /** Feeds one progress event. Safe to call before `beginRun` (the line is still logged). */
   handle(event: RebuildProgressEvent): void {
     const at = this.now();
     this.lastActivityAt = at;
+    this.sequence++;
     this.push({ at, text: formatProgress(event) });
 
     switch (event.type) {
@@ -157,7 +259,8 @@ export class RunState {
       case "module-start": {
         const m = this.ensure(event.module, event.index);
         m.state = "running";
-        m.startedAt = at;
+        m.lifecycle = "reading";
+        m.startedAt ??= at;
         m.phase = null;
         m.phaseStartedAt = null;
         m.phaseCount = null;
@@ -198,6 +301,7 @@ export class RunState {
       case "module-done": {
         const m = this.ensure(event.module);
         m.state = "done";
+        m.lifecycle = "staging"; // Read completed; the coordinator still must commit the stage entry.
         m.finishedAt = at;
         m.actualMs = event.durationMs;
         m.skipped = event.skippedCount;
@@ -219,11 +323,16 @@ export class RunState {
   finishRun(perModule: readonly RebuildPerModule[]): void {
     this.complete = true;
     this.finalized = true;
-    this.lastActivityAt = this.now();
+    this.lifecycle = "completed";
+    this.runFinishedAt = this.now();
+    this.lastActivityAt = this.runFinishedAt;
+    this.sequence++;
     for (const row of perModule) {
       const m = this.byKey.get(row.module.toLowerCase()) ?? this.byKey.get((row.requestedAs ?? "").toLowerCase());
       if (!m) continue;
       m.state = "done";
+      m.lifecycle = "completed";
+      m.captureOutcome = m.captureOutcome === "none" ? "new" : m.captureOutcome;
       m.nodes = row.nodeCount;
       m.edges = row.edgeCount;
       m.skipped = row.skippedCount;
@@ -240,15 +349,26 @@ export class RunState {
   failRun(code: string, message: string): void {
     this.complete = true;
     this.finalized = false;
-    this.lastActivityAt = this.now();
-    for (const running of this.modules) {
-      if (running.state !== "running") continue;
-      running.state = "failed";
-      running.error = code;
-      running.errorMessage = message;
-      running.phase = null;
+    this.lifecycle = code === "RUN_CANCELLED" ? "cancelled" : code === "RUN_STOPPED" ? "stopped" : "failed";
+    this.errorCode = code;
+    this.errorMessage = message;
+    this.runFinishedAt = this.now();
+    this.lastActivityAt = this.runFinishedAt;
+    for (const row of this.modules) {
+      if (row.lifecycle === "completed" || row.lifecycle === "reused" || row.lifecycle === "failed" || row.lifecycle === "not-started") continue;
+      if (row.state === "running" || row.lifecycle === "staging" || row.lifecycle === "closing") {
+        row.lifecycle = code === "RUN_CANCELLED" ? "cancelled" : "failed";
+        row.state = code === "RUN_CANCELLED" ? "pending" : "failed";
+        if (code !== "RUN_CANCELLED") {
+          row.error = code;
+          row.errorMessage = message;
+        }
+        row.phase = null;
+        row.finishedAt = this.runFinishedAt;
+      }
     }
-    this.push({ at: this.now(), text: `rebuild: FAILED ${code}: ${message}` });
+    this.sequence++;
+    this.push({ at: this.runFinishedAt, text: `rebuild: FAILED ${code}: ${message}` });
   }
 
   private ensure(module: string, index?: number): LiveModule {
@@ -261,6 +381,12 @@ export class RunState {
       module,
       index: index ?? this.modules.length + 1,
       state: "pending",
+      lifecycle: "pending",
+      captureOutcome: "none",
+      versionReason: null,
+      moduleVersion: null,
+      previousCaptureVersion: null,
+      openedHere: null,
       startedAt: null,
       finishedAt: null,
       actualMs: null,
