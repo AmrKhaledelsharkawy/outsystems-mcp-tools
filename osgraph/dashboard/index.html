@@ -302,7 +302,7 @@ $('scopeSel').onchange = () => {
   try { localStorage.setItem('osgraph.scope', SCOPE); } catch { /* private window */ }
   history.replaceState(null, '', `?scope=${encodeURIComponent(SCOPE)}`);
   document.title = `osgraph — ${SCOPE}`;
-  G = null; $('gModule').length = 1;
+  resetGraph();
   refresh();
   if (!$('graphView').hidden) loadGraph();
 };
@@ -555,38 +555,66 @@ async function pollDisc() {
 
 // ---------------- graph explorer ----------------
 let G = null, net = null, out = null, inn = null, byId = null, dir = 'dependents', depth = 1, selected = null;
-const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
-const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
-
-async function loadGraph() {
-  if (G) return;
-  $('gWhich').textContent = 'loading graph.json…';
-  const r = await fetch('/api/graph' + q(), { cache: 'no-store' });
-  if (!r.ok) { $('gWhich').textContent = (await r.json().catch(() => ({}))).error ?? 'no graph yet'; $('gStats').innerHTML = ''; if (net) { net.destroy(); net = null; } return; }
-  const which = r.headers.get('x-graph-which');
-  G = await r.json();
-  $('gWhich').innerHTML = which === 'current'
-    ? 'Showing the graph written by <b>this</b> run.'
-    : 'Showing the <b>previous</b> snapshot (pre-fix) until this run finishes.';
+let overviewGraph = null, graphController = null, graphDetailController = null, graphSearchController = null;
+let graphGeneration = 0, detailGeneration = 0, searchGeneration = 0, searchTimer = null, searchLookup = new Map();
+const graphQuery = (view, extra = '') => `/api/graph/view${q() ? q() + '&' : '?'}view=${view}${extra}`;
+function rebuildGraphIndex() {
   byId = new Map(G.nodes.map((n) => [n.id, n]));
   out = new Map(); inn = new Map();
   for (const l of G.links) {
     (out.get(l.source) ?? out.set(l.source, []).get(l.source)).push(l);
     (inn.get(l.target) ?? inn.set(l.target, []).get(l.target)).push(l);
   }
-  const o = G.graph?.osgraph ?? {};
-  const scope = new Set(o.modules ?? []);
-  const elems = G.nodes.filter((n) => n.kind !== 'module');
-  $('gStats').innerHTML = [
-    ['nodes', G.nodes.length.toLocaleString()], ['edges', G.links.length.toLocaleString()],
-    ['scope modules', scope.size], ['in-scope elements', elems.filter((n) => scope.has(n.module) && !n.external && !n.placeholder).length],
-    ['external refs', elems.filter((n) => n.external).length], ['placeholders', o.placeholderCount ?? 0],
-    ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '–']
-  ].map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('');
-  const sel = $('gModule');
-  for (const m of [...scope].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(m)}</option>`);
-  sel.onchange = () => drawModule(sel.value);
-  drawOverview();
+}
+function resetGraph() {
+  graphGeneration++; detailGeneration++; searchGeneration++;
+  graphController?.abort(); graphDetailController?.abort(); graphSearchController?.abort();
+  clearTimeout(searchTimer);
+  if (net) { net.destroy(); net = null; }
+  G = null; overviewGraph = null; out = null; inn = null; byId = null; selected = null; searchLookup.clear();
+  $('gModule').length = 1;
+}
+const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
+const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
+
+async function loadGraph() {
+  if (overviewGraph) return;
+  const generation = ++graphGeneration, scope = SCOPE;
+  graphController?.abort();
+  const controller = new AbortController();
+  graphController = controller;
+  $('gWhich').textContent = 'Loading bounded module overview…';
+  try {
+    const r = await fetch(graphQuery('overview'), { cache: 'no-store', signal: controller.signal });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `Graph HTTP ${r.status}`);
+    const data = await r.json();
+    if (controller.signal.aborted || generation !== graphGeneration || scope !== SCOPE) return;
+    overviewGraph = data;
+    G = data;
+    rebuildGraphIndex();
+    const which = r.headers.get('x-graph-which');
+    $('gWhich').textContent = which === 'previous'
+      ? 'Previous finalized snapshot — this run has not yet published its graph.'
+      : 'Finalized snapshot available. Module details are loaded on demand.';
+    if (data.limited) $('gWhich').textContent += ' Overview was capped to keep rendering responsive.';
+    const o = data.graph?.osgraph ?? {};
+    const stats = data.stats ?? {};
+    $('gStats').innerHTML = [
+      ['nodes', (stats.nodes ?? 0).toLocaleString()], ['edges', (stats.edges ?? 0).toLocaleString()],
+      ['scope modules', stats.modules ?? (o.modules ?? []).length], ['in-scope elements', stats.elementsInScope ?? '—'],
+      ['external refs', stats.external ?? '—'], ['placeholders', stats.placeholders ?? '—'],
+      ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '—']
+    ].map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+    const sel = $('gModule');
+    for (const name of [...(o.modules ?? [])].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(name)}</option>`);
+    sel.onchange = () => drawModule(sel.value);
+    drawOverview();
+  } catch (err) {
+    if (controller.signal.aborted || generation !== graphGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Graph overview unavailable';
+    $('gStats').textContent = '';
+    if (net) { net.destroy(); net = null; }
+  }
 }
 
 function layerOf(module) { return byId.get(`osgraph://${module}`)?.layer ?? 'UNKNOWN'; }
