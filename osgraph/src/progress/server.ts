@@ -293,12 +293,16 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
       return send(res, 415, JSON.stringify({ error: "Discovery actions require application/json." }));
     }
-    const body = (await readBody(req)) as Record<string, unknown>;
+    const body = await readBody(req);
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return send(res, 400, JSON.stringify({ error: "Discovery request must be a JSON object." }));
+    }
+    const input = body as Record<string, unknown>;
 
     if (url.pathname === "/api/discover/start") {
       // A discovery drives Service Studio, and so does a rebuild. Studio serialises badly enough
       // that letting both run would corrupt the rebuild's reads (ADR-0007).
-      if (options.state.rebuildActive && body["dryRun"] !== true) {
+      if (options.state.rebuildActive && input["dryRun"] !== true) {
         return send(
           res,
           409,
@@ -306,7 +310,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
         );
       }
       try {
-        return send(res, 200, JSON.stringify(await discovery.start(body)));
+        return send(res, 200, JSON.stringify(await discovery.start(input)));
       } catch (err) {
         return send(res, 409, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
@@ -317,7 +321,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     }
     if (url.pathname === "/api/discover/save") {
       try {
-        return send(res, 200, JSON.stringify(discovery.save(body)));
+        return send(res, 200, JSON.stringify(discovery.save(input)));
       } catch (err) {
         return send(res, 400, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
