@@ -232,11 +232,6 @@
 -->
 <script src="vis-network.min.js" onerror="window.__visLocalMissing = true"></script>
 <script>
-  if (window.__visLocalMissing) {
-    document.write('<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js" onerror="window.__visFailed = true"><\/script>');
-  }
-</script>
-<script>
 const $ = (id) => document.getElementById(id);
 const fmtDur = (ms) => {
   if (ms === null || ms === undefined) return '–';
@@ -386,9 +381,27 @@ async function discInit() {
   } catch { /* autocomplete is optional */ }
   pollDisc();
 }
+let csrfToken = null;
 async function post(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  return { ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) };
+  try {
+    if (!csrfToken) {
+      const tokenResponse = await fetch('/api/security/csrf', { cache: 'no-store' });
+      if (!tokenResponse.ok) throw new Error('Local discovery authorization is unavailable');
+      const tokenBody = await tokenResponse.json();
+      csrfToken = typeof tokenBody.token === 'string' ? tokenBody.token : null;
+      if (!csrfToken) throw new Error('Discovery security token is missing');
+    }
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-osgraph-csrf': csrfToken },
+      body: JSON.stringify(body),
+      cache: 'no-store'
+    });
+    if (r.status === 403) csrfToken = null;
+    return { ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) };
+  } catch (err) {
+    return { ok: false, status: 0, body: { error: err instanceof Error ? err.message : 'Network error' } };
+  }
 }
 $('dStart').onclick = async () => {
   $('dMsg').textContent = 'starting…';
