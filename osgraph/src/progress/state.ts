@@ -188,7 +188,7 @@ export class RunState {
     lifecycle: ModuleLifecycle,
     detail: { openedHere?: boolean; versionReason?: string; moduleVersion?: string | null; previousCaptureVersion?: string | null } = {}
   ): void {
-    if (this.runStartedAt === null || this.complete) return;
+    if (this.runStartedAt === null) return;
     const m = this.ensure(module);
     const at = this.now();
     m.lifecycle = lifecycle;
@@ -438,6 +438,14 @@ export class RunState {
         module,
         layer: layerOf(module),
         state: m?.state ?? "pending",
+        lifecycle: m?.lifecycle ?? "pending",
+        captureOutcome: m?.captureOutcome ?? "none",
+        versionReason: m?.versionReason ?? null,
+        moduleVersion: m?.moduleVersion ?? null,
+        previousCaptureVersion: m?.previousCaptureVersion ?? null,
+        openedHere: m?.openedHere ?? null,
+        startedAt: m?.startedAt ?? null,
+        finishedAt: m?.finishedAt ?? null,
         actualMs: m?.actualMs ?? null,
         expectedMs: exp?.ms ?? null,
         nodes: m?.nodes ?? null,
@@ -451,7 +459,9 @@ export class RunState {
 
     const current = isActive ? this.currentInfo(now, expected) : null;
     // Pipelined runs read several modules at once; `current` stays the first for the legacy view.
-    const runningNow = isActive ? this.modules.filter((x) => x.state === "running") : [];
+    const runningNow = isActive
+      ? this.modules.filter((x) => ["opening", "version-check", "queued-for-read", "reading", "staging", "closing"].includes(x.lifecycle))
+      : [];
     const activeModules = runningNow.length > 0 ? runningNow.map((x) => this.infoOf(x, now, expected)) : undefined;
 
     // Weight by expected duration so one huge module cannot read as "1 of 30"; a module with no
@@ -462,9 +472,16 @@ export class RunState {
     const totalExp = rows.reduce((n, r) => n + weight(r), 0) || 1;
     const doneRows = rows.filter((r) => r.state === "done");
     const doneExp = doneRows.reduce((n, r) => n + weight(r), 0);
+    // Each active module contributes its OWN partial progress, including concurrent waves.
+    const currentByName = new Map((activeModules ?? []).map((m) => [m.module.toLowerCase(), m]));
+    const activeDoneExp = rows.filter((r) => r.state === "running" && r.lifecycle === "reading")
+      .reduce((sum, r) => {
+        const fraction = currentByName.get(r.module.toLowerCase())?.pct;
+        return sum + (fraction !== undefined && fraction !== null && Number.isFinite(fraction) ? weight(r) * Math.max(0, Math.min(0.99, fraction)) : 0);
+      }, 0);
+    const pctByTime = this.finalized && isActive ? 1 : Math.max(0, Math.min(0.999, (doneExp + activeDoneExp) / totalExp));
     const curRow = rows.find((r) => r.state === "running");
     const curDoneExp = curRow && current?.pct != null ? weight(curRow) * current.pct : 0;
-    const pctByTime = this.finalized && isActive ? 1 : Math.min(0.999, (doneExp + curDoneExp) / totalExp);
 
     // Pace from THIS run only: old timings drift with Studio load, so a run that is uniformly
     // 1.4x slower than history should push the ETA out rather than keep promising the old figure.
@@ -481,12 +498,36 @@ export class RunState {
     // Only promise an ETA when every unfinished module has history: one unknown module can be
     // the one that takes 40 minutes, and a confidently wrong ETA is worse than none.
     const etaKnown = rows.filter((r) => r.state !== "done").every((r) => r.expectedMs !== null);
-    const etaMs = !isActive ? null : this.finalized || this.complete ? 0 : etaKnown ? Math.round(remainingExp * (pace ?? 1)) : null;
+    // Existing timing history was collected sequentially. It cannot predict rolling overlap or
+    // version-aware reuse honestly; Ticket B will calibrate those modes from compatible traces.
+    const etaMs =
+      !isActive || (this.complete && !this.finalized) ? null
+        : this.finalized || this.complete ? 0
+          : this.mode !== "full" || this.pipelineDepth > 1 ? null
+            : etaKnown ? Math.round(remainingExp * (pace ?? 1)) : null;
 
+    const completed = doneRows.length;
+    const activeReadCount = rows.filter((r) => r.lifecycle === "reading").length;
+    const activeOpenCount = rows.filter((r) => r.lifecycle === "opening").length;
+    const activeCloseCount = rows.filter((r) => r.lifecycle === "closing").length;
     return {
+      schemaVersion: 2,
+      runId: isActive ? this.runId : null,
+      sequence: isActive ? this.sequence : 0,
+      serverNow: now,
       now,
       scope,
       run: {
+        mode: isActive ? this.mode : "idle",
+        status: isActive ? this.lifecycle : "idle",
+        runId: isActive ? this.runId : null,
+        sequence: isActive ? this.sequence : 0,
+        pipelineDepth: isActive ? this.pipelineDepth : 1,
+        readLimit: isActive ? this.readLimit : 4,
+        traceEnabled: isActive && this.traceEnabled,
+        finishedAt: isActive ? this.runFinishedAt : null,
+        errorCode: isActive ? this.errorCode : null,
+        errorMessage: isActive ? this.errorMessage : null,
         startedAt: isActive ? this.runStartedAt : null,
         elapsedMs: isActive && this.runStartedAt !== null ? now - this.runStartedAt : null,
         complete: isActive ? this.complete : false,
@@ -497,6 +538,14 @@ export class RunState {
         noRunLog: !isActive || this.runStartedAt === null
       },
       progress: {
+        completed,
+        newlyCaptured: rows.filter((r) => r.captureOutcome === "new").length,
+        reused: rows.filter((r) => r.captureOutcome === "reused").length,
+        alreadyStaged: rows.filter((r) => r.captureOutcome === "already-staged").length,
+        notStarted: rows.filter((r) => r.lifecycle === "not-started" || r.lifecycle === "cancelled").length,
+        activeReading: activeReadCount,
+        activeOpening: activeOpenCount,
+        activeClosing: activeCloseCount,
         modulesDone: doneRows.length,
         modulesTotal: rows.length,
         modulesFailed: rows.filter((r) => r.state === "failed").length,
@@ -504,7 +553,7 @@ export class RunState {
         pctByTime,
         pace,
         etaMs,
-        etaAt: etaMs ? now + etaMs : null
+        etaAt: etaMs === null ? null : now + etaMs
       },
       current,
       ...(activeModules !== undefined ? { activeModules } : {}),
@@ -513,7 +562,7 @@ export class RunState {
         exists: graphM !== null,
         writtenAt: graphM,
         fromThisRun: isActive && this.finalized,
-        hasPrevious: false,
+        hasPrevious: graphM !== null && isActive && !this.finalized,
         meta
       },
       flows,
