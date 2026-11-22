@@ -298,6 +298,7 @@ async function loadScopes() {
 }
 $('scopeSel').onchange = () => {
   SCOPE = $('scopeSel').value;
+  lastStatus = null;
   try { localStorage.setItem('osgraph.scope', SCOPE); } catch { /* private window */ }
   history.replaceState(null, '', `?scope=${encodeURIComponent(SCOPE)}`);
   document.title = `osgraph — ${SCOPE}`;
@@ -405,7 +406,7 @@ function renderRun(s) {
     }).join('');
   } else if (!s.run.finalized && !s.run.complete && next) {
     $('curName').textContent = next.module;
-    $('curSub').textContent = 'opening in Service Studio (osopener) / starting…';
+    $('curSub').textContent = 'queued — waiting for an authoritative opening/read event';
     $('curBar').firstElementChild.style.width = '0';
     $('phases').innerHTML = PHASES.map((ph) => `<div class="ph"><b>${ph}</b>—</div>`).join('');
   } else {
@@ -417,24 +418,42 @@ function renderRun(s) {
   $('log').innerHTML = s.logTail.map((l) => `<span class="t">${l.at ? new Date(l.at).toLocaleTimeString() : '        '}</span> ${esc(l.text)}`).join('\n');
   $('log').scrollTop = 1e9;
 
-  // table
-  const counts = s.modules.reduce((a, m) => ((a[m.state] = (a[m.state] ?? 0) + 1), a), {});
+  renderModules(s);
+}
+function renderModules(s) {
+  const counts = s.modules.reduce((a, m) => ((a[m.lifecycle ?? m.state] = (a[m.lifecycle ?? m.state] ?? 0) + 1), a), {});
   $('modCounts').textContent = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ');
-  const nextKey = !c && next ? next.module : null;
-  $('rows').innerHTML = s.modules.map((m) => {
-    const state = m.module === nextKey && !s.run.complete ? 'opening' : m.state;
-    const ratio = m.actualMs && m.expectedMs ? m.actualMs / m.expectedMs : null;
-    const bar = ratio ? `<span class="mini" title="${(ratio * 100).toFixed(0)}% of last run"><i class="${ratio > 1.25 ? 'slow' : ''}" style="width:${Math.min(100, ratio * 50)}%"></i></span> ${(ratio * 100).toFixed(0)}%` : '';
-    const time = state === 'running' && c ? fmtDur(c.elapsedMs) : fmtDur(m.actualMs);
+  const activeMap = new Map((s.activeModules ?? (s.current ? [s.current] : [])).map((x) => [x.module.toLowerCase(), x]));
+  const subset = s.modules.filter((m) => {
+    if (modSearch && !m.module.toLowerCase().includes(modSearch)) return false;
+    const lc = m.lifecycle ?? m.state;
+    if (modFilter === 'active') return activeLifecycles.has(lc);
+    if (modFilter === 'pending') return lc === 'pending';
+    if (modFilter === 'completed') return lc === 'completed' && m.captureOutcome !== 'reused' && m.captureOutcome !== 'already-staged';
+    if (modFilter === 'reused') return lc === 'reused';
+    if (modFilter === 'failed') return lc === 'failed';
+    if (modFilter === 'not-started') return lc === 'not-started' || lc === 'cancelled';
+    return !modFilter || lc === modFilter;
+  });
+  $('visibleModCount').textContent = `${subset.length} of ${s.modules.length} shown`;
+  $('rows').innerHTML = subset.map((m) => {
+    const lc = m.lifecycle ?? m.state;
+    const live = activeMap.get(m.module.toLowerCase());
+    const ratio = s.run.mode === 'full' && s.run.pipelineDepth === 1 && m.captureOutcome !== 'reused' &&
+      m.captureOutcome !== 'already-staged' && m.actualMs > 0 && m.expectedMs > 0 ? m.actualMs / m.expectedMs : null;
+    const bar = Number.isFinite(ratio) && ratio > 0
+      ? `<span class="mini" title="${(ratio * 100).toFixed(0)}% of last run"><i class="${ratio > 1.25 ? 'slow' : ''}" style="width:${Math.min(100, ratio * 50)}%"></i></span> ${(ratio * 100).toFixed(0)}%`
+      : '';
+    const time = live ? fmtDur(live.elapsedMs) : fmtDur(m.actualMs);
     const err = m.error ? ` <span class="muted" title="${esc(m.errorMessage)}">${esc(m.error)}</span>` : '';
-    return `<tr class="${state}"><td class="num">${m.index}</td><td class="mod">${esc(m.module)}</td><td>${esc(m.layer)}</td>` +
-      `<td><span class="chip ${state}">${state}</span>${err}</td><td class="num">${m.nodes ?? ''}</td><td class="num">${m.edges ?? ''}</td>` +
-      `<td class="num">${m.actualMs || state === 'running' ? time : ''}</td><td class="num">${fmtDur(m.expectedMs)}</td><td>${bar}</td>` +
+    const ver = m.versionReason ? ` <span class="muted" title="${esc((m.previousCaptureVersion ?? '?') + ' → ' + (m.moduleVersion ?? '?'))}">(${esc(m.versionReason)})</span>` : '';
+    return `<tr class="${esc(m.state)}"><td class="num">${m.index}</td><td class="mod">${esc(m.module)}</td><td>${esc(m.layer)}</td>` +
+      `<td><span class="chip ${lc === 'reused' ? 'reused' : esc(m.state)}">${esc(lc)}</span>${ver}${err}</td><td class="num">${m.nodes ?? ''}</td><td class="num">${m.edges ?? ''}</td>` +
+      `<td class="num">${m.actualMs != null || live ? time : ''}</td><td class="num">${fmtDur(m.expectedMs)}</td><td>${bar}</td>` +
       `<td class="muted">${m.stagedAt ? fmtClock(Date.parse(m.stagedAt)) : ''}</td></tr>`;
   }).join('');
 }
 loadScopes().then(() => { document.title = `osgraph — ${SCOPE}`; refresh(); });
-setInterval(refresh, 3000);
 
 // ---------------- tabs ----------------
 function showTab(t) {
@@ -495,7 +514,7 @@ async function pollDisc() {
   try {
     s = await (await fetch('/api/discover/status' + (discId ? `?id=${encodeURIComponent(discId)}` : ''), { cache: 'no-store' })).json();
   } catch { discTimer = setTimeout(pollDisc, 3000); return; }
-  const busy = Boolean(lastStatus && !lastStatus.run.complete && !lastStatus.run.finalized && !lastStatus.run.stalled);
+  const busy = Boolean(lastStatus && ['running', 'cancelling'].includes(lastStatus.run.status));
   const dry = $('dDry').checked;
   $('dStart').disabled = Boolean(s.running) || (busy && !dry);
   $('dStart').title = busy && !dry ? 'A rebuild is using Service Studio' : '';
