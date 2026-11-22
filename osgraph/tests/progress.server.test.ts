@@ -6,7 +6,8 @@
  * network from driving someone's Service Studio or corrupting a running rebuild's reads.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Script } from "node:vm";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,6 +98,17 @@ describe("isLocal", () => {
   });
 });
 
+describe("dashboard script syntax", () => {
+  it("parses every inline script without a browser (catch template literal regressions)", () => {
+    const html = readFileSync(join(process.cwd(), "dashboard", "index.html"), "utf8");
+    const inlineScripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+      .map((match) => match[1] ?? "")
+      .filter((script) => script.trim().length > 0);
+    expect(inlineScripts.length).toBeGreaterThan(0);
+    for (const script of inlineScripts) expect(() => new Script(script)).not.toThrow();
+  });
+});
+
 describe("site routes", () => {
   it("serves the dashboard page at / and /index.html", async () => {
     const site = await serve();
@@ -155,6 +167,51 @@ describe("site routes", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("x-graph-which")).toBe("current");
     expect(JSON.parse(res.body)).toEqual({ nodes: [], edges: [] });
+  });
+
+  it("serves bounded overview, one module and server search without sending the full graph", async () => {
+    const site = await serve();
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    const nodes = [
+      { id: "osgraph://MOD_A_BL", kind: "module", module: "MOD_A_BL", label: "MOD_A_BL" },
+      { id: "osgraph://MOD_B_CW", kind: "module", module: "MOD_B_CW", label: "MOD_B_CW" },
+      ...Array.from({ length: 800 }, (_, i) => ({
+        id: `osgraph://MOD_A_BL/S${i}`, kind: "ServerAction", label: `ServerAction_${i}`, module: "MOD_A_BL"
+      }))
+    ];
+    const graph = { nodes, links: [
+      { source: "osgraph://MOD_A_BL", target: "osgraph://MOD_B_CW", relation: "uses" },
+      { source: "osgraph://MOD_A_BL/S0", target: "osgraph://MOD_B_CW", relation: "uses" }
+    ], graph: { osgraph: { modules: MODULES } } };
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), JSON.stringify(graph));
+    const overview = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=overview")).body) as {
+      nodes: { id: string }[]; links: unknown[]; stats: { nodes: number; edges: number }
+    };
+    expect(overview.nodes).toHaveLength(2);
+    expect(overview.stats.nodes).toBe(802);
+    expect(overview.stats.edges).toBe(2);
+    const module = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=module&module=MOD_A_BL")).body) as {
+      nodes: unknown[]; links: unknown[]; limited: boolean
+    };
+    expect(module.nodes.length).toBeLessThanOrEqual(900);
+    expect(module.limited).toBe(true);
+    const search = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=search&q=ServerAction&limit=5")).body) as {
+      results: { label: string }[]; count: number
+    };
+    expect(search.results).toHaveLength(5);
+    expect(search.count).toBe(800);
+    expect((await get(site, "/api/graph/view?scope=demo&view=not-a-view")).status).toBe(400);
+  });
+
+  it("labels prior graph as previous while a scope rebuild is active", async () => {
+    const state = new RunState({ graphDir });
+    state.beginRun(SCOPE, MODULES);
+    const site = await serve({ state });
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), JSON.stringify({ nodes: [], links: [], graph: { osgraph: { modules: MODULES } } }));
+    const res = await get(site, "/api/graph/view?scope=demo&view=overview");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-graph-which")).toBe("previous");
   });
 
   it("404s an unknown path", async () => {

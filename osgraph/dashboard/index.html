@@ -302,7 +302,7 @@ $('scopeSel').onchange = () => {
   try { localStorage.setItem('osgraph.scope', SCOPE); } catch { /* private window */ }
   history.replaceState(null, '', `?scope=${encodeURIComponent(SCOPE)}`);
   document.title = `osgraph — ${SCOPE}`;
-  G = null; $('gModule').length = 1;
+  resetGraph();
   refresh();
   if (!$('graphView').hidden) loadGraph();
 };
@@ -555,38 +555,66 @@ async function pollDisc() {
 
 // ---------------- graph explorer ----------------
 let G = null, net = null, out = null, inn = null, byId = null, dir = 'dependents', depth = 1, selected = null;
-const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
-const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
-
-async function loadGraph() {
-  if (G) return;
-  $('gWhich').textContent = 'loading graph.json…';
-  const r = await fetch('/api/graph' + q(), { cache: 'no-store' });
-  if (!r.ok) { $('gWhich').textContent = (await r.json().catch(() => ({}))).error ?? 'no graph yet'; $('gStats').innerHTML = ''; if (net) { net.destroy(); net = null; } return; }
-  const which = r.headers.get('x-graph-which');
-  G = await r.json();
-  $('gWhich').innerHTML = which === 'current'
-    ? 'Showing the graph written by <b>this</b> run.'
-    : 'Showing the <b>previous</b> snapshot (pre-fix) until this run finishes.';
+let overviewGraph = null, graphController = null, graphDetailController = null, graphSearchController = null;
+let graphGeneration = 0, detailGeneration = 0, searchGeneration = 0, searchTimer = null, searchLookup = new Map();
+const graphQuery = (view, extra = '') => `/api/graph/view${q() ? q() + '&' : '?'}view=${view}${extra}`;
+function rebuildGraphIndex() {
   byId = new Map(G.nodes.map((n) => [n.id, n]));
   out = new Map(); inn = new Map();
   for (const l of G.links) {
     (out.get(l.source) ?? out.set(l.source, []).get(l.source)).push(l);
     (inn.get(l.target) ?? inn.set(l.target, []).get(l.target)).push(l);
   }
-  const o = G.graph?.osgraph ?? {};
-  const scope = new Set(o.modules ?? []);
-  const elems = G.nodes.filter((n) => n.kind !== 'module');
-  $('gStats').innerHTML = [
-    ['nodes', G.nodes.length.toLocaleString()], ['edges', G.links.length.toLocaleString()],
-    ['scope modules', scope.size], ['in-scope elements', elems.filter((n) => scope.has(n.module) && !n.external && !n.placeholder).length],
-    ['external refs', elems.filter((n) => n.external).length], ['placeholders', o.placeholderCount ?? 0],
-    ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '–']
-  ].map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('');
-  const sel = $('gModule');
-  for (const m of [...scope].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(m)}</option>`);
-  sel.onchange = () => drawModule(sel.value);
-  drawOverview();
+}
+function resetGraph() {
+  graphGeneration++; detailGeneration++; searchGeneration++;
+  graphController?.abort(); graphDetailController?.abort(); graphSearchController?.abort();
+  clearTimeout(searchTimer);
+  if (net) { net.destroy(); net = null; }
+  G = null; overviewGraph = null; out = null; inn = null; byId = null; selected = null; searchLookup.clear();
+  $('gModule').length = 1;
+}
+const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
+const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
+
+async function loadGraph() {
+  if (overviewGraph) return;
+  const generation = ++graphGeneration, scope = SCOPE;
+  graphController?.abort();
+  const controller = new AbortController();
+  graphController = controller;
+  $('gWhich').textContent = 'Loading bounded module overview…';
+  try {
+    const r = await fetch(graphQuery('overview'), { cache: 'no-store', signal: controller.signal });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `Graph HTTP ${r.status}`);
+    const data = await r.json();
+    if (controller.signal.aborted || generation !== graphGeneration || scope !== SCOPE) return;
+    overviewGraph = data;
+    G = data;
+    rebuildGraphIndex();
+    const which = r.headers.get('x-graph-which');
+    $('gWhich').textContent = which === 'previous'
+      ? 'Previous finalized snapshot — this run has not yet published its graph.'
+      : 'Finalized snapshot available. Module details are loaded on demand.';
+    if (data.limited) $('gWhich').textContent += ' Overview was capped to keep rendering responsive.';
+    const o = data.graph?.osgraph ?? {};
+    const stats = data.stats ?? {};
+    $('gStats').innerHTML = [
+      ['nodes', (stats.nodes ?? 0).toLocaleString()], ['edges', (stats.edges ?? 0).toLocaleString()],
+      ['scope modules', stats.modules ?? (o.modules ?? []).length], ['in-scope elements', stats.elementsInScope ?? '—'],
+      ['external refs', stats.external ?? '—'], ['placeholders', stats.placeholders ?? '—'],
+      ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '—']
+    ].map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+    const sel = $('gModule');
+    for (const name of [...(o.modules ?? [])].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(name)}</option>`);
+    sel.onchange = () => drawModule(sel.value);
+    drawOverview();
+  } catch (err) {
+    if (controller.signal.aborted || generation !== graphGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Graph overview unavailable';
+    $('gStats').textContent = '';
+    if (net) { net.destroy(); net = null; }
+  }
 }
 
 function layerOf(module) { return byId.get(`osgraph://${module}`)?.layer ?? 'UNKNOWN'; }
@@ -594,10 +622,77 @@ function draw(nodes, edges, physics = true) {
   // Say why, rather than throwing "vis is not defined". The tables and the progress tab are
   // unaffected - only this node-link canvas needs the library.
   if (typeof vis === 'undefined') {
-    $('net').innerHTML =
-      '<div style="padding:24px;line-height:1.6">The node-link view needs <code>vis-network</code>, ' +
-      'which could not be loaded. Every table on this page still works.<br><br>' +
-      'To draw it offline, save <code>vis-network.min.js</code> into the kit\'s <code>dashboard/</code> folder.</div>';
+    // Fully local, dependency-free fallback for offline/security-hardened installations. Draw only
+    // a bounded subset; the server search and focused module detail remain available separately.
+    if (net) { net.destroy(); net = null; }
+    const root = $('net');
+    root.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'sub';
+    note.style.padding = '10px';
+    note.textContent = 'Offline SVG explorer (bounded preview; no external scripts). ' +
+      (nodes.length > 150 ? `Showing 150 of ${nodes.length} nodes. Use search or module selection to narrow the graph.` : 'Select a node for details.');
+    root.appendChild(note);
+    const visible = nodes.slice(0, 150);
+    const ids = new Set(visible.map((n) => n.id));
+    const cols = 8, tileW = 170, tileH = 68;
+    const width = cols * tileW + 30, height = Math.max(430, Math.ceil(visible.length / cols) * tileH + 30);
+    const scroller = document.createElement('div');
+    scroller.style.cssText = 'overflow:auto; max-height:68vh; max-width:100%;';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Dependency graph preview');
+    const positions = new Map();
+    visible.forEach((n, i) => positions.set(n.id, {
+      x: (i % cols) * tileW + tileW / 2 + 15,
+      y: Math.floor(i / cols) * tileH + 45
+    }));
+    for (const e of edges.slice(0, 500)) {
+      if (!ids.has(e.from) || !ids.has(e.to)) continue;
+      const a = positions.get(e.from), b = positions.get(e.to);
+      const line = document.createElementNS(svg.namespaceURI, 'line');
+      for (const [key, val] of Object.entries({
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'currentColor', 'stroke-opacity': '.22'
+      })) line.setAttribute(key, String(val));
+      svg.appendChild(line);
+    }
+    for (const n of visible) {
+      const p = positions.get(n.id);
+      const group = document.createElementNS(svg.namespaceURI, 'g');
+      group.setAttribute('tabindex', '0');
+      group.setAttribute('role', 'button');
+      group.setAttribute('aria-label', String(n.title ?? n.label ?? n.id));
+      group.setAttribute('style', 'cursor:pointer');
+      const rect = document.createElementNS(svg.namespaceURI, 'rect');
+      for (const [key, val] of Object.entries({
+        x: p.x - 72, y: p.y - 18, width: 144, height: 38, rx: 7,
+        fill: n.color ?? '#8894a3', 'fill-opacity': '.16',
+        stroke: n.color ?? '#8894a3', 'stroke-width': '1'
+      })) rect.setAttribute(key, String(val));
+      const label = document.createElementNS(svg.namespaceURI, 'text');
+      label.setAttribute('x', String(p.x));
+      label.setAttribute('y', String(p.y + 4));
+      label.setAttribute('font-size', '10');
+      label.setAttribute('fill', 'currentColor');
+      label.setAttribute('text-anchor', 'middle');
+      label.textContent = String(n.label ?? n.id).slice(0, 26);
+      const title = document.createElementNS(svg.namespaceURI, 'title');
+      title.textContent = String(n.title ?? n.label ?? n.id);
+      group.append(rect, label, title);
+      const choose = () => { if (byId?.has(n.id)) select(n.id); };
+      group.addEventListener('click', choose);
+      group.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+      group.addEventListener('dblclick', () => {
+        const node = byId?.get(n.id);
+        if (node?.kind === 'module' && node.module) { $('gModule').value = node.module; drawModule(node.module); }
+      });
+      svg.appendChild(group);
+    }
+    scroller.appendChild(svg);
+    root.appendChild(scroller);
     return;
   }
   const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
@@ -630,29 +725,45 @@ function drawOverview() {
     G.links.filter((l) => byId.get(l.source)?.kind === 'module' && byId.get(l.target)?.kind === 'module').map((l) => ({ from: l.source, to: l.target }))
   );
 }
-function drawModule(module) {
-  if (!module) return drawOverview();
-  const ids = new Set(G.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
-  const edges = [];
-  const extra = new Set();
-  for (const id of ids) {
-    for (const l of out.get(id) ?? []) { edges.push(l); if (!ids.has(l.target)) extra.add(l.target); }
-    for (const l of inn.get(id) ?? []) { if (byId.get(l.source)?.kind === 'module') continue; edges.push(l); if (!ids.has(l.source)) extra.add(l.source); }
+async function drawModule(module) {
+  if (!module) {
+    detailGeneration++;
+    graphDetailController?.abort();
+    G = overviewGraph;
+    if (G) { rebuildGraphIndex(); drawOverview(); }
+    return;
   }
-  const all = [...ids, ...extra].filter((id) => byId.has(id));
-  if (all.length > 900) $('gWhich').insertAdjacentHTML('beforeend', `<br><span class="muted">${all.length} nodes — layout may take a moment.</span>`);
-  draw(
-    all.map((id) => {
-      const n = byId.get(id);
-      const own = ids.has(id);
-      return {
-        id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
-        color: n.placeholder ? '#d23b3b' : own ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
-        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder — unresolved)' : ''}`
-      };
-    }),
-    edges.filter((l) => byId.has(l.source) && byId.has(l.target)).map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
-  );
+  const generation = ++detailGeneration, scope = SCOPE;
+  graphDetailController?.abort();
+  const controller = new AbortController();
+  graphDetailController = controller;
+  try {
+    const r = await fetch(graphQuery('module', `&module=${encodeURIComponent(module)}`), {
+      cache: 'no-store', signal: controller.signal
+    });
+    if (!r.ok) throw new Error('Module graph unavailable');
+    const sub = await r.json();
+    if (controller.signal.aborted || generation !== detailGeneration || scope !== SCOPE || !overviewGraph) return;
+    // Keep at most one bounded module subset in browser memory, in addition to the module overview.
+    const mergedNodes = new Map([...overviewGraph.nodes, ...sub.nodes].map((n) => [n.id, n]));
+    G = { ...overviewGraph, nodes: [...mergedNodes.values()], links: sub.links };
+    rebuildGraphIndex();
+    const ids = new Set(sub.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
+    const all = sub.nodes.filter((n) => byId.has(n.id));
+    const edges = sub.links.filter((l) => byId.has(l.source) && byId.has(l.target));
+    if (sub.limited) $('gWhich').textContent = `Module ${module}: showing a bounded subset; use search to find other elements.`;
+    draw(
+      all.map((n) => ({
+        id: n.id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
+        color: n.placeholder ? '#d23b3b' : ids.has(n.id) ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
+        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder)' : ''}`
+      })),
+      edges.map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
+    );
+  } catch (err) {
+    if (controller.signal.aborted || generation !== detailGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Module graph unavailable';
+  }
 }
 function select(id) {
   selected = id;
@@ -681,24 +792,49 @@ function renderImpact() {
   }
   seen.delete(selected);
   const items = [...seen.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
-  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth}`;
+  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth} of the loaded module subset`;
   $('impact').innerHTML = items.slice(0, 400).map(([id, d]) => `<li data-id="${esc(id)}" title="${esc(id)}">${d}· ${esc(id.replace('osgraph://', ''))}</li>`).join('');
   if (net) net.selectNodes([selected, ...items.map((x) => x[0])].filter((x) => net.body.data.nodes.get(x)));
 }
 $('impact').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
 $('gResults').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
-function focusNode(id) {
-  const n = byId.get(id);
+async function focusNode(id) {
+  const n = byId?.get(id) ?? searchLookup.get(id);
   if (!n) return;
-  if (n.module && $('gModule').value !== n.module && n.kind !== 'module') { $('gModule').value = (G.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : ''; if ($('gModule').value) drawModule(n.module); }
+  if (n.module && n.kind !== 'module') {
+    $('gModule').value = (overviewGraph?.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : '';
+    if ($('gModule').value) await drawModule(n.module);
+  }
+  if (!byId?.has(id)) return;
   select(id);
   if (net?.body.data.nodes.get(id)) net.focus(id, { scale: 1.1, animation: true });
 }
 $('gSearch').oninput = () => {
-  const q = $('gSearch').value.trim().toLowerCase();
-  if (q.length < 2 || !G) { $('gResults').innerHTML = ''; return; }
-  const hits = G.nodes.filter((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)).slice(0, 60);
-  $('gResults').innerHTML = hits.map((n) => `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`).join('');
+  clearTimeout(searchTimer);
+  graphSearchController?.abort();
+  const q = $('gSearch').value.trim();
+  if (q.length < 2 || !overviewGraph) { $('gResults').textContent = ''; searchLookup.clear(); return; }
+  const generation = ++searchGeneration, scope = SCOPE;
+  searchTimer = setTimeout(async () => {
+    const controller = new AbortController();
+    graphSearchController = controller;
+    try {
+      const r = await fetch(graphQuery('search', `&q=${encodeURIComponent(q)}&limit=60`), {
+        cache: 'no-store', signal: controller.signal
+      });
+      if (!r.ok) throw new Error('Search unavailable');
+      const data = await r.json();
+      if (controller.signal.aborted || generation !== searchGeneration || scope !== SCOPE) return;
+      searchLookup = new Map(data.results.map((n) => [n.id, n]));
+      $('gResults').innerHTML = data.results.map((n) =>
+        `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`
+      ).join('');
+      if (data.count > data.results.length) $('gResults').insertAdjacentHTML('beforeend',
+        `<li class="muted">${data.count - data.results.length} more matches; refine your search</li>`);
+    } catch {
+      if (!controller.signal.aborted && generation === searchGeneration) $('gResults').textContent = 'Search unavailable';
+    }
+  }, 250);
 };
 $('dirDep').onclick = () => { dir = 'dependents'; $('dirDep').className = 'on'; $('dirDeps').className = ''; renderImpact(); };
 $('dirDeps').onclick = () => { dir = 'dependencies'; $('dirDeps').className = 'on'; $('dirDep').className = ''; renderImpact(); };
