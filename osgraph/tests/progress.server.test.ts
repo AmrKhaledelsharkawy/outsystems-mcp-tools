@@ -6,7 +6,8 @@
  * network from driving someone's Service Studio or corrupting a running rebuild's reads.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Script } from "node:vm";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,6 +95,17 @@ describe("isLocal", () => {
     // Guards against a `startsWith('127.0.0.1')`-style check.
     expect(isLocal(req("127.0.0.10"))).toBe(false);
     expect(isLocal(req("127.0.0.1.evil.example"))).toBe(false);
+  });
+});
+
+describe("dashboard script syntax", () => {
+  it("parses every inline script without a browser (catch template literal regressions)", () => {
+    const html = readFileSync(join(process.cwd(), "dashboard", "index.html"), "utf8");
+    const inlineScripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+      .map((match) => match[1] ?? "")
+      .filter((script) => script.trim().length > 0);
+    expect(inlineScripts.length).toBeGreaterThan(0);
+    for (const script of inlineScripts) expect(() => new Script(script)).not.toThrow();
   });
 });
 
