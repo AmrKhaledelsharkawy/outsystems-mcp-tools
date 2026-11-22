@@ -96,18 +96,34 @@
   .chip.expanded { background: var(--ok-soft); color: var(--ok); }
   .chip.leaf, .chip.listed, .chip.skipped, .chip.queued { background: var(--line); color: var(--muted); }
   code { font-family: var(--mono); font-size: 12px; }
+  .pipeline-summary { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+  .pipeline-summary > span { padding: 6px 10px; background: var(--accent-soft); border-radius: 7px; font-size: 12px; }
+  .active-list { display: grid; gap: 10px; max-height: 350px; overflow: auto; }
+  .active-item { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+  .active-item .row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+  .active-item .name { font: 12px var(--mono); overflow-wrap: anywhere; }
+  .active-item .bar { height: 6px; margin-top: 8px; }
+  .chip.reused { background: var(--ok-soft); color: var(--ok); }
+  .chip.not-started, .chip.cancelled { background: var(--line); color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .toolbar input { max-width: 330px; }
+  .toolbar select { max-width: 210px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } .bar > i { transition: none; } }
+  @media (max-width: 700px) { header { padding: 12px; } main { padding: 12px; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <header>
   <h1>osgraph</h1><label class="scope" for="scopeSel">scope:</label><select id="scopeSel" class="scope" title="Which scope to watch"><option>loading…</option></select>
-  <span class="live"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
+  <span class="live" role="status" aria-live="polite"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
   <nav><button id="tabRun" class="on">Rebuild progress</button><button id="tabGraph">Graph explorer</button><button id="tabDisc">Discover</button></nav>
 </header>
 
 <main id="runView">
-  <div id="banner"></div>
+  <div id="banner" role="status" aria-live="polite"></div>
+  <div class="pipeline-summary" id="pipelineSummary" aria-label="Live run mode and concurrency"><span id="runMode">Run not started</span><span id="workerSummary">Shared reads: unavailable</span><span id="pipelineSummaryCounts">No active modules</span></div>
   <div class="grid kpis">
     <div class="card hero" style="grid-column: span 2">
       <h2>Overall progress</h2>
@@ -123,7 +139,9 @@
 
   <div class="grid two" style="margin-top:16px">
     <div class="card">
-      <h2>Current module</h2>
+      <h2>Active modules <span class="muted" id="activeCount">0</span></h2>
+      <div id="activeList" class="active-list" aria-label="Currently active modules"><p class="muted">No modules running</p></div>
+      <h2 style="margin-top:14px">Focused module (legacy detail)</h2>
       <div id="curName" class="big" style="font-size:18px; font-family: var(--mono)">–</div>
       <div class="sub" id="curSub"></div>
       <div class="bar" style="margin-top:10px" id="curBar"><i style="width:0"></i></div>
@@ -137,12 +155,17 @@
 
   <div class="card" style="margin-top:16px">
     <h2>Modules <span class="muted" id="modCounts" style="text-transform:none; letter-spacing:0"></span></h2>
+    <div class="toolbar">
+      <label for="modSearch">Find module</label><input id="modSearch" placeholder="Search by module name…" autocomplete="off">
+      <label for="modFilter">Status</label><select id="modFilter"><option value="">All statuses</option><option value="pending">Pending</option><option value="active">Active</option><option value="completed">Captured</option><option value="reused">Reused</option><option value="failed">Failed</option><option value="not-started">Not started</option></select>
+      <span id="visibleModCount" class="sub"></span>
+    </div>
     <div class="tablewrap"><table>
       <thead><tr><th>#</th><th>Module</th><th>Layer</th><th>Status</th><th class="num">Nodes</th><th class="num">Edges</th><th class="num">Time</th><th class="num">Expected</th><th>vs last run</th><th>Staged at</th></tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
   </div>
-  <p class="muted" style="font-size:12px">Read-only view of the run's files. Expected times come from the previous full read of each module; the ETA scales them by this run's measured pace and adds ~25 s open/close per module. Refreshes every 3 s.</p>
+  <p class="muted" style="font-size:12px">Read-only monitoring. Per-module expected times are historical read costs, not a prediction of rolling pipeline completion. Pipeline and version-aware ETA are shown as unavailable until compatible trace calibration exists. Refresh pauses when this tab is hidden.</p>
 </main>
 
 <main id="graphView" hidden>
