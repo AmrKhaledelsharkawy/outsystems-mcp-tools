@@ -658,29 +658,45 @@ function drawOverview() {
     G.links.filter((l) => byId.get(l.source)?.kind === 'module' && byId.get(l.target)?.kind === 'module').map((l) => ({ from: l.source, to: l.target }))
   );
 }
-function drawModule(module) {
-  if (!module) return drawOverview();
-  const ids = new Set(G.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
-  const edges = [];
-  const extra = new Set();
-  for (const id of ids) {
-    for (const l of out.get(id) ?? []) { edges.push(l); if (!ids.has(l.target)) extra.add(l.target); }
-    for (const l of inn.get(id) ?? []) { if (byId.get(l.source)?.kind === 'module') continue; edges.push(l); if (!ids.has(l.source)) extra.add(l.source); }
+async function drawModule(module) {
+  if (!module) {
+    detailGeneration++;
+    graphDetailController?.abort();
+    G = overviewGraph;
+    if (G) { rebuildGraphIndex(); drawOverview(); }
+    return;
   }
-  const all = [...ids, ...extra].filter((id) => byId.has(id));
-  if (all.length > 900) $('gWhich').insertAdjacentHTML('beforeend', `<br><span class="muted">${all.length} nodes — layout may take a moment.</span>`);
-  draw(
-    all.map((id) => {
-      const n = byId.get(id);
-      const own = ids.has(id);
-      return {
-        id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
-        color: n.placeholder ? '#d23b3b' : own ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
-        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder — unresolved)' : ''}`
-      };
-    }),
-    edges.filter((l) => byId.has(l.source) && byId.has(l.target)).map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
-  );
+  const generation = ++detailGeneration, scope = SCOPE;
+  graphDetailController?.abort();
+  const controller = new AbortController();
+  graphDetailController = controller;
+  try {
+    const r = await fetch(graphQuery('module', `&module=${encodeURIComponent(module)}`), {
+      cache: 'no-store', signal: controller.signal
+    });
+    if (!r.ok) throw new Error('Module graph unavailable');
+    const sub = await r.json();
+    if (controller.signal.aborted || generation !== detailGeneration || scope !== SCOPE || !overviewGraph) return;
+    // Keep at most one bounded module subset in browser memory, in addition to the module overview.
+    const mergedNodes = new Map([...overviewGraph.nodes, ...sub.nodes].map((n) => [n.id, n]));
+    G = { ...overviewGraph, nodes: [...mergedNodes.values()], links: sub.links };
+    rebuildGraphIndex();
+    const ids = new Set(sub.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
+    const all = sub.nodes.filter((n) => byId.has(n.id));
+    const edges = sub.links.filter((l) => byId.has(l.source) && byId.has(l.target));
+    if (sub.limited) $('gWhich').textContent = `Module ${module}: showing a bounded subset; use search to find other elements.`;
+    draw(
+      all.map((n) => ({
+        id: n.id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
+        color: n.placeholder ? '#d23b3b' : ids.has(n.id) ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
+        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder)' : ''}`
+      })),
+      edges.map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
+    );
+  } catch (err) {
+    if (controller.signal.aborted || generation !== detailGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Module graph unavailable';
+  }
 }
 function select(id) {
   selected = id;
@@ -709,24 +725,49 @@ function renderImpact() {
   }
   seen.delete(selected);
   const items = [...seen.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
-  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth}`;
+  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth} of the loaded module subset`;
   $('impact').innerHTML = items.slice(0, 400).map(([id, d]) => `<li data-id="${esc(id)}" title="${esc(id)}">${d}· ${esc(id.replace('osgraph://', ''))}</li>`).join('');
   if (net) net.selectNodes([selected, ...items.map((x) => x[0])].filter((x) => net.body.data.nodes.get(x)));
 }
 $('impact').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
 $('gResults').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
-function focusNode(id) {
-  const n = byId.get(id);
+async function focusNode(id) {
+  const n = byId?.get(id) ?? searchLookup.get(id);
   if (!n) return;
-  if (n.module && $('gModule').value !== n.module && n.kind !== 'module') { $('gModule').value = (G.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : ''; if ($('gModule').value) drawModule(n.module); }
+  if (n.module && n.kind !== 'module') {
+    $('gModule').value = (overviewGraph?.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : '';
+    if ($('gModule').value) await drawModule(n.module);
+  }
+  if (!byId?.has(id)) return;
   select(id);
   if (net?.body.data.nodes.get(id)) net.focus(id, { scale: 1.1, animation: true });
 }
 $('gSearch').oninput = () => {
-  const q = $('gSearch').value.trim().toLowerCase();
-  if (q.length < 2 || !G) { $('gResults').innerHTML = ''; return; }
-  const hits = G.nodes.filter((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)).slice(0, 60);
-  $('gResults').innerHTML = hits.map((n) => `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`).join('');
+  clearTimeout(searchTimer);
+  graphSearchController?.abort();
+  const q = $('gSearch').value.trim();
+  if (q.length < 2 || !overviewGraph) { $('gResults').textContent = ''; searchLookup.clear(); return; }
+  const generation = ++searchGeneration, scope = SCOPE;
+  searchTimer = setTimeout(async () => {
+    const controller = new AbortController();
+    graphSearchController = controller;
+    try {
+      const r = await fetch(graphQuery('search', `&q=${encodeURIComponent(q)}&limit=60`), {
+        cache: 'no-store', signal: controller.signal
+      });
+      if (!r.ok) throw new Error('Search unavailable');
+      const data = await r.json();
+      if (controller.signal.aborted || generation !== searchGeneration || scope !== SCOPE) return;
+      searchLookup = new Map(data.results.map((n) => [n.id, n]));
+      $('gResults').innerHTML = data.results.map((n) =>
+        `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`
+      ).join('');
+      if (data.count > data.results.length) $('gResults').insertAdjacentHTML('beforeend',
+        `<li class="muted">${data.count - data.results.length} more matches; refine your search</li>`);
+    } catch {
+      if (!controller.signal.aborted && generation === searchGeneration) $('gResults').textContent = 'Search unavailable';
+    }
+  }, 250);
 };
 $('dirDep').onclick = () => { dir = 'dependents'; $('dirDep').className = 'on'; $('dirDeps').className = ''; renderImpact(); };
 $('dirDeps').onclick = () => { dir = 'dependencies'; $('dirDeps').className = 'on'; $('dirDep').className = ''; renderImpact(); };
