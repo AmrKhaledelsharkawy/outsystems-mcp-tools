@@ -154,6 +154,11 @@ export interface StatusLogLine {
 
 /** The whole `/api/status` body. */
 export interface Status {
+  /** Existing global MCP permit gate, never one pool per module. */
+  workers?: { readLimit: number; readActive: number; readQueued: number; readSlotUtilization: number | null;
+    queueWaitP95Ms: number | null; retriedCalls: number | null };
+  /** The serialized GUI operator: no invented concurrency. */
+  gui?: { active: boolean; action: "open" | "close" | null; module: string | null; lastAction: string | null };
   /** Additive v2 contract; status, snapshot and legacy keys remain supported. */
   schemaVersion?: 2;
   runId?: string | null;
