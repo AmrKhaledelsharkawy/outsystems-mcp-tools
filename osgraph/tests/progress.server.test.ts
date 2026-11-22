@@ -66,9 +66,12 @@ const get = async (site: LiveSite, path: string): Promise<{ status: number; body
 };
 
 const post = async (site: LiveSite, path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> => {
-  const res = await fetch(`http://127.0.0.1:${site.port}${path}`, {
+  const url = `http://127.0.0.1:${site.port}`;
+  const csrfResponse = await fetch(`${url}/api/security/csrf`);
+  const csrf = (await csrfResponse.json()) as { token: string };
+  const res = await fetch(`${url}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "origin": url, "x-osgraph-csrf": csrf.token },
     body: JSON.stringify(body)
   });
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
@@ -115,7 +118,12 @@ describe("site routes", () => {
     const body = JSON.parse(res.body) as Record<string, unknown>;
     expect(body["ok"]).toBe(true);
     expect(body["rebuildActive"]).toBe(false);
-    expect(body["scopes"]).toEqual([SCOPE]);
+    expect(body["scopes"]).toBeUndefined();
+    expect(body["pid"]).toBeUndefined();
+    expect(body["graphDir"]).toBeUndefined();
+    expect(body["scopesDir"]).toBeUndefined();
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
   });
 
   it("lists scopes with their module counts", async () => {
@@ -250,6 +258,77 @@ describe("discovery routes", () => {
     const res = await post(site, "/api/discover/save", { id: "job-1", name: "x" });
     expect(res.status).toBe(400);
     expect(res.json["error"]).toBe("That discovery has not finished.");
+  });
+});
+
+describe("progress HTTP security", () => {
+  const runner: DiscoveryRunner = {
+    start: async () => ({ id: "job-1" }),
+    cancel: () => undefined,
+    status: () => ({ done: true }),
+    knownModules: () => ["MOD_A_BL"],
+    save: () => ({ saved: "x.json", count: 1 })
+  };
+
+  it("rejects cross-origin and DNS-rebound discovery POSTs even from loopback", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    const hostileOrigin = await fetch(base + "/api/discover/start", {
+      method: "POST", headers: { "content-type": "application/json", origin: "http://evil.example", "x-osgraph-csrf": token },
+      body: JSON.stringify({ starters: ["MOD_A_BL"] })
+    });
+    expect(hostileOrigin.status).toBe(403);
+    const badHost = await fetch(base + "/api/discover/start", {
+      method: "POST", headers: { "content-type": "application/json", host: "evil.example", origin: "http://evil.example", "x-osgraph-csrf": token },
+      body: JSON.stringify({ starters: ["MOD_A_BL"] })
+    });
+    expect(badHost.status).toBe(403);
+  });
+
+  it("refuses absent/mismatched CSRF and wrong content type", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const common = { method: "POST", body: JSON.stringify({ starters: ["MOD_A_BL"] }) };
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "application/json", origin: base }
+    })).status).toBe(403);
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "application/json", origin: base, "x-osgraph-csrf": "wrong" }
+    })).status).toBe(403);
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "text/plain", origin: base, "x-osgraph-csrf": token }
+    })).status).toBe(415);
+  });
+
+  it("rejects oversized byte bodies and invalid JSON without changing discovery state", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    const headers = { "content-type": "application/json", origin: base, "x-osgraph-csrf": token };
+    const tooLarge = await fetch(base + "/api/discover/start", { method: "POST", headers, body: JSON.stringify({ starters: "x".repeat(120_000) }) });
+    expect(tooLarge.status).toBe(413);
+    const invalid = await fetch(base + "/api/discover/start", { method: "POST", headers, body: "{ invalid json" });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("requires a strong viewer secret for opt-in LAN binding", async () => {
+    await expect(startSite({
+      graphDir, scopesDir, host: "0.0.0.0", port: 0, portScan: 1,
+      state: new RunState({ graphDir }), dashboardDir
+    })).rejects.toThrow(/VIEWER_PASSWORD/);
+  });
+
+  it("marks a still-existing graph as previous during a new rebuild", async () => {
+    const state = new RunState({ graphDir });
+    state.beginRun(SCOPE, MODULES);
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), '{"nodes":[],"links":[]}');
+    const site = await serve({ state });
+    const r = await get(site, `/api/graph?scope=${SCOPE}`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("x-graph-which")).toBe("previous");
   });
 });
 
