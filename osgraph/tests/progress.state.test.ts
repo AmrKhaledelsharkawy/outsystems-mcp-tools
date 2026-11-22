@@ -153,6 +153,25 @@ describe("RunState", () => {
     expect(st.snapshot.writtenAt).toBeGreaterThan(0);
   });
 
+  it("publishes real global permit and GUI state with measured trace summaries", () => {
+    const s = state();
+    s.beginRun("sc", MODULES, { mode: "pipeline", pipelineDepth: 2, readLimit: 4, traceEnabled: true });
+    s.setWorkers({ limit: 4, active: 3, queued: 5 });
+    s.setGuiState("open", "MOD_A_BL", true);
+    let p = s.status("sc", MODULES, null, null);
+    expect(p.workers).toMatchObject({ readLimit: 4, readActive: 3, readQueued: 5, readSlotUtilization: null });
+    expect(p.gui).toMatchObject({ active: true, action: "open", module: "MOD_A_BL" });
+    s.setGuiState("open", "MOD_A_BL", false);
+    s.setTraceSummary({ readSlotUtilization: 0.625, queueWaitMs: { p95: 312 }, retriedCalls: 2 });
+    p = s.status("sc", MODULES, null, null);
+    expect(p.workers).toMatchObject({ readSlotUtilization: 0.625, queueWaitP95Ms: 312, retriedCalls: 2 });
+    expect(p.gui?.active).toBe(false);
+    s.failRun("RUN_STOPPED", "stopped");
+    p = s.status("sc", MODULES, null, null);
+    expect(p.workers?.readActive).toBe(0);
+    expect(p.workers?.readQueued).toBe(0);
+  });
+
   describe("v2 coordinator-sourced status", () => {
     it("reports all simultaneous active modules with independent clocks and one run id", () => {
       const s = state();
