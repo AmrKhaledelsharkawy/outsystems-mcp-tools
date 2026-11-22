@@ -130,6 +130,7 @@ export class ServiceStudioClient {
   /** The trace of the call whose async context is running (admissions and attempts land on it). */
   private readonly traceCtx = new AsyncLocalStorage<CallTrace>();
   private nextTraceId = 1;
+  private permitObserver: ((status: { limit: number; active: number; queued: number }) => void) | undefined;
 
   constructor(options: ServiceStudioClientOptions) {
     this.url = options.url;
@@ -202,6 +203,21 @@ export class ServiceStudioClient {
    */
   setCallTrace(sink: CallTraceSink | undefined): void {
     this.traceSink = sink;
+  }
+
+  /** Instantaneous read-only snapshot of the existing global permit gate. */
+  getPermitStatus(): { limit: number; active: number; queued: number } {
+    return { limit: this.maxConcurrent, active: this.active, queued: this.waiters.length };
+  }
+
+  setPermitObserver(listener: ((status: { limit: number; active: number; queued: number }) => void) | undefined): void {
+    this.permitObserver = listener;
+    this.notifyPermitObserver();
+  }
+
+  private notifyPermitObserver(): void {
+    // Monitoring must NEVER break admission or release, even if a dashboard observer throws.
+    try { this.permitObserver?.(this.getPermitStatus()); } catch { /* noncritical observer */ }
   }
 
   /** The number of read permits (the server's admission width). */
@@ -451,15 +467,19 @@ export class ServiceStudioClient {
   private async acquire(): Promise<void> {
     // `while`, not `if`: a woken waiter re-checks, so a permit can never be handed out twice.
     while (this.active >= this.maxConcurrent) {
-      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      const waiting = new Promise<void>((resolve) => this.waiters.push(resolve));
+      this.notifyPermitObserver();
+      await waiting;
     }
     this.active++;
+    this.notifyPermitObserver();
   }
 
   /** Always called from a `finally`, so a rejected call cannot leak its permit. */
   private release(): void {
     this.active--;
     const next = this.waiters.shift();
+    this.notifyPermitObserver();
     if (next) {
       next();
       return;
