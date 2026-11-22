@@ -251,8 +251,11 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
       });
       req.on("end", () => {
         if (settled) return;
-        try { settled = true; resolve(body ? JSON.parse(body) : {}); }
-        catch { fail(new Error("invalid JSON body")); }
+        try {
+          const parsed = body ? JSON.parse(body) : {};
+          settled = true;
+          resolve(parsed);
+        } catch { fail(new Error("invalid JSON body")); }
       });
       req.on("error", (err) => fail(err));
     });
