@@ -76,6 +76,8 @@ export interface SiteConfig {
    * rebuild. `OSGRAPH_PROGRESS_HOST=0.0.0.0` opts in to reading it from a phone.
    */
   host: string;
+  /** When host binds LAN, require an explicit shared secret (used only behind trusted TLS/VPN). */
+  viewerPassword?: string;
   /** First port tried; a busy port is stepped past (see `SITE_PORT_SCAN`). */
   port: number;
   /**
@@ -95,6 +97,7 @@ export const ENV_MAX_CONCURRENCY = "OSGRAPH_MAX_CONCURRENCY";
 export const ENV_SKIP_KINDS = "OSGRAPH_SKIP_KINDS";
 export const ENV_PROGRESS_SITE = "OSGRAPH_PROGRESS_SITE";
 export const ENV_PROGRESS_HOST = "OSGRAPH_PROGRESS_HOST";
+export const ENV_PROGRESS_VIEWER_PASSWORD = "OSGRAPH_PROGRESS_VIEWER_PASSWORD";
 export const ENV_PROGRESS_PORT = "OSGRAPH_PROGRESS_PORT";
 export const ENV_OSOPENER_DIST = "OSGRAPH_OSOPENER_DIST";
 
@@ -245,6 +248,7 @@ export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphCo
     site: {
       enabled: !SITE_OFF.has((nonEmpty(env[ENV_PROGRESS_SITE]) ?? "on").toLowerCase()),
       host: nonEmpty(env[ENV_PROGRESS_HOST]) ?? DEFAULT_SITE_HOST,
+      ...(nonEmpty(env[ENV_PROGRESS_VIEWER_PASSWORD]) ? { viewerPassword: nonEmpty(env[ENV_PROGRESS_VIEWER_PASSWORD]) } : {}),
       port: parseSitePort(env[ENV_PROGRESS_PORT]),
       osopenerDist: nonEmpty(env[ENV_OSOPENER_DIST]) ?? join(packageRoot, "..", "osopener", "dist")
     }
