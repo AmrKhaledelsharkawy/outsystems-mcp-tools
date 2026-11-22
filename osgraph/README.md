@@ -171,6 +171,18 @@ shipped default is therefore `127.0.0.1`. To read it from your phone:
 
 ```
 OSGRAPH_PROGRESS_HOST=0.0.0.0
+
+
+**Progress HTTP security (local and LAN):** The site binds to loopback by default. Discovery POST
+actions require a loopback socket, a loopback Host, matching same-origin Origin, a server-issued
+CSRF token (retrieved by the page from `/api/security/csrf`) and `application/json`.
+LAN binding (`OSGRAPH_PROGRESS_HOST=0.0.0.0`) now requires
+`OSGRAPH_PROGRESS_VIEWER_PASSWORD` with at least 16 characters; the browser authenticates
+with HTTP Basic user `osgraph`. **Do not expose Basic authentication over unencrypted public
+or office-network HTTP:** use a trusted VPN or TLS reverse proxy, or stay on loopback. Mutations
+remain local-only even when LAN viewing is authorized. No tokens, filesystem paths or process
+IDs are included in `/api/health`. The graph explorer requires a locally vendored
+`dashboard/vis-network.min.js`; the previous CDN fallback is disabled for security.
 ```
 
 The banner then lists every address the site is genuinely reachable on — only adapters that are
