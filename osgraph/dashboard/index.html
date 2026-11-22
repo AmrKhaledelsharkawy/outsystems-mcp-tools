@@ -355,8 +355,13 @@ function renderRun(s) {
   const active = Array.isArray(s.activeModules) ? s.activeModules : s.current ? [s.current] : [];
   const mode = s.run.mode ?? 'full';
   $('runMode').textContent = `${mode} · ${s.run.status ?? (s.run.complete ? 'finished' : 'running')}${depth > 1 ? ` · depth ${depth}` : ''}`;
-  $('workerSummary').textContent = `Shared MCP read permits: ${s.run.readLimit ?? 4} total · live occupancy unavailable`;
-  $('pipelineSummaryCounts').textContent = `${active.length} active module(s) · ${p.activeReading ?? 0} reading · ${p.activeOpening ?? 0} opening · ${p.activeClosing ?? 0} closing`;
+  const workers = s.workers;
+  $('workerSummary').textContent = workers
+    ? `Shared read permits: ${workers.readActive}/${workers.readLimit} busy · ${workers.readQueued} queued` +
+      (Number.isFinite(workers.readSlotUtilization) ? ` · measured utilization ${(workers.readSlotUtilization * 100).toFixed(1)}%` : ' · utilization unavailable')
+    : `Shared MCP read permits: ${s.run.readLimit ?? 4} total · metrics unavailable`;
+  $('pipelineSummaryCounts').textContent = `${active.length} active module(s) · ${p.activeReading ?? 0} reading · ${p.activeOpening ?? 0} opening · ${p.activeClosing ?? 0} closing` +
+    (s.gui?.active ? ` · GUI ${s.gui.action} ${s.gui.module}` : '');
   $('activeCount').textContent = String(active.length);
   $('activeList').innerHTML = active.length
     ? active.map((a) => {

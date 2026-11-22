@@ -432,9 +432,10 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   options.state?.beginRun(scope.name, modules, {
     mode: pipelineDepth >= 2 ? "pipeline" : "full",
     pipelineDepth,
-    readLimit: options.fetchConcurrency,
+    readLimit: options.fetchConcurrency ?? s.session.reader.concurrency,
     traceEnabled: options.trace === true
   });
+  s.session.reader.setPermitObserver?.((status) => options.state?.setWorkers?.(status));
   log(
     `run ${scope.name}: ${modules.length} scope module(s), ${alreadyStaged} already staged, max open ${maxOpen}` +
       (pipelineDepth >= 2 ? `, pipeline depth ${pipelineDepth}` : "")
@@ -642,9 +643,11 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     }
   } finally {
     await s.session.reader.drain?.();
+    s.session.reader.setPermitObserver?.(undefined);
     s.session.release();
     if (tracer !== undefined) {
       traceSummary = tracer.finish();
+      options.state?.setTraceSummary?.(traceSummary);
       writeReport();
       log(
         `trace: ${traceSummary.calls} call(s), read-slot utilization ${traceSummary.readSlotUtilization}, ` +
@@ -856,16 +859,18 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   // The one GUI operator: opens and closes never overlap, and `gapMs` is its cooldown between actions.
   let guiTail: Promise<unknown> = Promise.resolve();
   let lastGuiEnd: number | undefined;
-  const gui = <T>(fn: () => Promise<T>): Promise<T> => {
+  const gui = <T>(action: "open" | "close", module: string, fn: () => Promise<T>): Promise<T> => {
     const run = guiTail.then(async () => {
       if (lastGuiEnd !== undefined) {
         const wait = s.gapMs - (Date.now() - lastGuiEnd);
         if (wait > 0) await s.sleep(wait);
       }
+      options.state?.setGuiState?.(action, module, true);
       try {
         return await fn();
       } finally {
         lastGuiEnd = Date.now();
+        options.state?.setGuiState?.(action, module, false);
       }
     });
     guiTail = run.then(
@@ -877,7 +882,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
 
   /** Only after the module's own barrier; a thrown close counts as "not closed". */
   const closeOwnedTab = (mod: string): Promise<{ ok: boolean; error?: string }> =>
-    gui(async () => {
+    gui("close", mod, async () => {
       const t0 = performance.now();
       let ok = false;
       try {
@@ -1066,7 +1071,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     const o0 = Date.now();
     let opened: Awaited<ReturnType<typeof s.openWithRetry>>;
     try {
-      opened = await gui(() => s.openWithRetry(mod));
+      opened = await gui("open", mod, () => s.openWithRetry(mod));
     } catch (err) {
       const e = errorOf(err);
       log(`${tagOf(mod)} open FAILED ${e.code}: ${e.message}`);
@@ -1472,8 +1477,9 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
   };
   options.state?.beginRun(scope.name, candidates, {
     mode: changedMode ? "changed" : "modules",
-    readLimit: options.fetchConcurrency
+    readLimit: options.fetchConcurrency ?? s.session.reader.concurrency
   });
+  s.session.reader.setPermitObserver?.((status) => options.state?.setWorkers?.(status));
   log(
     `run ${scope.name} ${changedMode ? "--changed" : "--modules"}: ${candidates.length} candidate module(s), ` +
       `then one offline re-extract`
@@ -1599,6 +1605,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
     }
   } finally {
     await s.session.reader.drain?.();
+    s.session.reader.setPermitObserver?.(undefined);
     s.session.release();
   }
 

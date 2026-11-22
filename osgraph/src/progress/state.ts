@@ -107,6 +107,11 @@ export class RunState {
   private pipelineDepth = 1;
   private readLimit = 4;
   private traceEnabled = false;
+  private workers = { active: 0, queued: 0, limit: 4 };
+  private traceStats: { utilization: number; queueWaitP95: number; retried: number } | null = null;
+  private guiState: { active: boolean; action: "open" | "close" | null; module: string | null; lastAction: string | null } = {
+    active: false, action: null, module: null, lastAction: null
+  };
   private runFinishedAt: number | null = null;
   private errorCode: string | null = null;
   private errorMessage: string | null = null;
@@ -152,6 +157,9 @@ export class RunState {
     this.pipelineDepth = Number.isInteger(config.pipelineDepth) && (config.pipelineDepth ?? 0) > 0 ? config.pipelineDepth! : 1;
     this.readLimit = Number.isInteger(config.readLimit) && (config.readLimit ?? 0) > 0 ? config.readLimit! : 4;
     this.traceEnabled = config.traceEnabled === true;
+    this.workers = { active: 0, queued: 0, limit: this.readLimit };
+    this.traceStats = null;
+    this.guiState = { active: false, action: null, module: null, lastAction: null };
     this.runFinishedAt = null;
     this.errorCode = null;
     this.errorMessage = null;
@@ -241,6 +249,33 @@ export class RunState {
       m.error = detail.error.code;
       m.errorMessage = detail.error.message;
     }
+    this.sequence++;
+  }
+
+  /** Read-only figures from the existing ServiceStudioClient global permit gate. */
+  setWorkers(status: { limit: number; active: number; queued: number }): void {
+    if (this.runStartedAt === null) return;
+    const limit = Number.isInteger(status.limit) && status.limit > 0 ? status.limit : this.readLimit;
+    const active = Number.isInteger(status.active) ? Math.max(0, Math.min(limit, status.active)) : 0;
+    const queued = Number.isInteger(status.queued) ? Math.max(0, status.queued) : 0;
+    if (this.workers.limit === limit && this.workers.active === active && this.workers.queued === queued) return;
+    this.workers = { limit, active, queued };
+    this.sequence++;
+  }
+
+  setTraceSummary(summary: { readSlotUtilization: number; queueWaitMs: { p95: number }; retriedCalls: number }): void {
+    if (!this.traceEnabled) return;
+    this.traceStats = {
+      utilization: Number.isFinite(summary.readSlotUtilization) ? Math.max(0, Math.min(1, summary.readSlotUtilization)) : 0,
+      queueWaitP95: Number.isFinite(summary.queueWaitMs.p95) ? Math.max(0, summary.queueWaitMs.p95) : 0,
+      retried: Math.max(0, summary.retriedCalls)
+    };
+    this.sequence++;
+  }
+
+  setGuiState(action: "open" | "close", module: string, active: boolean): void {
+    if (this.runStartedAt === null) return;
+    this.guiState = { active, action: active ? action : null, module: active ? module : null, lastAction: `${action} ${module}` };
     this.sequence++;
   }
 
@@ -518,6 +553,15 @@ export class RunState {
     const activeOpenCount = rows.filter((r) => r.lifecycle === "opening").length;
     const activeCloseCount = rows.filter((r) => r.lifecycle === "closing").length;
     return {
+      workers: {
+        readLimit: isActive ? this.workers.limit : this.readLimit,
+        readActive: isActive && !this.complete ? this.workers.active : 0,
+        readQueued: isActive && !this.complete ? this.workers.queued : 0,
+        readSlotUtilization: isActive ? this.traceStats?.utilization ?? null : null,
+        queueWaitP95Ms: isActive ? this.traceStats?.queueWaitP95 ?? null : null,
+        retriedCalls: isActive ? this.traceStats?.retried ?? null : null
+      },
+      gui: isActive ? this.guiState : { active: false, action: null, module: null, lastAction: null },
       schemaVersion: 2,
       runId: isActive ? this.runId : null,
       sequence: isActive ? this.sequence : 0,
