@@ -20,6 +20,7 @@
  */
 
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,6 +56,8 @@ export interface SiteOptions {
   graphDir: string;
   scopesDir: string;
   host: string;
+  /** Required for LAN bind; HTTP Basic only over a trusted VPN/TLS reverse proxy. */
+  viewerPassword?: string;
   /** First port to try. */
   port: number;
   /** Consecutive ports attempted when one is in use. */
@@ -149,9 +152,55 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
   const dashboardDir = options.dashboardDir ?? defaultDashboardDir();
   const flows = new FlowsCache();
   const startedAt = new Date().toISOString();
-
+  const lanBind = options.host === "0.0.0.0" || options.host === "::";
+  const viewerPassword = options.viewerPassword;
+  if (lanBind && (typeof viewerPassword !== "string" || viewerPassword.length < 16)) {
+    throw new Error("LAN progress access requires OSGRAPH_PROGRESS_VIEWER_PASSWORD (16+ characters) and trusted TLS/VPN transport");
+  }
+  const csrfToken = randomBytes(32).toString("base64url");
+  const safeEqual = (a: string, b: string): boolean => {
+    const left = Buffer.from(a, "utf8"), right = Buffer.from(b, "utf8");
+    return left.length === right.length && timingSafeEqual(left, right);
+  };
+  const trustedLoopbackHost = (req: IncomingMessage): boolean => {
+    try {
+      const host = req.headers.host;
+      if (!host || Array.isArray(host)) return false;
+      const name = new URL(`http://${host}`).hostname.toLowerCase();
+      return name === "localhost" || name === "127.0.0.1" || name === "[::1]";
+    } catch { return false; }
+  };
+  const originAllowed = (req: IncomingMessage): boolean => {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (typeof origin !== "string" || typeof host !== "string") return false;
+    try {
+      const src = new URL(origin);
+      const expected = new URL(`http://${host}`);
+      return (src.protocol === "http:" || src.protocol === "https:") &&
+        src.origin === expected.origin;
+    } catch { return false; }
+  };
+  const viewerAuthorized = (req: IncomingMessage): boolean => {
+    if (!lanBind) return true;
+    const header = req.headers.authorization;
+    if (!header?.startsWith("Basic ")) return false;
+    try {
+      const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+      const separator = decoded.indexOf(":");
+      return separator > 0 && decoded.slice(0, separator) === "osgraph" &&
+        safeEqual(decoded.slice(separator + 1), viewerPassword ?? "");
+    } catch { return false; }
+  };
+  const securityHeaders: Record<string, string> = {
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY",
+    "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "cache-control": "no-store"
+  };
   const send = (res: ServerResponse, code: number, body: string | Buffer, type = "application/json; charset=utf-8"): void => {
-    res.writeHead(code, { "content-type": type, "cache-control": "no-store" });
+    res.writeHead(code, { ...securityHeaders, "content-type": type });
     res.end(body);
   };
 
@@ -187,19 +236,25 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
 
   const readBody = async (req: IncomingMessage): Promise<unknown> =>
     new Promise((resolve, reject) => {
-      let body = "";
+      let body = "", bytes = 0, settled = false;
+      const fail = (reason: Error): void => {
+        if (settled) return;
+        settled = true;
+        req.pause();
+        reject(reason);
+      };
       req.on("data", (chunk: Buffer | string) => {
+        if (settled) return;
+        bytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+        if (bytes > MAX_BODY_BYTES) return fail(new Error("body too large"));
         body += String(chunk);
-        if (body.length > MAX_BODY_BYTES) reject(new Error("body too large"));
       });
       req.on("end", () => {
-        try {
-          resolve(body ? JSON.parse(body) : {});
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
+        if (settled) return;
+        try { settled = true; resolve(body ? JSON.parse(body) : {}); }
+        catch { fail(new Error("invalid JSON body")); }
       });
-      req.on("error", reject);
+      req.on("error", (err) => fail(err));
     });
 
   const discoveryRoute = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
@@ -218,8 +273,8 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     if (url.pathname === "/api/discover/modules") return send(res, 200, JSON.stringify(discovery.knownModules()));
 
     if (req.method !== "POST") return send(res, 405, JSON.stringify({ error: "POST only" }));
-    // The guard that makes a LAN-visible site safe: viewing is shared, acting is not.
-    if (!isLocal(req)) {
+    // Socket, Host, Origin and unpredictable same-origin CSRF token are all required.
+    if (!isLocal(req) || !trustedLoopbackHost(req)) {
       return send(
         res,
         403,
@@ -227,6 +282,14 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
       );
     }
 
+    if (!originAllowed(req)) return send(res, 403, JSON.stringify({ error: "Discovery actions require a same-origin browser request." }));
+    const supplied = req.headers["x-osgraph-csrf"];
+    if (typeof supplied !== "string" || !safeEqual(supplied, csrfToken)) {
+      return send(res, 403, JSON.stringify({ error: "Invalid discovery CSRF token." }));
+    }
+    if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      return send(res, 415, JSON.stringify({ error: "Discovery actions require application/json." }));
+    }
     const body = (await readBody(req)) as Record<string, unknown>;
 
     if (url.pathname === "/api/discover/start") {
@@ -263,6 +326,16 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     void (async (): Promise<void> => {
       const url = new URL(req.url ?? "/", "http://localhost");
       try {
+        if (!viewerAuthorized(req)) {
+          res.setHeader("www-authenticate", 'Basic realm="OSGraph progress", charset="UTF-8"');
+          return send(res, 401, JSON.stringify({ error: "Authentication required." }));
+        }
+        if (url.pathname === "/api/security/csrf") {
+          if (req.method !== "GET" || !isLocal(req) || !trustedLoopbackHost(req)) {
+            return send(res, 403, JSON.stringify({ error: "Local same-origin access only." }));
+          }
+          return send(res, 200, JSON.stringify({ token: csrfToken }));
+        }
         if (url.pathname === "/" || url.pathname === "/index.html") {
           const file = join(dashboardDir, "index.html");
           if (!existsSync(file)) return send(res, 500, `dashboard/index.html not found at ${file}`, "text/plain; charset=utf-8");
@@ -282,15 +355,8 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
             JSON.stringify({
               ok: true,
               server: "osgraph",
-              pid: process.pid,
-              scopesDir: options.scopesDir,
-              graphDir: options.graphDir,
-              host: options.host,
-              port: (server.address() as { port?: number } | null)?.port ?? options.port,
-              scopes: scopeNames(),
-              rebuildActive: options.state.rebuildActive,
-              activeScope: options.state.activeScope,
-              startedAt
+              startedAt,
+              rebuildActive: options.state.rebuildActive
             })
           );
         }
@@ -313,13 +379,21 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           const file = scopeFiles(options.graphDir, scope).graph;
           if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: `no graph for scope '${scope}' yet` }));
           // Streamed: a large scope's graph.json is tens of MB and must not be buffered.
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "x-graph-which": "current" });
+          res.writeHead(200, {
+            ...securityHeaders,
+            "content-type": "application/json",
+            "x-graph-which": options.state.activeScope === scope && options.state.rebuildActive ? "previous" : "current"
+          });
           createReadStream(file).pipe(res);
           return;
         }
         return send(res, 404, JSON.stringify({ error: "not found" }));
       } catch (err) {
-        return send(res, 500, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        const isTooLarge = err instanceof Error && err.message === "body too large";
+        const invalidJson = err instanceof Error && err.message === "invalid JSON body";
+        return send(res, isTooLarge ? 413 : invalidJson ? 400 : 500, JSON.stringify({
+          error: isTooLarge ? "Request body too large." : invalidJson ? "Invalid JSON body." : "Internal progress server error."
+        }));
       }
     })();
   });
