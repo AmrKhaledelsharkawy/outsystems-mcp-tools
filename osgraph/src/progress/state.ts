@@ -20,7 +20,7 @@ import { statSync } from "node:fs";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import { REBUILD_PHASES, type RebuildPerModule, type RebuildPhase, type RebuildProgressEvent, formatProgress } from "../rebuild/rebuild.js";
 import { readAllTimings } from "./timings.js";
-import type { ModuleCost, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
+import type { CaptureOutcome, ModuleCost, ModuleLifecycle, RunLifecycle, RunMode, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
 
 /** Silence longer than this reads as stalled. A fetch phase is legitimately quiet for 20+ minutes. */
 export const STALL_AFTER_MS = 30 * 60_000;
@@ -49,6 +49,12 @@ interface LiveModule {
   module: string;
   index: number;
   state: "pending" | "running" | "done" | "failed";
+  lifecycle: ModuleLifecycle;
+  captureOutcome: CaptureOutcome;
+  versionReason: string | null;
+  moduleVersion: string | null;
+  previousCaptureVersion: string | null;
+  openedHere: boolean | null;
   startedAt: number | null;
   finishedAt: number | null;
   actualMs: number | null;
@@ -93,6 +99,22 @@ export class RunState {
   private runStartedAt: number | null = null;
   private complete = false;
   private finalized = false;
+  private runSerial = 0;
+  private runId: string | null = null;
+  private sequence = 0;
+  private mode: RunMode = "idle";
+  private lifecycle: RunLifecycle = "idle";
+  private pipelineDepth = 1;
+  private readLimit = 4;
+  private traceEnabled = false;
+  private workers = { active: 0, queued: 0, limit: 4 };
+  private traceStats: { utilization: number; queueWaitP95: number; retried: number } | null = null;
+  private guiState: { active: boolean; action: "open" | "close" | null; module: string | null; lastAction: string | null } = {
+    active: false, action: null, module: null, lastAction: null
+  };
+  private runFinishedAt: number | null = null;
+  private errorCode: string | null = null;
+  private errorMessage: string | null = null;
   private lastActivityAt: number | null = null;
   private log: StatusLogLine[] = [];
   /** Cached history, re-read at the start of each run (not per request: it is a file scan). */
@@ -112,7 +134,7 @@ export class RunState {
     return this.scope;
   }
 
-  /** A previously finalized snapshot remains previous after a stopped or failed rebuild. */
+  /** True for any unfinalized or failed run that still displays the last finalized graph. */
   snapshotIsPrevious(scope: string): boolean {
     return this.scope === scope && this.runStartedAt !== null && !this.finalized;
   }
@@ -121,9 +143,26 @@ export class RunState {
    * Starts a run. `modules` is the resolved walk order, so every row exists as `pending` from the
    * first poll — the page shows the whole plan immediately rather than growing a list.
    */
-  beginRun(scope: string, modules: readonly string[]): void {
+  beginRun(
+    scope: string,
+    modules: readonly string[],
+    config: { mode?: RunMode; pipelineDepth?: number; readLimit?: number; traceEnabled?: boolean } = {}
+  ): void {
     this.scope = scope;
     this.runStartedAt = this.now();
+    this.runId = `${this.runStartedAt}-${++this.runSerial}`;
+    this.sequence = 1;
+    this.mode = config.mode ?? "full";
+    this.lifecycle = "running";
+    this.pipelineDepth = Number.isInteger(config.pipelineDepth) && (config.pipelineDepth ?? 0) > 0 ? config.pipelineDepth! : 1;
+    this.readLimit = Number.isInteger(config.readLimit) && (config.readLimit ?? 0) > 0 ? config.readLimit! : 4;
+    this.traceEnabled = config.traceEnabled === true;
+    this.workers = { active: 0, queued: 0, limit: this.readLimit };
+    this.traceStats = null;
+    this.guiState = { active: false, action: null, module: null, lastAction: null };
+    this.runFinishedAt = null;
+    this.errorCode = null;
+    this.errorMessage = null;
     this.complete = false;
     this.finalized = false;
     this.lastActivityAt = this.runStartedAt;
@@ -133,6 +172,12 @@ export class RunState {
       module,
       index: i + 1,
       state: "pending",
+      lifecycle: "pending",
+      captureOutcome: "none",
+      versionReason: null,
+      moduleVersion: null,
+      previousCaptureVersion: null,
+      openedHere: null,
       startedAt: null,
       finishedAt: null,
       actualMs: null,
@@ -150,10 +195,102 @@ export class RunState {
     this.byKey = new Map(this.modules.map((m) => [m.module.toLowerCase(), m]));
   }
 
+  /** Coordinator-sourced transition; never infer GUI state from which row is pending. */
+  setModuleLifecycle(
+    module: string,
+    lifecycle: ModuleLifecycle,
+    detail: { openedHere?: boolean; versionReason?: string; moduleVersion?: string | null; previousCaptureVersion?: string | null } = {}
+  ): void {
+    if (this.runStartedAt === null) return;
+    const m = this.ensure(module);
+    const at = this.now();
+    m.lifecycle = lifecycle;
+    m.state = lifecycle === "completed" || lifecycle === "reused" ? "done"
+      : lifecycle === "failed" ? "failed"
+      : lifecycle === "pending" || lifecycle === "not-started" || lifecycle === "cancelled" ? "pending" : "running";
+    if (m.startedAt === null && lifecycle !== "pending" && lifecycle !== "not-started") m.startedAt = at;
+    if (detail.openedHere !== undefined) m.openedHere = detail.openedHere;
+    if (detail.versionReason !== undefined) m.versionReason = detail.versionReason;
+    if (detail.moduleVersion !== undefined) m.moduleVersion = detail.moduleVersion;
+    if (detail.previousCaptureVersion !== undefined) m.previousCaptureVersion = detail.previousCaptureVersion;
+    if (lifecycle === "completed" || lifecycle === "reused" || lifecycle === "failed" || lifecycle === "cancelled" || lifecycle === "not-started") {
+      m.finishedAt = at;
+      m.phase = null;
+    }
+    this.sequence++;
+    this.lastActivityAt = at;
+  }
+
+  /** Final outcome only after the coordinator has committed or reused a valid capture. */
+  recordOutcome(
+    module: string,
+    outcome: "staged" | "skipped" | "open-failed" | "stage-failed" | "not-started" | "reused",
+    detail: {
+      error?: { code: string; message: string };
+      openedHere?: boolean;
+      durationMs?: number;
+      nodeCount?: number;
+      edgeCount?: number;
+      versionReason?: string;
+      moduleVersion?: string | null;
+      previousCaptureVersion?: string | null;
+    } = {}
+  ): void {
+    const stage = outcome === "staged" ? "completed" : outcome === "skipped" || outcome === "reused" ? "reused"
+      : outcome === "not-started" ? "not-started" : "failed";
+    this.setModuleLifecycle(module, stage, detail);
+    const m = this.byKey.get(module.toLowerCase());
+    if (!m) return;
+    m.captureOutcome = outcome === "staged" ? "new" : outcome === "skipped" ? "already-staged" : outcome === "reused" ? "reused" : "none";
+    if (detail.durationMs !== undefined) m.actualMs = detail.durationMs;
+    if (detail.nodeCount !== undefined) m.nodes = detail.nodeCount;
+    if (detail.edgeCount !== undefined) m.edges = detail.edgeCount;
+    if (detail.error) {
+      m.error = detail.error.code;
+      m.errorMessage = detail.error.message;
+    }
+    this.sequence++;
+  }
+
+  /** Read-only figures from the existing ServiceStudioClient global permit gate. */
+  setWorkers(status: { limit: number; active: number; queued: number }): void {
+    if (this.runStartedAt === null) return;
+    const limit = Number.isInteger(status.limit) && status.limit > 0 ? status.limit : this.readLimit;
+    const active = Number.isInteger(status.active) ? Math.max(0, Math.min(limit, status.active)) : 0;
+    const queued = Number.isInteger(status.queued) ? Math.max(0, status.queued) : 0;
+    if (this.workers.limit === limit && this.workers.active === active && this.workers.queued === queued) return;
+    this.workers = { limit, active, queued };
+    this.sequence++;
+  }
+
+  setTraceSummary(summary: { readSlotUtilization: number; queueWaitMs: { p95: number }; retriedCalls: number }): void {
+    if (!this.traceEnabled) return;
+    this.traceStats = {
+      utilization: Number.isFinite(summary.readSlotUtilization) ? Math.max(0, Math.min(1, summary.readSlotUtilization)) : 0,
+      queueWaitP95: Number.isFinite(summary.queueWaitMs.p95) ? Math.max(0, summary.queueWaitMs.p95) : 0,
+      retried: Math.max(0, summary.retriedCalls)
+    };
+    this.sequence++;
+  }
+
+  setGuiState(action: "open" | "close", module: string, active: boolean): void {
+    if (this.runStartedAt === null) return;
+    this.guiState = { active, action: active ? action : null, module: active ? module : null, lastAction: `${action} ${module}` };
+    this.sequence++;
+  }
+
+  markCancelling(): void {
+    if (!this.complete && this.runStartedAt !== null) {
+      this.lifecycle = "cancelling";
+      this.sequence++;
+    }
+  }
+
   /** Feeds one progress event. Safe to call before `beginRun` (the line is still logged). */
   handle(event: RebuildProgressEvent): void {
     const at = this.now();
     this.lastActivityAt = at;
+    this.sequence++;
     this.push({ at, text: formatProgress(event) });
 
     switch (event.type) {
@@ -162,7 +299,8 @@ export class RunState {
       case "module-start": {
         const m = this.ensure(event.module, event.index);
         m.state = "running";
-        m.startedAt = at;
+        m.lifecycle = "reading";
+        m.startedAt ??= at;
         m.phase = null;
         m.phaseStartedAt = null;
         m.phaseCount = null;
@@ -202,8 +340,11 @@ export class RunState {
       }
       case "module-done": {
         const m = this.ensure(event.module);
-        m.state = "done";
-        m.finishedAt = at;
+        // A successful read is not yet a committed stage. Do not count it as done before the
+        // coordinator has written the stage entry; a stage-write failure must stay visible.
+        m.state = "running";
+        m.lifecycle = "staging";
+        m.finishedAt = null;
         m.actualMs = event.durationMs;
         m.skipped = event.skippedCount;
         m.phase = null;
@@ -224,11 +365,16 @@ export class RunState {
   finishRun(perModule: readonly RebuildPerModule[]): void {
     this.complete = true;
     this.finalized = true;
-    this.lastActivityAt = this.now();
+    this.lifecycle = "completed";
+    this.runFinishedAt = this.now();
+    this.lastActivityAt = this.runFinishedAt;
+    this.sequence++;
     for (const row of perModule) {
       const m = this.byKey.get(row.module.toLowerCase()) ?? this.byKey.get((row.requestedAs ?? "").toLowerCase());
       if (!m) continue;
       m.state = "done";
+      m.lifecycle = "completed";
+      m.captureOutcome = m.captureOutcome === "none" ? "new" : m.captureOutcome;
       m.nodes = row.nodeCount;
       m.edges = row.edgeCount;
       m.skipped = row.skippedCount;
@@ -245,15 +391,26 @@ export class RunState {
   failRun(code: string, message: string): void {
     this.complete = true;
     this.finalized = false;
-    this.lastActivityAt = this.now();
-    for (const running of this.modules) {
-      if (running.state !== "running") continue;
-      running.state = "failed";
-      running.error = code;
-      running.errorMessage = message;
-      running.phase = null;
+    this.lifecycle = code === "RUN_CANCELLED" ? "cancelled" : code === "RUN_STOPPED" ? "stopped" : "failed";
+    this.errorCode = code;
+    this.errorMessage = message;
+    this.runFinishedAt = this.now();
+    this.lastActivityAt = this.runFinishedAt;
+    for (const row of this.modules) {
+      if (row.lifecycle === "completed" || row.lifecycle === "reused" || row.lifecycle === "failed" || row.lifecycle === "not-started") continue;
+      if (row.state === "running" || row.lifecycle === "staging" || row.lifecycle === "closing") {
+        row.lifecycle = code === "RUN_CANCELLED" ? "cancelled" : "failed";
+        row.state = code === "RUN_CANCELLED" ? "pending" : "failed";
+        if (code !== "RUN_CANCELLED") {
+          row.error = code;
+          row.errorMessage = message;
+        }
+        row.phase = null;
+        row.finishedAt = this.runFinishedAt;
+      }
     }
-    this.push({ at: this.now(), text: `rebuild: FAILED ${code}: ${message}` });
+    this.sequence++;
+    this.push({ at: this.runFinishedAt, text: `rebuild: FAILED ${code}: ${message}` });
   }
 
   private ensure(module: string, index?: number): LiveModule {
@@ -266,6 +423,12 @@ export class RunState {
       module,
       index: index ?? this.modules.length + 1,
       state: "pending",
+      lifecycle: "pending",
+      captureOutcome: "none",
+      versionReason: null,
+      moduleVersion: null,
+      previousCaptureVersion: null,
+      openedHere: null,
       startedAt: null,
       finishedAt: null,
       actualMs: null,
@@ -317,6 +480,14 @@ export class RunState {
         module,
         layer: layerOf(module),
         state: m?.state ?? "pending",
+        lifecycle: m?.lifecycle ?? "pending",
+        captureOutcome: m?.captureOutcome ?? "none",
+        versionReason: m?.versionReason ?? null,
+        moduleVersion: m?.moduleVersion ?? null,
+        previousCaptureVersion: m?.previousCaptureVersion ?? null,
+        openedHere: m?.openedHere ?? null,
+        startedAt: m?.startedAt ?? null,
+        finishedAt: m?.finishedAt ?? null,
         actualMs: m?.actualMs ?? null,
         expectedMs: exp?.ms ?? null,
         nodes: m?.nodes ?? null,
@@ -330,7 +501,9 @@ export class RunState {
 
     const current = isActive ? this.currentInfo(now, expected) : null;
     // Pipelined runs read several modules at once; `current` stays the first for the legacy view.
-    const runningNow = isActive ? this.modules.filter((x) => x.state === "running") : [];
+    const runningNow = isActive
+      ? this.modules.filter((x) => ["opening", "version-check", "queued-for-read", "reading", "staging", "closing"].includes(x.lifecycle))
+      : [];
     const activeModules = runningNow.length > 0 ? runningNow.map((x) => this.infoOf(x, now, expected)) : undefined;
 
     // Weight by expected duration so one huge module cannot read as "1 of 30"; a module with no
@@ -341,9 +514,16 @@ export class RunState {
     const totalExp = rows.reduce((n, r) => n + weight(r), 0) || 1;
     const doneRows = rows.filter((r) => r.state === "done");
     const doneExp = doneRows.reduce((n, r) => n + weight(r), 0);
+    // Each active module contributes its OWN partial progress, including concurrent waves.
+    const currentByName = new Map((activeModules ?? []).map((m) => [m.module.toLowerCase(), m]));
+    const activeDoneExp = rows.filter((r) => r.state === "running" && r.lifecycle === "reading")
+      .reduce((sum, r) => {
+        const fraction = currentByName.get(r.module.toLowerCase())?.pct;
+        return sum + (fraction !== undefined && fraction !== null && Number.isFinite(fraction) ? weight(r) * Math.max(0, Math.min(0.99, fraction)) : 0);
+      }, 0);
+    const pctByTime = this.finalized && isActive ? 1 : Math.max(0, Math.min(0.999, (doneExp + activeDoneExp) / totalExp));
     const curRow = rows.find((r) => r.state === "running");
     const curDoneExp = curRow && current?.pct != null ? weight(curRow) * current.pct : 0;
-    const pctByTime = this.finalized && isActive ? 1 : Math.min(0.999, (doneExp + curDoneExp) / totalExp);
 
     // Pace from THIS run only: old timings drift with Studio load, so a run that is uniformly
     // 1.4x slower than history should push the ETA out rather than keep promising the old figure.
@@ -360,12 +540,45 @@ export class RunState {
     // Only promise an ETA when every unfinished module has history: one unknown module can be
     // the one that takes 40 minutes, and a confidently wrong ETA is worse than none.
     const etaKnown = rows.filter((r) => r.state !== "done").every((r) => r.expectedMs !== null);
-    const etaMs = !isActive ? null : this.finalized || this.complete ? 0 : etaKnown ? Math.round(remainingExp * (pace ?? 1)) : null;
+    // Existing timing history was collected sequentially. It cannot predict rolling overlap or
+    // version-aware reuse honestly; Ticket B will calibrate those modes from compatible traces.
+    const etaMs =
+      !isActive || (this.complete && !this.finalized && this.lifecycle !== "running") ? null
+        : this.finalized || this.complete ? 0
+          : this.mode !== "full" || this.pipelineDepth > 1 ? null
+            : etaKnown ? Math.round(remainingExp * (pace ?? 1)) : null;
 
+    const completed = doneRows.length;
+    const activeReadCount = rows.filter((r) => r.lifecycle === "reading").length;
+    const activeOpenCount = rows.filter((r) => r.lifecycle === "opening").length;
+    const activeCloseCount = rows.filter((r) => r.lifecycle === "closing").length;
     return {
+      workers: {
+        readLimit: isActive ? this.workers.limit : this.readLimit,
+        readActive: isActive && !this.complete ? this.workers.active : 0,
+        readQueued: isActive && !this.complete ? this.workers.queued : 0,
+        readSlotUtilization: isActive ? this.traceStats?.utilization ?? null : null,
+        queueWaitP95Ms: isActive ? this.traceStats?.queueWaitP95 ?? null : null,
+        retriedCalls: isActive ? this.traceStats?.retried ?? null : null
+      },
+      gui: isActive ? this.guiState : { active: false, action: null, module: null, lastAction: null },
+      schemaVersion: 2,
+      runId: isActive ? this.runId : null,
+      sequence: isActive ? this.sequence : 0,
+      serverNow: now,
       now,
       scope,
       run: {
+        mode: isActive ? this.mode : "idle",
+        status: isActive ? this.lifecycle : "idle",
+        runId: isActive ? this.runId : null,
+        sequence: isActive ? this.sequence : 0,
+        pipelineDepth: isActive ? this.pipelineDepth : 1,
+        readLimit: isActive ? this.readLimit : 4,
+        traceEnabled: isActive && this.traceEnabled,
+        finishedAt: isActive ? this.runFinishedAt : null,
+        errorCode: isActive ? this.errorCode : null,
+        errorMessage: isActive ? this.errorMessage : null,
         startedAt: isActive ? this.runStartedAt : null,
         elapsedMs: isActive && this.runStartedAt !== null ? now - this.runStartedAt : null,
         complete: isActive ? this.complete : false,
@@ -376,6 +589,14 @@ export class RunState {
         noRunLog: !isActive || this.runStartedAt === null
       },
       progress: {
+        completed,
+        newlyCaptured: rows.filter((r) => r.captureOutcome === "new").length,
+        reused: rows.filter((r) => r.captureOutcome === "reused").length,
+        alreadyStaged: rows.filter((r) => r.captureOutcome === "already-staged").length,
+        notStarted: rows.filter((r) => r.lifecycle === "not-started" || r.lifecycle === "cancelled").length,
+        activeReading: activeReadCount,
+        activeOpening: activeOpenCount,
+        activeClosing: activeCloseCount,
         modulesDone: doneRows.length,
         modulesTotal: rows.length,
         modulesFailed: rows.filter((r) => r.state === "failed").length,
@@ -383,7 +604,7 @@ export class RunState {
         pctByTime,
         pace,
         etaMs,
-        etaAt: etaMs ? now + etaMs : null
+        etaAt: etaMs === null ? null : now + etaMs
       },
       current,
       ...(activeModules !== undefined ? { activeModules } : {}),
@@ -392,7 +613,7 @@ export class RunState {
         exists: graphM !== null,
         writtenAt: graphM,
         fromThisRun: isActive && this.finalized,
-        hasPrevious: false,
+        hasPrevious: graphM !== null && isActive && !this.finalized,
         meta
       },
       flows,

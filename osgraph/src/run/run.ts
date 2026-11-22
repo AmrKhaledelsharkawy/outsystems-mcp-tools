@@ -274,7 +274,9 @@ function setup(options: RunCommonOptions): {
     screenshotDir: join(runDir, "screenshots"),
     // Always Open from Environment: a recent-list open makes Studio list the module's version as "0",
     // which `--changed` cannot compare (it reads it as unknown, so the module is always re-read).
-    source: "environment"
+    source: "environment",
+    // A confirmed Save prompt is dismissed via its exact Cancel button (never Save/Discard) and retried once.
+    cancelSavePrompt: true
   });
   const onProgress = (event: RebuildProgressEvent): void => options.state?.handle(event);
   const listApps = (): Promise<ServiceStudioApp[]> => session.reader.listApps();
@@ -417,12 +419,25 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   };
   const record = (row: RunModuleRow): void => {
     rows.push(row);
+    options.state?.recordOutcome?.(row.module, row.outcome, {
+      ...(row.openedHere !== undefined ? { openedHere: row.openedHere } : {}),
+      ...(row.error !== undefined ? { error: row.error } : {}),
+      ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}),
+      ...(row.nodeCount !== undefined ? { nodeCount: row.nodeCount } : {}),
+      ...(row.edgeCount !== undefined ? { edgeCount: row.edgeCount } : {})
+    });
     writeReport();
   };
 
   const initiallyStaged = stagedNames(graphDir, scope.name);
   const alreadyStaged = modules.filter((m) => initiallyStaged.has(lower(m))).length;
-  options.state?.beginRun(scope.name, modules);
+  options.state?.beginRun(scope.name, modules, {
+    mode: pipelineDepth >= 2 ? "pipeline" : "full",
+    pipelineDepth,
+    readLimit: options.fetchConcurrency ?? s.session.reader.concurrency,
+    traceEnabled: options.trace === true
+  });
+  s.session.reader.setPermitObserver?.((status) => options.state?.setWorkers?.(status));
   log(
     `run ${scope.name}: ${modules.length} scope module(s), ${alreadyStaged} already staged, max open ${maxOpen}` +
       (pipelineDepth >= 2 ? `, pipeline depth ${pipelineDepth}` : "")
@@ -475,6 +490,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
         if (stoppedEarly === undefined) {
           stoppedEarly = RUN_CANCELLED_MESSAGE;
           log(`CANCELLED: ${stoppedEarly}`);
+          options.state?.markCancelling?.();
         }
         record({ module: mod, outcome: "not-started" });
         continue;
@@ -514,6 +530,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
             log(`STOPPED: ${stoppedEarly}`);
             stopForRoom = true;
           } else {
+            options.state?.setModuleLifecycle?.(mod, "opening");
             const opened = await s.openWithRetry(mod);
             if (!opened.ok) {
               log(`${tag} open FAILED ${describeOsopenerFailure(opened.failure)}`);
@@ -550,12 +567,17 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
           ...(openFailure.screenshotPath !== undefined ? { screenshotPath: openFailure.screenshotPath } : {})
         });
         consecutiveOpenFailures++;
-        if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures) {
-          stoppedEarly =
-            `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${openFailure.error.code}). ` +
-            `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
-            `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
-            `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+        // A real or suspected Save prompt is not an independent per-module failure. If the opt-in
+        // Cancel-only recovery could not clear it, one failure is enough to stop safely.
+        const blockedByDialog = openFailure.error.code === "UNSAVED_CHANGES_DIALOG";
+        if (blockedByDialog || (maxFailures > 0 && consecutiveOpenFailures >= maxFailures)) {
+          stoppedEarly = blockedByDialog
+            ? `Cannot safely dismiss Service Studio's Save/unknown dialog while opening ${mod}: ${openFailure.error.message}. ` +
+              `No Save/Discard action was taken. Inspect Studio and ${join(s.runDir, "screenshots")}, then rerun: staged modules resume.`
+            : `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${openFailure.error.code}). ` +
+              `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+              `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+              `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
           log(`STOPPED: ${stoppedEarly}`);
           break;
         }
@@ -565,6 +587,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
       consecutiveOpenFailures = 0;
 
       // 2. Stage it. `stageModule` drains the reader on every path out.
+      options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere });
       let row: RunModuleRow;
       let fatal: unknown;
       try {
@@ -613,6 +636,7 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
 
       // 3. Give the tab back if this process took it — after the drain, success or not.
       if (openedHere) {
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         await s.sleep(s.gapMs);
         const closed = await s.closeAfterDrain(mod);
         row.closed = closed.ok;
@@ -626,9 +650,11 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     }
   } finally {
     await s.session.reader.drain?.();
+    s.session.reader.setPermitObserver?.(undefined);
     s.session.release();
     if (tracer !== undefined) {
       traceSummary = tracer.finish();
+      options.state?.setTraceSummary?.(traceSummary);
       writeReport();
       log(
         `trace: ${traceSummary.calls} call(s), read-slot utilization ${traceSummary.readSlotUtilization}, ` +
@@ -830,6 +856,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     if (cancelled) return;
     cancelled = true;
     abort = true;
+    options.state?.markCancelling?.();
     log(`CANCELLING: opening nothing more; ${running.size} module(s) in flight will finish, drain and close`);
     signal();
   };
@@ -839,16 +866,18 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   // The one GUI operator: opens and closes never overlap, and `gapMs` is its cooldown between actions.
   let guiTail: Promise<unknown> = Promise.resolve();
   let lastGuiEnd: number | undefined;
-  const gui = <T>(fn: () => Promise<T>): Promise<T> => {
+  const gui = <T>(action: "open" | "close", module: string, fn: () => Promise<T>): Promise<T> => {
     const run = guiTail.then(async () => {
       if (lastGuiEnd !== undefined) {
         const wait = s.gapMs - (Date.now() - lastGuiEnd);
         if (wait > 0) await s.sleep(wait);
       }
+      options.state?.setGuiState?.(action, module, true);
       try {
         return await fn();
       } finally {
         lastGuiEnd = Date.now();
+        options.state?.setGuiState?.(action, module, false);
       }
     });
     guiTail = run.then(
@@ -860,7 +889,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
 
   /** Only after the module's own barrier; a thrown close counts as "not closed". */
   const closeOwnedTab = (mod: string): Promise<{ ok: boolean; error?: string }> =>
-    gui(async () => {
+    gui("close", mod, async () => {
       const t0 = performance.now();
       let ok = false;
       try {
@@ -941,6 +970,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
         log(`   drain ${mod} FAILED ${errorOf(err).message}`);
       }
       if (openedHere) {
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         const c0 = Date.now();
         if (!drained) {
           row.closed = false;
@@ -971,12 +1001,15 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   const openFailed = (mod: string, error: NonNullable<RunModuleRow["error"]>, extra: Partial<RunModuleRow> = {}): void => {
     record({ module: mod, outcome: "open-failed", error, ...extra });
     consecutiveOpenFailures++;
-    if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures && stoppedEarly === undefined) {
-      stoppedEarly =
-        `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${error.code}). ` +
-        `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
-        `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
-        `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+    const blockedByDialog = error.code === "UNSAVED_CHANGES_DIALOG";
+    if (stoppedEarly === undefined && (blockedByDialog || (maxFailures > 0 && consecutiveOpenFailures >= maxFailures))) {
+      stoppedEarly = blockedByDialog
+        ? `Cannot safely dismiss Service Studio's Save/unknown dialog while opening ${mod}: ${error.message}. ` +
+          `No Save/Discard action was taken. Inspect Studio and ${join(s.runDir, "screenshots")}, then rerun: staged modules resume.`
+        : `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${error.code}). ` +
+          `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+          `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+          `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
       log(`STOPPED: ${stoppedEarly}`);
       abort = true;
     }
@@ -1040,13 +1073,15 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     active.add(lower(mod));
     if (already) {
       consecutiveOpenFailures = 0;
+      options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere: false });
       startTask(mod, false, undefined);
       continue;
     }
+    options.state?.setModuleLifecycle?.(mod, "opening");
     const o0 = Date.now();
     let opened: Awaited<ReturnType<typeof s.openWithRetry>>;
     try {
-      opened = await gui(() => s.openWithRetry(mod));
+      opened = await gui("open", mod, () => s.openWithRetry(mod));
     } catch (err) {
       const e = errorOf(err);
       log(`${tagOf(mod)} open FAILED ${e.code}: ${e.message}`);
@@ -1083,6 +1118,7 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
       queue.unshift(mod);
       break;
     }
+    options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere: opened.openedHere });
     startTask(mod, opened.openedHere, opened.attempts);
   }
 
@@ -1357,6 +1393,9 @@ export interface RefreshModulesRow {
   nodeCount?: number;
   edgeCount?: number;
   durationMs?: number;
+  /** Change detection versions for progress API v2. */
+  moduleVersion?: string | null;
+  previousCaptureVersion?: string | null;
   /** Set when the module could not be opened or read. */
   error?: { code: string; message: string };
 }
@@ -1429,13 +1468,28 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
   const rows: RefreshModulesRow[] = [];
   const record = (row: RefreshModulesRow): void => {
     rows.push(row);
+    const outcome = row.error !== undefined ? "stage-failed" : row.read ? "staged" : "reused";
+    options.state?.recordOutcome?.(row.module, outcome, {
+      versionReason: row.reason,
+      ...(row.moduleVersion !== undefined ? { moduleVersion: row.moduleVersion } : {}),
+      ...(row.previousCaptureVersion !== undefined ? { previousCaptureVersion: row.previousCaptureVersion } : {}),
+      ...(row.openedHere !== undefined ? { openedHere: row.openedHere } : {}),
+      ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}),
+      ...(row.nodeCount !== undefined ? { nodeCount: row.nodeCount } : {}),
+      ...(row.edgeCount !== undefined ? { edgeCount: row.edgeCount } : {}),
+      ...(row.error !== undefined ? { error: row.error } : {})
+    });
     try {
       writeFileSync(reportPath, `${JSON.stringify({ scope: scope.name, rows }, null, 2)}\n`, "utf8");
     } catch {
       /* the report is a convenience */
     }
   };
-  options.state?.beginRun(scope.name, candidates);
+  options.state?.beginRun(scope.name, candidates, {
+    mode: changedMode ? "changed" : "modules",
+    readLimit: options.fetchConcurrency ?? s.session.reader.concurrency
+  });
+  s.session.reader.setPermitObserver?.((status) => options.state?.setWorkers?.(status));
   log(
     `run ${scope.name} ${changedMode ? "--changed" : "--modules"}: ${candidates.length} candidate module(s), ` +
       `then one offline re-extract`
@@ -1462,6 +1516,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
             log(`STOPPED: ${stoppedEarly}`);
             break;
           }
+          options.state?.setModuleLifecycle?.(mod, "opening");
           const opened = await s.openWithRetry(mod);
           if (!opened.ok) {
             const msg = describeOsopenerFailure(opened.failure);
@@ -1494,14 +1549,24 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
       consecutiveOpenFailures = 0;
 
       const listed = apps.find((a) => a.isOpen === true && lower(a.name) === lower(mod))?.version;
+      if (changedMode) {
+        options.state?.setModuleLifecycle?.(mod, "version-check", {
+          moduleVersion: listed ?? null,
+          previousCaptureVersion: capture.version
+        });
+      }
       const decision: { read: boolean; reason: ChangeReason | "requested"; detail: string } = changedMode
         ? decideChange(capture, listed)
         : { read: true, reason: "requested", detail: "named by --modules" };
       log(`${tag} ${decision.reason}: ${decision.detail}`);
 
-      const row: RefreshModulesRow = { module: mod, reason: decision.reason, detail: decision.detail, read: decision.read, openedHere };
+      const row: RefreshModulesRow = {
+        module: mod, reason: decision.reason, detail: decision.detail, read: decision.read, openedHere,
+        ...(changedMode ? { moduleVersion: listed ?? null, previousCaptureVersion: capture.version } : {})
+      };
       let fatal: unknown;
       if (decision.read) {
+        options.state?.setModuleLifecycle?.(mod, "queued-for-read", { openedHere, versionReason: decision.reason });
         const stagedBefore = stagedNames(graphDir, scope.name).has(lower(mod));
         let staged: StageOutcome | undefined;
         try {
@@ -1536,6 +1601,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
       }
       // Give the tab back if this process took it, after the drain.
       if (openedHere) {
+        options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         await s.sleep(s.gapMs);
         const closed = await s.closeAfterDrain(mod);
         row.closed = closed.ok;
@@ -1549,6 +1615,7 @@ export async function refreshModules(options: RefreshModulesOptions): Promise<Re
     }
   } finally {
     await s.session.reader.drain?.();
+    s.session.reader.setPermitObserver?.(undefined);
     s.session.release();
   }
 

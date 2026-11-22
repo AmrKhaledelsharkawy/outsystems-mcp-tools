@@ -147,10 +147,84 @@ class FlowsCache {
   }
 }
 
+type GraphNode = { id: string; kind?: string; module?: string; label?: string; [key: string]: unknown };
+type GraphLink = { source: string; target: string; [key: string]: unknown };
+interface ViewGraph { nodes: GraphNode[]; links: GraphLink[]; graph?: { osgraph?: { modules?: string[]; [key: string]: unknown }; [key: string]: unknown } }
+
+/**
+ * One-slot scope graph cache: parsing happens only on an explicit graph-view request, never in
+ * /api/status. Bounded response views prevent full-graph downloads/vis layouts on every scope switch.
+ * Keep the old streaming /api/graph intact for existing API consumers.
+ */
+class GraphViewCache {
+  private cached: { file: string; stamp: number; size: number; data: ViewGraph } | null = null;
+  get(file: string): ViewGraph {
+    const stat = statSync(file);
+    if (stat.size > 100 * 1024 * 1024) throw new Error("graph exceeds the 100 MiB interactive-view limit");
+    if (this.cached && this.cached.file === file && this.cached.stamp === stat.mtimeMs && this.cached.size === stat.size) {
+      return this.cached.data;
+    }
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object") throw new Error("invalid graph JSON");
+    const data = parsed as ViewGraph;
+    if (!Array.isArray(data.nodes) || !Array.isArray(data.links)) throw new Error("invalid graph JSON");
+    this.cached = { file, stamp: stat.mtimeMs, size: stat.size, data };
+    return data;
+  }
+
+  view(file: string, view: string, params: URLSearchParams): Record<string, unknown> {
+    const data = this.get(file);
+    const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
+    const scope = data.graph?.osgraph?.modules ?? [];
+    const stats = {
+      nodes: data.nodes.length, edges: data.links.length,
+      modules: scope.length,
+      elementsInScope: data.nodes.filter((n) => n.kind !== "module" && scope.includes(n.module ?? "") && !n.external && !n.placeholder).length,
+      external: data.nodes.filter((n) => n.external).length,
+      placeholders: data.nodes.filter((n) => n.placeholder).length
+    };
+    if (view === "search") {
+      const q = (params.get("q") ?? "").trim().toLowerCase().slice(0, 160);
+      const requestedLimit = Number(params.get("limit") ?? 60);
+      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(60, Math.floor(requestedLimit))) : 60;
+      if (q.length < 2) return { results: [], count: 0 };
+      const matches = data.nodes.filter((n) => String(n.label ?? "").toLowerCase().includes(q) || n.id.toLowerCase().includes(q));
+      return { results: matches.slice(0, limit).map((n) => ({ id: n.id, label: n.label, kind: n.kind, module: n.module })), count: matches.length };
+    }
+    if (view === "overview") {
+      const modules = data.nodes.filter((n) => n.kind === "module").slice(0, 600);
+      const ids = new Set(modules.map((n) => n.id));
+      const links = data.links.filter((l) => ids.has(l.source) && ids.has(l.target)).slice(0, 2000);
+      return { nodes: modules, links, graph: data.graph, stats, limited: modules.length < data.nodes.filter((n) => n.kind === "module").length };
+    }
+    if (view === "module") {
+      const module = params.get("module") ?? "";
+      if (!module || module.length > 256) throw new Error("invalid module name");
+      const own = data.nodes.filter((n) => n.kind !== "module" && n.module === module).slice(0, 650);
+      const ownIds = new Set(own.map((n) => n.id));
+      const related = data.links.filter((e) => ownIds.has(e.source) || ownIds.has(e.target)).slice(0, 2500);
+      const extras = new Set<string>();
+      for (const e of related) {
+        if (!ownIds.has(e.source)) extras.add(e.source);
+        if (!ownIds.has(e.target)) extras.add(e.target);
+      }
+      const extra = [...extras].slice(0, Math.max(0, 900 - own.length)).map((id) => nodeById.get(id)).filter((n): n is GraphNode => n !== undefined);
+      const nodes = [...own, ...extra];
+      const ids = new Set(nodes.map((n) => n.id));
+      return {
+        nodes, links: related.filter((l) => ids.has(l.source) && ids.has(l.target)),
+        module, limited: own.length < data.nodes.filter((n) => n.kind !== "module" && n.module === module).length || extras.size > extra.length
+      };
+    }
+    throw new Error("unknown graph view");
+  }
+}
+
 /** Starts the site, stepping past busy ports. Resolves with the address it actually got. */
 export async function startSite(options: SiteOptions): Promise<LiveSite> {
   const dashboardDir = options.dashboardDir ?? defaultDashboardDir();
   const flows = new FlowsCache();
+  const graphViews = new GraphViewCache();
   const startedAt = new Date().toISOString();
   const lanBind = options.host === "0.0.0.0" || options.host === "::";
   const viewerPassword = options.viewerPassword;
@@ -381,6 +455,18 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
         }
         if (url.pathname === "/api/status") return send(res, 200, JSON.stringify(statusFor(scopeOf(url))));
         if (url.pathname.startsWith("/api/discover/")) return await discoveryRoute(req, res, url);
+        if (url.pathname === "/api/graph/view") {
+          const scope = scopeOf(url);
+          const file = scopeFiles(options.graphDir, scope).graph;
+          if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: "No finalized graph available for this scope." }));
+          try {
+            const view = graphViews.view(file, url.searchParams.get("view") ?? "overview", url.searchParams);
+            res.setHeader("x-graph-which", options.state.snapshotIsPrevious(scope) ? "previous" : "current");
+            return send(res, 200, JSON.stringify(view));
+          } catch {
+            return send(res, 400, JSON.stringify({ error: "Graph view unavailable or invalid parameters." }));
+          }
+        }
         if (url.pathname === "/api/graph") {
           const scope = scopeOf(url);
           const file = scopeFiles(options.graphDir, scope).graph;

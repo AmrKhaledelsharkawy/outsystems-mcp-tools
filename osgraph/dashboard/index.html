@@ -96,18 +96,34 @@
   .chip.expanded { background: var(--ok-soft); color: var(--ok); }
   .chip.leaf, .chip.listed, .chip.skipped, .chip.queued { background: var(--line); color: var(--muted); }
   code { font-family: var(--mono); font-size: 12px; }
+  .pipeline-summary { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+  .pipeline-summary > span { padding: 6px 10px; background: var(--accent-soft); border-radius: 7px; font-size: 12px; }
+  .active-list { display: grid; gap: 10px; max-height: 350px; overflow: auto; }
+  .active-item { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+  .active-item .row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+  .active-item .name { font: 12px var(--mono); overflow-wrap: anywhere; }
+  .active-item .bar { height: 6px; margin-top: 8px; }
+  .chip.reused { background: var(--ok-soft); color: var(--ok); }
+  .chip.not-started, .chip.cancelled { background: var(--line); color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .toolbar input { max-width: 330px; }
+  .toolbar select { max-width: 210px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } .bar > i { transition: none; } }
+  @media (max-width: 700px) { header { padding: 12px; } main { padding: 12px; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <header>
   <h1>osgraph</h1><label class="scope" for="scopeSel">scope:</label><select id="scopeSel" class="scope" title="Which scope to watch"><option>loading…</option></select>
-  <span class="live"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
+  <span class="live" role="status" aria-live="polite"><span class="dot" id="liveDot"></span><span id="liveText">connecting…</span></span>
   <nav><button id="tabRun" class="on">Rebuild progress</button><button id="tabGraph">Graph explorer</button><button id="tabDisc">Discover</button></nav>
 </header>
 
 <main id="runView">
-  <div id="banner"></div>
+  <div id="banner" role="status" aria-live="polite"></div>
+  <div class="pipeline-summary" id="pipelineSummary" aria-label="Live run mode and concurrency"><span id="runMode">Run not started</span><span id="workerSummary">Shared reads: unavailable</span><span id="pipelineSummaryCounts">No active modules</span></div>
   <div class="grid kpis">
     <div class="card hero" style="grid-column: span 2">
       <h2>Overall progress</h2>
@@ -123,7 +139,9 @@
 
   <div class="grid two" style="margin-top:16px">
     <div class="card">
-      <h2>Current module</h2>
+      <h2>Active modules <span class="muted" id="activeCount">0</span></h2>
+      <div id="activeList" class="active-list" aria-label="Currently active modules"><p class="muted">No modules running</p></div>
+      <h2 style="margin-top:14px">Focused module (legacy detail)</h2>
       <div id="curName" class="big" style="font-size:18px; font-family: var(--mono)">–</div>
       <div class="sub" id="curSub"></div>
       <div class="bar" style="margin-top:10px" id="curBar"><i style="width:0"></i></div>
@@ -137,12 +155,17 @@
 
   <div class="card" style="margin-top:16px">
     <h2>Modules <span class="muted" id="modCounts" style="text-transform:none; letter-spacing:0"></span></h2>
+    <div class="toolbar">
+      <label for="modSearch">Find module</label><input id="modSearch" placeholder="Search by module name…" autocomplete="off">
+      <label for="modFilter">Status</label><select id="modFilter"><option value="">All statuses</option><option value="pending">Pending</option><option value="active">Active</option><option value="completed">Captured</option><option value="reused">Reused</option><option value="failed">Failed</option><option value="not-started">Not started</option></select>
+      <span id="visibleModCount" class="sub"></span>
+    </div>
     <div class="tablewrap"><table>
       <thead><tr><th>#</th><th>Module</th><th>Layer</th><th>Status</th><th class="num">Nodes</th><th class="num">Edges</th><th class="num">Time</th><th class="num">Expected</th><th>vs last run</th><th>Staged at</th></tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
   </div>
-  <p class="muted" style="font-size:12px">Read-only view of the run's files. Expected times come from the previous full read of each module; the ETA scales them by this run's measured pace and adds ~25 s open/close per module. Refreshes every 3 s.</p>
+  <p class="muted" style="font-size:12px">Read-only monitoring. Per-module expected times are historical read costs, not a prediction of rolling pipeline completion. Pipeline and version-aware ETA are shown as unavailable until compatible trace calibration exists. Refresh pauses when this tab is hidden.</p>
 </main>
 
 <main id="graphView" hidden>
@@ -242,9 +265,21 @@ const fmtDur = (ms) => {
 const fmtClock = (t) => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '–';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PHASES = ['listing', 'dataModel', 'structures', 'screens', 'blocks', 'clientActions', 'serverActions', 'extract'];
+const safeNumber = (n, fallback = 0) => typeof n === 'number' && Number.isFinite(n) ? n : fallback;
+const safePct = (n) => Math.max(0, Math.min(100, safeNumber(n) * 100));
+const activeLifecycles = new Set(['opening', 'version-check', 'queued-for-read', 'reading', 'staging', 'closing']);
+let modSearch = '', modFilter = '';
 
 // ---------------- run view ----------------
 let lastStatus = null;
+let statusController = null, pollTimer = null, pollGeneration = 0, pollInterval = 3000;
+const schedulePoll = () => {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, document.hidden ? 12000 : pollInterval);
+};
+$('modSearch').oninput = () => { modSearch = $('modSearch').value.trim().toLowerCase(); if (lastStatus) renderModules(lastStatus); };
+$('modFilter').onchange = () => { modFilter = $('modFilter').value; if (lastStatus) renderModules(lastStatus); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 // Scope: ?scope= in the URL, else the last one picked here, else the server default.
 let SCOPE = new URLSearchParams(location.search).get('scope') || (() => { try { return localStorage.getItem('osgraph.scope'); } catch { return null; } })() || '';
 const q = () => (SCOPE ? `?scope=${encodeURIComponent(SCOPE)}` : '');
@@ -258,40 +293,86 @@ async function loadScopes() {
 }
 $('scopeSel').onchange = () => {
   SCOPE = $('scopeSel').value;
+  lastStatus = null;
   try { localStorage.setItem('osgraph.scope', SCOPE); } catch { /* private window */ }
   history.replaceState(null, '', `?scope=${encodeURIComponent(SCOPE)}`);
   document.title = `osgraph — ${SCOPE}`;
-  G = null; $('gModule').length = 1;
+  resetGraph();
   refresh();
   if (!$('graphView').hidden) loadGraph();
 };
 async function refresh() {
+  // Exactly one in-flight poll; an aborted or stale response cannot update the currently selected scope.
+  clearTimeout(pollTimer);
+  statusController?.abort();
+  const controller = new AbortController();
+  statusController = controller;
+  const generation = ++pollGeneration;
+  const scope = SCOPE;
   try {
-    const r = await fetch('/api/status' + q(), { cache: 'no-store' });
+    const r = await fetch('/api/status' + q(), { cache: 'no-store', signal: controller.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const s = await r.json();
-    if (SCOPE && s.scope !== SCOPE) return; // a response for the scope we just left
+    if (controller.signal.aborted || generation !== pollGeneration || SCOPE !== scope || (scope && s.scope !== scope)) return;
+    if (lastStatus?.scope === s.scope && lastStatus.runId === s.runId &&
+        Number.isFinite(lastStatus.sequence) && Number.isFinite(s.sequence) && s.sequence < lastStatus.sequence) return;
     lastStatus = s;
+    pollInterval = 3000;
     renderRun(s);
-    $('liveDot').className = 'dot ' + (s.run.complete || s.run.finalized ? '' : s.run.stalled ? 'bad' : 'on');
-    $('liveText').textContent = s.run.finalized ? 'finished' : s.run.stalled ? 'no activity for 30 min' : `live · ${new Date().toLocaleTimeString()}`;
-  } catch {
-    $('liveDot').className = 'dot bad'; $('liveText').textContent = 'server unreachable';
+    const terminal = ['completed', 'cancelled', 'failed', 'stopped'].includes(s.run.status);
+    $('liveDot').className = 'dot ' + (terminal ? '' : s.run.stalled ? 'bad' : 'on');
+    $('liveText').textContent = terminal ? s.run.status : s.run.stalled ? 'no progress reported for 30 min' : `live · ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    if (controller.signal.aborted || generation !== pollGeneration) return;
+    pollInterval = Math.min(30000, Math.max(6000, pollInterval * 2));
+    $('liveDot').className = 'dot bad';
+    $('liveText').textContent = 'progress server unreachable · reconnecting';
+  } finally {
+    if (statusController === controller) {
+      statusController = null;
+      schedulePoll();
+    }
   }
 }
 function renderRun(s) {
   const p = s.progress;
-  const pct = p.pctByTime;
-  $('pct').textContent = `${(pct * 100).toFixed(1)}%`;
+  const pct = safePct(p.pctByTime);
+  $('pct').textContent = `${pct.toFixed(1)}%`;
   $('pctNote').textContent = s.modules.some((m) => m.expectedMs) ? 'of the expected read time' : 'by element texts read (no timing history)';
   $('mainBar').className = 'bar' + (s.run.finalized ? ' ok' : '');
-  $('mainBar').firstElementChild.style.width = `${(pct * 100).toFixed(2)}%`;
-  $('modulesLine').textContent = `${p.modulesDone} of ${p.modulesTotal} modules staged` + (p.modulesFailed ? ` · ${p.modulesFailed} failed (retried at the end)` : '');
-  $('paceLine').textContent = p.pace != null ? `pace ${p.pace.toFixed(2)}× the last run` : 'no previous run to compare';
+  $('mainBar').firstElementChild.style.width = `${pct.toFixed(2)}%`;
+  const newCount = p.newlyCaptured ?? 0, reused = p.reused ?? 0, staged = p.alreadyStaged ?? 0;
+  $('modulesLine').textContent = `${p.modulesDone}/${p.modulesTotal} resolved · ${newCount} captured · ${reused} reused · ${staged} resumed` +
+    (p.modulesFailed ? ` · ${p.modulesFailed} failed` : '');
+  $('paceLine').textContent = s.run.mode === 'full' && s.run.pipelineDepth === 1 && Number.isFinite(p.pace)
+    ? `read pace ${p.pace.toFixed(2)}× historical` : 'parallel/version-aware ETA: calibrating';
+  const depth = s.run.pipelineDepth ?? 1;
+  const active = Array.isArray(s.activeModules) ? s.activeModules : s.current ? [s.current] : [];
+  const mode = s.run.mode ?? 'full';
+  $('runMode').textContent = `${mode} · ${s.run.status ?? (s.run.complete ? 'finished' : 'running')}${depth > 1 ? ` · depth ${depth}` : ''}`;
+  const workers = s.workers;
+  $('workerSummary').textContent = workers
+    ? `Shared read permits: ${workers.readActive}/${workers.readLimit} busy · ${workers.readQueued} queued` +
+      (Number.isFinite(workers.readSlotUtilization) ? ` · measured utilization ${(workers.readSlotUtilization * 100).toFixed(1)}%` : ' · utilization unavailable')
+    : `Shared MCP read permits: ${s.run.readLimit ?? 4} total · metrics unavailable`;
+  $('pipelineSummaryCounts').textContent = `${active.length} active module(s) · ${p.activeReading ?? 0} reading · ${p.activeOpening ?? 0} opening · ${p.activeClosing ?? 0} closing` +
+    (s.gui?.active ? ` · GUI ${s.gui.action} ${s.gui.module}` : '');
+  $('activeCount').textContent = String(active.length);
+  $('activeList').innerHTML = active.length
+    ? active.map((a) => {
+      const row = s.modules.find((m) => m.module.toLowerCase() === a.module.toLowerCase());
+      const label = row?.lifecycle ?? a.phase ?? 'active';
+      const elapsed = fmtDur(a.elapsedMs);
+      return `<div class="active-item"><div class="row"><span class="name">${esc(a.module)}</span><span class="chip running">${esc(label)}</span></div>` +
+        `<div class="sub">${esc(elapsed)} elapsed${a.phase ? ` · ${esc(a.phase)}` : ''}${a.phaseCount != null ? ` · ${safeNumber(a.phaseItemsRead)}/${safeNumber(a.phaseCount)} read` : ''}</div>` +
+        `<div class="bar"><i style="width:${safePct(a.pct).toFixed(1)}%"></i></div></div>`;
+    }).join('')
+    : '<p class="muted">No modules currently active</p>';
   const f = s.flows;
   $('flowsBig').textContent = f ? `${(f.actions ?? 0).toLocaleString()} actions` : '–';
   $('flowsSub').textContent = f ? `${(f.nodes ?? 0).toLocaleString()} flow nodes · ${(f.bindings ?? 0).toLocaleString()} bindings · ${f.unknown ?? 0} unknown · ${f.parseErrors ?? 0} parse errors` : 'flows.json is written at finalize';
-  $('eta').textContent = s.run.finalized ? 'done' : p.etaMs == null ? 'unknown' : fmtDur(p.etaMs);
-  $('etaAt').textContent = s.run.finalized ? 'graph.json written' : p.etaAt ? `finishes around ${fmtClock(p.etaAt)}` : p.etaMs == null ? 'first run of these modules — no timing history' : '';
+  $('eta').textContent = s.run.finalized ? 'done' : s.run.complete ? '—' : p.etaMs == null ? 'calibrating' : fmtDur(p.etaMs);
+  $('etaAt').textContent = s.run.finalized ? 'final snapshot published' : p.etaAt ? `estimated finish ${fmtClock(p.etaAt)}` : p.etaMs == null ? 'No comparable runtime history yet' : '';
   $('elapsed').textContent = fmtDur(s.run.elapsedMs);
   $('startedAt').textContent = s.run.startedAt ? `started ${fmtClock(s.run.startedAt)}` : '';
   const done = s.modules.filter((m) => m.state === 'done');
@@ -299,10 +380,13 @@ function renderRun(s) {
   $('edges').textContent = done.reduce((n, m) => n + (m.edges ?? 0), 0).toLocaleString() + ' edges extracted (before merge)';
 
   const b = $('banner');
-  if (s.run.finalized) { b.className = 'banner ok'; b.textContent = `Finished — graph.json written ${fmtClock(s.snapshot.writtenAt)}. Open the Graph explorer to browse it.`; }
-  else if (s.run.noRunLog) { b.className = 'banner'; b.textContent = `No run log found for scope '${s.scope}'. Showing what is on disk (stage / graph.json / flows.json).`; }
-  else if (s.run.stalled) { b.className = 'banner bad'; b.textContent = `No activity for 30 minutes (no log line and no element text written since ${fmtClock(s.run.lastActivityAt)}) — the run may be stuck.`; }
-  else if (s.run.complete) { b.className = 'banner bad'; b.textContent = `Pass ended with ${p.modulesTotal - p.modulesDone} module(s) not staged; a retry pass is needed.`; }
+  if (s.run.finalized) { b.className = 'banner ok'; b.textContent = `Completed — snapshot finalized at ${fmtClock(s.snapshot.writtenAt)}.`; }
+  else if (s.run.status === 'cancelled') { b.className = 'banner'; b.textContent = 'Cancelled by operator; completed and resumed captures remain available for the next run.'; }
+  else if (s.run.status === 'cancelling') { b.className = 'banner'; b.textContent = 'Cancelling: allowing in-flight reads and closes to finish safely.'; }
+  else if (s.run.status === 'stopped' || s.run.status === 'failed') { b.className = 'banner bad'; b.textContent = `${s.run.status}: ${s.run.errorMessage ?? 'run ended without a finalized snapshot'}`; }
+  else if (s.run.noRunLog) { b.className = 'banner'; b.textContent = `No live run observed for scope '${s.scope}'. Previous finalized snapshot may still be available.`; }
+  else if (s.run.stalled) { b.className = 'banner bad'; b.textContent = `No progress events since ${fmtClock(s.run.lastActivityAt)} — check Studio and Service Studio connection.`; }
+  else if (s.run.complete) { b.className = 'banner bad'; b.textContent = 'Run ended without finalization; inspect failures and retry.'; }
   else { b.className = ''; b.textContent = ''; }
 
   // current module
@@ -322,7 +406,7 @@ function renderRun(s) {
     }).join('');
   } else if (!s.run.finalized && !s.run.complete && next) {
     $('curName').textContent = next.module;
-    $('curSub').textContent = 'opening in Service Studio (osopener) / starting…';
+    $('curSub').textContent = 'queued — waiting for an authoritative opening/read event';
     $('curBar').firstElementChild.style.width = '0';
     $('phases').innerHTML = PHASES.map((ph) => `<div class="ph"><b>${ph}</b>—</div>`).join('');
   } else {
@@ -334,24 +418,42 @@ function renderRun(s) {
   $('log').innerHTML = s.logTail.map((l) => `<span class="t">${l.at ? new Date(l.at).toLocaleTimeString() : '        '}</span> ${esc(l.text)}`).join('\n');
   $('log').scrollTop = 1e9;
 
-  // table
-  const counts = s.modules.reduce((a, m) => ((a[m.state] = (a[m.state] ?? 0) + 1), a), {});
+  renderModules(s);
+}
+function renderModules(s) {
+  const counts = s.modules.reduce((a, m) => ((a[m.lifecycle ?? m.state] = (a[m.lifecycle ?? m.state] ?? 0) + 1), a), {});
   $('modCounts').textContent = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ');
-  const nextKey = !c && next ? next.module : null;
-  $('rows').innerHTML = s.modules.map((m) => {
-    const state = m.module === nextKey && !s.run.complete ? 'opening' : m.state;
-    const ratio = m.actualMs && m.expectedMs ? m.actualMs / m.expectedMs : null;
-    const bar = ratio ? `<span class="mini" title="${(ratio * 100).toFixed(0)}% of last run"><i class="${ratio > 1.25 ? 'slow' : ''}" style="width:${Math.min(100, ratio * 50)}%"></i></span> ${(ratio * 100).toFixed(0)}%` : '';
-    const time = state === 'running' && c ? fmtDur(c.elapsedMs) : fmtDur(m.actualMs);
+  const activeMap = new Map((s.activeModules ?? (s.current ? [s.current] : [])).map((x) => [x.module.toLowerCase(), x]));
+  const subset = s.modules.filter((m) => {
+    if (modSearch && !m.module.toLowerCase().includes(modSearch)) return false;
+    const lc = m.lifecycle ?? m.state;
+    if (modFilter === 'active') return activeLifecycles.has(lc);
+    if (modFilter === 'pending') return lc === 'pending';
+    if (modFilter === 'completed') return lc === 'completed' && m.captureOutcome !== 'reused' && m.captureOutcome !== 'already-staged';
+    if (modFilter === 'reused') return lc === 'reused';
+    if (modFilter === 'failed') return lc === 'failed';
+    if (modFilter === 'not-started') return lc === 'not-started' || lc === 'cancelled';
+    return !modFilter || lc === modFilter;
+  });
+  $('visibleModCount').textContent = `${subset.length} of ${s.modules.length} shown`;
+  $('rows').innerHTML = subset.map((m) => {
+    const lc = m.lifecycle ?? m.state;
+    const live = activeMap.get(m.module.toLowerCase());
+    const ratio = s.run.mode === 'full' && s.run.pipelineDepth === 1 && m.captureOutcome !== 'reused' &&
+      m.captureOutcome !== 'already-staged' && m.actualMs > 0 && m.expectedMs > 0 ? m.actualMs / m.expectedMs : null;
+    const bar = Number.isFinite(ratio) && ratio > 0
+      ? `<span class="mini" title="${(ratio * 100).toFixed(0)}% of last run"><i class="${ratio > 1.25 ? 'slow' : ''}" style="width:${Math.min(100, ratio * 50)}%"></i></span> ${(ratio * 100).toFixed(0)}%`
+      : '';
+    const time = live ? fmtDur(live.elapsedMs) : fmtDur(m.actualMs);
     const err = m.error ? ` <span class="muted" title="${esc(m.errorMessage)}">${esc(m.error)}</span>` : '';
-    return `<tr class="${state}"><td class="num">${m.index}</td><td class="mod">${esc(m.module)}</td><td>${esc(m.layer)}</td>` +
-      `<td><span class="chip ${state}">${state}</span>${err}</td><td class="num">${m.nodes ?? ''}</td><td class="num">${m.edges ?? ''}</td>` +
-      `<td class="num">${m.actualMs || state === 'running' ? time : ''}</td><td class="num">${fmtDur(m.expectedMs)}</td><td>${bar}</td>` +
+    const ver = m.versionReason ? ` <span class="muted" title="${esc((m.previousCaptureVersion ?? '?') + ' → ' + (m.moduleVersion ?? '?'))}">(${esc(m.versionReason)})</span>` : '';
+    return `<tr class="${esc(m.state)}"><td class="num">${m.index}</td><td class="mod">${esc(m.module)}</td><td>${esc(m.layer)}</td>` +
+      `<td><span class="chip ${lc === 'reused' ? 'reused' : esc(m.state)}">${esc(lc)}</span>${ver}${err}</td><td class="num">${m.nodes ?? ''}</td><td class="num">${m.edges ?? ''}</td>` +
+      `<td class="num">${m.actualMs != null || live ? time : ''}</td><td class="num">${fmtDur(m.expectedMs)}</td><td>${bar}</td>` +
       `<td class="muted">${m.stagedAt ? fmtClock(Date.parse(m.stagedAt)) : ''}</td></tr>`;
   }).join('');
 }
 loadScopes().then(() => { document.title = `osgraph — ${SCOPE}`; refresh(); });
-setInterval(refresh, 3000);
 
 // ---------------- tabs ----------------
 function showTab(t) {
@@ -430,7 +532,7 @@ async function pollDisc() {
   try {
     s = await (await fetch('/api/discover/status' + (discId ? `?id=${encodeURIComponent(discId)}` : ''), { cache: 'no-store' })).json();
   } catch { discTimer = setTimeout(pollDisc, 3000); return; }
-  const busy = Boolean(lastStatus && !lastStatus.run.complete && !lastStatus.run.finalized && !lastStatus.run.stalled);
+  const busy = Boolean(lastStatus && ['running', 'cancelling'].includes(lastStatus.run.status));
   const dry = $('dDry').checked;
   $('dStart').disabled = Boolean(s.running) || (busy && !dry);
   $('dStart').title = busy && !dry ? 'A rebuild is using Service Studio' : '';
@@ -466,38 +568,66 @@ async function pollDisc() {
 
 // ---------------- graph explorer ----------------
 let G = null, net = null, out = null, inn = null, byId = null, dir = 'dependents', depth = 1, selected = null;
-const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
-const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
-
-async function loadGraph() {
-  if (G) return;
-  $('gWhich').textContent = 'loading graph.json…';
-  const r = await fetch('/api/graph' + q(), { cache: 'no-store' });
-  if (!r.ok) { $('gWhich').textContent = (await r.json().catch(() => ({}))).error ?? 'no graph yet'; $('gStats').innerHTML = ''; if (net) { net.destroy(); net = null; } return; }
-  const which = r.headers.get('x-graph-which');
-  G = await r.json();
-  $('gWhich').innerHTML = which === 'current'
-    ? 'Showing the graph written by <b>this</b> run.'
-    : 'Showing the <b>previous</b> snapshot (pre-fix) until this run finishes.';
+let overviewGraph = null, graphController = null, graphDetailController = null, graphSearchController = null;
+let graphGeneration = 0, detailGeneration = 0, searchGeneration = 0, searchTimer = null, searchLookup = new Map();
+const graphQuery = (view, extra = '') => `/api/graph/view${q() ? q() + '&' : '?'}view=${view}${extra}`;
+function rebuildGraphIndex() {
   byId = new Map(G.nodes.map((n) => [n.id, n]));
   out = new Map(); inn = new Map();
   for (const l of G.links) {
     (out.get(l.source) ?? out.set(l.source, []).get(l.source)).push(l);
     (inn.get(l.target) ?? inn.set(l.target, []).get(l.target)).push(l);
   }
-  const o = G.graph?.osgraph ?? {};
-  const scope = new Set(o.modules ?? []);
-  const elems = G.nodes.filter((n) => n.kind !== 'module');
-  $('gStats').innerHTML = [
-    ['nodes', G.nodes.length.toLocaleString()], ['edges', G.links.length.toLocaleString()],
-    ['scope modules', scope.size], ['in-scope elements', elems.filter((n) => scope.has(n.module) && !n.external && !n.placeholder).length],
-    ['external refs', elems.filter((n) => n.external).length], ['placeholders', o.placeholderCount ?? 0],
-    ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '–']
-  ].map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join('');
-  const sel = $('gModule');
-  for (const m of [...scope].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(m)}</option>`);
-  sel.onchange = () => drawModule(sel.value);
-  drawOverview();
+}
+function resetGraph() {
+  graphGeneration++; detailGeneration++; searchGeneration++;
+  graphController?.abort(); graphDetailController?.abort(); graphSearchController?.abort();
+  clearTimeout(searchTimer);
+  if (net) { net.destroy(); net = null; }
+  G = null; overviewGraph = null; out = null; inn = null; byId = null; selected = null; searchLookup.clear();
+  $('gModule').length = 1;
+}
+const LAYER_COLORS = { UI: '#7c5cff', CW: '#2f6fe4', SL: '#0aa2a8', BL: '#1f9d55', ST: '#7a8a00', IS: '#b46b00', CS: '#c4502a', LKP: '#a33a7d', UNKNOWN: '#8a94a3' };
+const kindShape = { Screen: 'box', Block: 'ellipse', ServerAction: 'diamond', ClientAction: 'triangle', Entity: 'database', Structure: 'square', Role: 'star', module: 'hexagon' };
+
+async function loadGraph() {
+  if (overviewGraph) return;
+  const generation = ++graphGeneration, scope = SCOPE;
+  graphController?.abort();
+  const controller = new AbortController();
+  graphController = controller;
+  $('gWhich').textContent = 'Loading bounded module overview…';
+  try {
+    const r = await fetch(graphQuery('overview'), { cache: 'no-store', signal: controller.signal });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `Graph HTTP ${r.status}`);
+    const data = await r.json();
+    if (controller.signal.aborted || generation !== graphGeneration || scope !== SCOPE) return;
+    overviewGraph = data;
+    G = data;
+    rebuildGraphIndex();
+    const which = r.headers.get('x-graph-which');
+    $('gWhich').textContent = which === 'previous'
+      ? 'Previous finalized snapshot — this run has not yet published its graph.'
+      : 'Finalized snapshot available. Module details are loaded on demand.';
+    if (data.limited) $('gWhich').textContent += ' Overview was capped to keep rendering responsive.';
+    const o = data.graph?.osgraph ?? {};
+    const stats = data.stats ?? {};
+    $('gStats').innerHTML = [
+      ['nodes', (stats.nodes ?? 0).toLocaleString()], ['edges', (stats.edges ?? 0).toLocaleString()],
+      ['scope modules', stats.modules ?? (o.modules ?? []).length], ['in-scope elements', stats.elementsInScope ?? '—'],
+      ['external refs', stats.external ?? '—'], ['placeholders', stats.placeholders ?? '—'],
+      ['skipped', (o.skipped ?? []).length], ['unknown-layer modules', o.unknownModuleCount ?? '—']
+    ].map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join('');
+    const sel = $('gModule');
+    for (const name of [...(o.modules ?? [])].sort()) sel.insertAdjacentHTML('beforeend', `<option>${esc(name)}</option>`);
+    sel.onchange = () => drawModule(sel.value);
+    drawOverview();
+  } catch (err) {
+    if (controller.signal.aborted || generation !== graphGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Graph overview unavailable';
+    $('gStats').textContent = '';
+    if (net) { net.destroy(); net = null; }
+  }
 }
 
 function layerOf(module) { return byId.get(`osgraph://${module}`)?.layer ?? 'UNKNOWN'; }
@@ -505,10 +635,77 @@ function draw(nodes, edges, physics = true) {
   // Say why, rather than throwing "vis is not defined". The tables and the progress tab are
   // unaffected - only this node-link canvas needs the library.
   if (typeof vis === 'undefined') {
-    $('net').innerHTML =
-      '<div style="padding:24px;line-height:1.6">The node-link view needs <code>vis-network</code>, ' +
-      'which could not be loaded. Every table on this page still works.<br><br>' +
-      'To draw it offline, save <code>vis-network.min.js</code> into the kit\'s <code>dashboard/</code> folder.</div>';
+    // Fully local, dependency-free fallback for offline/security-hardened installations. Draw only
+    // a bounded subset; the server search and focused module detail remain available separately.
+    if (net) { net.destroy(); net = null; }
+    const root = $('net');
+    root.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'sub';
+    note.style.padding = '10px';
+    note.textContent = 'Offline SVG explorer (bounded preview; no external scripts). ' +
+      (nodes.length > 150 ? `Showing 150 of ${nodes.length} nodes. Use search or module selection to narrow the graph.` : 'Select a node for details.');
+    root.appendChild(note);
+    const visible = nodes.slice(0, 150);
+    const ids = new Set(visible.map((n) => n.id));
+    const cols = 8, tileW = 170, tileH = 68;
+    const width = cols * tileW + 30, height = Math.max(430, Math.ceil(visible.length / cols) * tileH + 30);
+    const scroller = document.createElement('div');
+    scroller.style.cssText = 'overflow:auto; max-height:68vh; max-width:100%;';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Dependency graph preview');
+    const positions = new Map();
+    visible.forEach((n, i) => positions.set(n.id, {
+      x: (i % cols) * tileW + tileW / 2 + 15,
+      y: Math.floor(i / cols) * tileH + 45
+    }));
+    for (const e of edges.slice(0, 500)) {
+      if (!ids.has(e.from) || !ids.has(e.to)) continue;
+      const a = positions.get(e.from), b = positions.get(e.to);
+      const line = document.createElementNS(svg.namespaceURI, 'line');
+      for (const [key, val] of Object.entries({
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'currentColor', 'stroke-opacity': '.22'
+      })) line.setAttribute(key, String(val));
+      svg.appendChild(line);
+    }
+    for (const n of visible) {
+      const p = positions.get(n.id);
+      const group = document.createElementNS(svg.namespaceURI, 'g');
+      group.setAttribute('tabindex', '0');
+      group.setAttribute('role', 'button');
+      group.setAttribute('aria-label', String(n.title ?? n.label ?? n.id));
+      group.setAttribute('style', 'cursor:pointer');
+      const rect = document.createElementNS(svg.namespaceURI, 'rect');
+      for (const [key, val] of Object.entries({
+        x: p.x - 72, y: p.y - 18, width: 144, height: 38, rx: 7,
+        fill: n.color ?? '#8894a3', 'fill-opacity': '.16',
+        stroke: n.color ?? '#8894a3', 'stroke-width': '1'
+      })) rect.setAttribute(key, String(val));
+      const label = document.createElementNS(svg.namespaceURI, 'text');
+      label.setAttribute('x', String(p.x));
+      label.setAttribute('y', String(p.y + 4));
+      label.setAttribute('font-size', '10');
+      label.setAttribute('fill', 'currentColor');
+      label.setAttribute('text-anchor', 'middle');
+      label.textContent = String(n.label ?? n.id).slice(0, 26);
+      const title = document.createElementNS(svg.namespaceURI, 'title');
+      title.textContent = String(n.title ?? n.label ?? n.id);
+      group.append(rect, label, title);
+      const choose = () => { if (byId?.has(n.id)) select(n.id); };
+      group.addEventListener('click', choose);
+      group.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+      group.addEventListener('dblclick', () => {
+        const node = byId?.get(n.id);
+        if (node?.kind === 'module' && node.module) { $('gModule').value = node.module; drawModule(node.module); }
+      });
+      svg.appendChild(group);
+    }
+    scroller.appendChild(svg);
+    root.appendChild(scroller);
     return;
   }
   const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
@@ -541,29 +738,45 @@ function drawOverview() {
     G.links.filter((l) => byId.get(l.source)?.kind === 'module' && byId.get(l.target)?.kind === 'module').map((l) => ({ from: l.source, to: l.target }))
   );
 }
-function drawModule(module) {
-  if (!module) return drawOverview();
-  const ids = new Set(G.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
-  const edges = [];
-  const extra = new Set();
-  for (const id of ids) {
-    for (const l of out.get(id) ?? []) { edges.push(l); if (!ids.has(l.target)) extra.add(l.target); }
-    for (const l of inn.get(id) ?? []) { if (byId.get(l.source)?.kind === 'module') continue; edges.push(l); if (!ids.has(l.source)) extra.add(l.source); }
+async function drawModule(module) {
+  if (!module) {
+    detailGeneration++;
+    graphDetailController?.abort();
+    G = overviewGraph;
+    if (G) { rebuildGraphIndex(); drawOverview(); }
+    return;
   }
-  const all = [...ids, ...extra].filter((id) => byId.has(id));
-  if (all.length > 900) $('gWhich').insertAdjacentHTML('beforeend', `<br><span class="muted">${all.length} nodes — layout may take a moment.</span>`);
-  draw(
-    all.map((id) => {
-      const n = byId.get(id);
-      const own = ids.has(id);
-      return {
-        id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
-        color: n.placeholder ? '#d23b3b' : own ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
-        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder — unresolved)' : ''}`
-      };
-    }),
-    edges.filter((l) => byId.has(l.source) && byId.has(l.target)).map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
-  );
+  const generation = ++detailGeneration, scope = SCOPE;
+  graphDetailController?.abort();
+  const controller = new AbortController();
+  graphDetailController = controller;
+  try {
+    const r = await fetch(graphQuery('module', `&module=${encodeURIComponent(module)}`), {
+      cache: 'no-store', signal: controller.signal
+    });
+    if (!r.ok) throw new Error('Module graph unavailable');
+    const sub = await r.json();
+    if (controller.signal.aborted || generation !== detailGeneration || scope !== SCOPE || !overviewGraph) return;
+    // Keep at most one bounded module subset in browser memory, in addition to the module overview.
+    const mergedNodes = new Map([...overviewGraph.nodes, ...sub.nodes].map((n) => [n.id, n]));
+    G = { ...overviewGraph, nodes: [...mergedNodes.values()], links: sub.links };
+    rebuildGraphIndex();
+    const ids = new Set(sub.nodes.filter((n) => n.module === module && n.kind !== 'module').map((n) => n.id));
+    const all = sub.nodes.filter((n) => byId.has(n.id));
+    const edges = sub.links.filter((l) => byId.has(l.source) && byId.has(l.target));
+    if (sub.limited) $('gWhich').textContent = `Module ${module}: showing a bounded subset; use search to find other elements.`;
+    draw(
+      all.map((n) => ({
+        id: n.id, label: n.label, shape: kindShape[n.kind] ?? 'dot', size: 10,
+        color: n.placeholder ? '#d23b3b' : ids.has(n.id) ? LAYER_COLORS[layerOf(n.module)] ?? LAYER_COLORS.UNKNOWN : '#b9c0ca',
+        title: `${n.kind} ${n.label}\n${n.module ?? ''}${n.uiFlow ? ' / ' + n.uiFlow : ''}${n.external ? '\n(external)' : ''}${n.placeholder ? '\n(placeholder)' : ''}`
+      })),
+      edges.map((l) => ({ from: l.source, to: l.target, title: l.relation, dashes: l.relation === 'embeds' }))
+    );
+  } catch (err) {
+    if (controller.signal.aborted || generation !== detailGeneration) return;
+    $('gWhich').textContent = err instanceof Error ? err.message : 'Module graph unavailable';
+  }
 }
 function select(id) {
   selected = id;
@@ -592,24 +805,49 @@ function renderImpact() {
   }
   seen.delete(selected);
   const items = [...seen.entries()].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
-  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth}`;
+  $('impactCount').textContent = `${items.length} ${dir === 'dependents' ? 'dependent' : 'dependenc'}${items.length === 1 ? (dir === 'dependents' ? '' : 'y') : (dir === 'dependents' ? 's' : 'ies')} within depth ${depth} of the loaded module subset`;
   $('impact').innerHTML = items.slice(0, 400).map(([id, d]) => `<li data-id="${esc(id)}" title="${esc(id)}">${d}· ${esc(id.replace('osgraph://', ''))}</li>`).join('');
   if (net) net.selectNodes([selected, ...items.map((x) => x[0])].filter((x) => net.body.data.nodes.get(x)));
 }
 $('impact').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
 $('gResults').onclick = (e) => { const id = e.target.closest('li')?.dataset.id; if (id) focusNode(id); };
-function focusNode(id) {
-  const n = byId.get(id);
+async function focusNode(id) {
+  const n = byId?.get(id) ?? searchLookup.get(id);
   if (!n) return;
-  if (n.module && $('gModule').value !== n.module && n.kind !== 'module') { $('gModule').value = (G.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : ''; if ($('gModule').value) drawModule(n.module); }
+  if (n.module && n.kind !== 'module') {
+    $('gModule').value = (overviewGraph?.graph?.osgraph?.modules ?? []).includes(n.module) ? n.module : '';
+    if ($('gModule').value) await drawModule(n.module);
+  }
+  if (!byId?.has(id)) return;
   select(id);
   if (net?.body.data.nodes.get(id)) net.focus(id, { scale: 1.1, animation: true });
 }
 $('gSearch').oninput = () => {
-  const q = $('gSearch').value.trim().toLowerCase();
-  if (q.length < 2 || !G) { $('gResults').innerHTML = ''; return; }
-  const hits = G.nodes.filter((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)).slice(0, 60);
-  $('gResults').innerHTML = hits.map((n) => `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`).join('');
+  clearTimeout(searchTimer);
+  graphSearchController?.abort();
+  const q = $('gSearch').value.trim();
+  if (q.length < 2 || !overviewGraph) { $('gResults').textContent = ''; searchLookup.clear(); return; }
+  const generation = ++searchGeneration, scope = SCOPE;
+  searchTimer = setTimeout(async () => {
+    const controller = new AbortController();
+    graphSearchController = controller;
+    try {
+      const r = await fetch(graphQuery('search', `&q=${encodeURIComponent(q)}&limit=60`), {
+        cache: 'no-store', signal: controller.signal
+      });
+      if (!r.ok) throw new Error('Search unavailable');
+      const data = await r.json();
+      if (controller.signal.aborted || generation !== searchGeneration || scope !== SCOPE) return;
+      searchLookup = new Map(data.results.map((n) => [n.id, n]));
+      $('gResults').innerHTML = data.results.map((n) =>
+        `<li data-id="${esc(n.id)}" title="${esc(n.id)}">${esc(n.kind)} · ${esc(n.id.replace('osgraph://', ''))}</li>`
+      ).join('');
+      if (data.count > data.results.length) $('gResults').insertAdjacentHTML('beforeend',
+        `<li class="muted">${data.count - data.results.length} more matches; refine your search</li>`);
+    } catch {
+      if (!controller.signal.aborted && generation === searchGeneration) $('gResults').textContent = 'Search unavailable';
+    }
+  }, 250);
 };
 $('dirDep').onclick = () => { dir = 'dependents'; $('dirDep').className = 'on'; $('dirDeps').className = ''; renderImpact(); };
 $('dirDeps').onclick = () => { dir = 'dependencies'; $('dirDeps').className = 'on'; $('dirDep').className = ''; renderImpact(); };

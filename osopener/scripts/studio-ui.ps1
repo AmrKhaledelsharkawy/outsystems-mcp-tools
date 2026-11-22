@@ -27,6 +27,7 @@
                                      (writes) ValuePattern.SetValue on an Edit; falls back to focus + type ONLY when
                                      Studio already owns the foreground
     send-keys -Keys k                (writes) System.Windows.Forms.SendKeys.SendWait (never Alt+F4); needs Studio in front
+    cancel-save-prompt              (writes) invoke only the exact Cancel button on one verified Studio save dialog
     dismiss [-Hwnd h]                (writes) close a Studio dialog h with WindowPattern.Close, or (no -Hwnd) close an
                                      open shell dropdown with a posted click on its Toggle — never a keystroke
     tab-list                         list module tabs (label, offscreen, hasClose)
@@ -545,6 +546,45 @@ switch ($Command) {
     } else {
       Out-Json @{ ok = $true; hwnd = [int64]$p.MainWindowHandle; title = (Get-WindowTitle $p.MainWindowHandle); pid = $p.Id; isStudio = $true; isStudioMain = $true; count = 0 }
     }
+  }
+
+  "cancel-save-prompt" {
+    # Used ONLY when the caller explicitly opts into safe OSGraph recovery. Unlike generic dismiss, this command
+    # can operate on a verified save prompt, but it may click ONLY the exact Cancel button. It never saves,
+    # discards changes, closes a modified module tab, sends keys, or selects a default action.
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($dialog in @(Get-StudioDialogs)) {
+      $h = [IntPtr]$dialog.hwnd
+      if (-not [OsOpener.Native]::IsWindow($h)) { continue }
+      $root = Get-RootElement $h
+      $Name = '(?i)^(save|don.?t save)$'; $AutomationId = $null; $ControlType = 'Button'
+      $hasSaveChoices = (@(Find-Elements $root 12).Count -gt 0)
+      if ($dialog.title -match '(?i)save|unsaved' -or $hasSaveChoices) {
+        [void]$candidates.Add($dialog)
+      }
+    }
+    if ($candidates.Count -ne 1) {
+      Fail "UNSAVED_CHANGES_DIALOG" "Expected exactly one confirmed Studio save prompt; found $($candidates.Count). No dialog was touched." @{ count = $candidates.Count }
+    }
+    $prompt = $candidates[0]
+    $h = [IntPtr]$prompt.hwnd
+    $root = Get-RootElement $h
+    $Name = '(?i)^cancel$'; $AutomationId = $null; $ControlType = 'Button'
+    $cancel = @(Find-Elements $root 12 | Where-Object { $_.el.Current.Name -ceq 'Cancel' -and $_.el.Current.IsEnabled }) | Select-Object -First 1
+    if (-not $cancel) {
+      Fail "UNSAVED_CHANGES_DIALOG" "Verified save prompt '$($prompt.title)' does not expose an enabled, exact Cancel button. Nothing was touched." @{ foregroundTitle = $prompt.title; dialogHwnd = $prompt.hwnd }
+    }
+    try {
+      $cancel.el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    } catch {
+      Fail "UNSAVED_CHANGES_DIALOG" "Could not invoke Cancel on '$($prompt.title)': $($_.Exception.Message). No Save/Discard action was attempted." @{ foregroundTitle = $prompt.title; dialogHwnd = $prompt.hwnd }
+    }
+    Start-Sleep -Milliseconds 400
+    $stillUp = @(Get-StudioDialogs | Where-Object { $_.hwnd -eq $prompt.hwnd })
+    if ($stillUp.Count -gt 0) {
+      Fail "UNSAVED_CHANGES_DIALOG" "Cancel was invoked, but the save prompt '$($prompt.title)' is still open. Refusing to retry blindly." @{ foregroundTitle = $prompt.title; dialogHwnd = $prompt.hwnd }
+    }
+    Out-Json @{ ok = $true; method = 'Cancel.Invoke'; title = $prompt.title; dialogHwnd = $prompt.hwnd; ms = $sw.ElapsedMilliseconds }
   }
 
   "dismiss" {

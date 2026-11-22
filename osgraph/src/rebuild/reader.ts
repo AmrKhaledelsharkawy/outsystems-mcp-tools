@@ -56,6 +56,9 @@ export interface ServiceStudioReader {
   setCallTrace?(sink: CallTraceSink | undefined): void;
   /** Read permits (`maxConcurrent`), the denominator of the trace's slot utilization. */
   readonly concurrency?: number;
+  /** Read-only observation of the ONE existing global admission gate. No new semaphore or permits. */
+  getPermitStatus?(): { limit: number; active: number; queued: number };
+  setPermitObserver?(listener: ((status: { limit: number; active: number; queued: number }) => void) | undefined): void;
 }
 
 /** What the orchestration needs from the session layer: acquire once, release at the end. */
