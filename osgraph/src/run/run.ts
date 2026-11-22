@@ -274,7 +274,9 @@ function setup(options: RunCommonOptions): {
     screenshotDir: join(runDir, "screenshots"),
     // Always Open from Environment: a recent-list open makes Studio list the module's version as "0",
     // which `--changed` cannot compare (it reads it as unknown, so the module is always re-read).
-    source: "environment"
+    source: "environment",
+    // A confirmed Save prompt is dismissed via its exact Cancel button (never Save/Discard) and retried once.
+    cancelSavePrompt: true
   });
   const onProgress = (event: RebuildProgressEvent): void => options.state?.handle(event);
   const listApps = (): Promise<ServiceStudioApp[]> => session.reader.listApps();
@@ -565,12 +567,17 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
           ...(openFailure.screenshotPath !== undefined ? { screenshotPath: openFailure.screenshotPath } : {})
         });
         consecutiveOpenFailures++;
-        if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures) {
-          stoppedEarly =
-            `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${openFailure.error.code}). ` +
-            `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
-            `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
-            `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+        // A real or suspected Save prompt is not an independent per-module failure. If the opt-in
+        // Cancel-only recovery could not clear it, one failure is enough to stop safely.
+        const blockedByDialog = openFailure.error.code === "UNSAVED_CHANGES_DIALOG";
+        if (blockedByDialog || (maxFailures > 0 && consecutiveOpenFailures >= maxFailures)) {
+          stoppedEarly = blockedByDialog
+            ? `Cannot safely dismiss Service Studio's Save/unknown dialog while opening ${mod}: ${openFailure.error.message}. ` +
+              `No Save/Discard action was taken. Inspect Studio and ${join(s.runDir, "screenshots")}, then rerun: staged modules resume.`
+            : `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${openFailure.error.code}). ` +
+              `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+              `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+              `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
           log(`STOPPED: ${stoppedEarly}`);
           break;
         }
@@ -994,12 +1001,15 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   const openFailed = (mod: string, error: NonNullable<RunModuleRow["error"]>, extra: Partial<RunModuleRow> = {}): void => {
     record({ module: mod, outcome: "open-failed", error, ...extra });
     consecutiveOpenFailures++;
-    if (maxFailures > 0 && consecutiveOpenFailures >= maxFailures && stoppedEarly === undefined) {
-      stoppedEarly =
-        `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${error.code}). ` +
-        `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
-        `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
-        `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
+    const blockedByDialog = error.code === "UNSAVED_CHANGES_DIALOG";
+    if (stoppedEarly === undefined && (blockedByDialog || (maxFailures > 0 && consecutiveOpenFailures >= maxFailures))) {
+      stoppedEarly = blockedByDialog
+        ? `Cannot safely dismiss Service Studio's Save/unknown dialog while opening ${mod}: ${error.message}. ` +
+          `No Save/Discard action was taken. Inspect Studio and ${join(s.runDir, "screenshots")}, then rerun: staged modules resume.`
+        : `${consecutiveOpenFailures} module(s) in a row failed to open (last: ${mod}, ${error.code}). ` +
+          `Service Studio itself is most likely stuck (a Progress window that never closes, a lost environment ` +
+          `connection, or a modal). Look at Studio and the screenshots in ${join(s.runDir, "screenshots")}, fix ` +
+          `or restart it, then run the same command again: staged modules are skipped, so it resumes.`;
       log(`STOPPED: ${stoppedEarly}`);
       abort = true;
     }

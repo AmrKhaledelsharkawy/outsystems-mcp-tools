@@ -52,6 +52,8 @@ export interface OpenLoopOptions {
   now?: () => Date;
   /** osopener's `source` for every open; omitted = osopener's default (`recent`). */
   source?: OpenSource;
+  /** Opt into the safe Cancel-only Save-dialog recovery for OSGraph runs. */
+  cancelSavePrompt?: boolean;
 }
 
 /** Outcome of the honest dismiss: what was actually observed, never what was hoped. */
@@ -221,7 +223,11 @@ export function makeOpenWithRetry(
         break;
       }
       made = attempt;
-      const outcome = options.source !== undefined ? await opener.open(module, { source: options.source }) : await opener.open(module);
+      const openOptions = {
+        ...(options.source !== undefined ? { source: options.source } : {}),
+        ...(options.cancelSavePrompt === true ? { cancelSavePrompt: true } : {})
+      };
+      const outcome = Object.keys(openOptions).length > 0 ? await opener.open(module, openOptions) : await opener.open(module);
       if (outcome.ok) return { ok: true, openedHere: outcome.openedHere, alreadyOpen: outcome.alreadyOpen, attempts: attempt };
       last = outcome.failure;
       log(`   open ${module} attempt ${attempt}/${attempts} FAILED ${describeOsopenerFailure(last)}`);
