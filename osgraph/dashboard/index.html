@@ -270,9 +270,21 @@ const fmtDur = (ms) => {
 const fmtClock = (t) => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '–';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PHASES = ['listing', 'dataModel', 'structures', 'screens', 'blocks', 'clientActions', 'serverActions', 'extract'];
+const safeNumber = (n, fallback = 0) => typeof n === 'number' && Number.isFinite(n) ? n : fallback;
+const safePct = (n) => Math.max(0, Math.min(100, safeNumber(n) * 100));
+const activeLifecycles = new Set(['opening', 'version-check', 'queued-for-read', 'reading', 'staging', 'closing']);
+let modSearch = '', modFilter = '';
 
 // ---------------- run view ----------------
 let lastStatus = null;
+let statusController = null, pollTimer = null, pollGeneration = 0, pollInterval = 3000;
+const schedulePoll = () => {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, document.hidden ? 12000 : pollInterval);
+};
+$('modSearch').oninput = () => { modSearch = $('modSearch').value.trim().toLowerCase(); if (lastStatus) renderModules(lastStatus); };
+$('modFilter').onchange = () => { modFilter = $('modFilter').value; if (lastStatus) renderModules(lastStatus); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 // Scope: ?scope= in the URL, else the last one picked here, else the server default.
 let SCOPE = new URLSearchParams(location.search).get('scope') || (() => { try { return localStorage.getItem('osgraph.scope'); } catch { return null; } })() || '';
 const q = () => (SCOPE ? `?scope=${encodeURIComponent(SCOPE)}` : '');
@@ -294,32 +306,72 @@ $('scopeSel').onchange = () => {
   if (!$('graphView').hidden) loadGraph();
 };
 async function refresh() {
+  // Exactly one in-flight poll; an aborted or stale response cannot update the currently selected scope.
+  clearTimeout(pollTimer);
+  statusController?.abort();
+  const controller = new AbortController();
+  statusController = controller;
+  const generation = ++pollGeneration;
+  const scope = SCOPE;
   try {
-    const r = await fetch('/api/status' + q(), { cache: 'no-store' });
+    const r = await fetch('/api/status' + q(), { cache: 'no-store', signal: controller.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const s = await r.json();
-    if (SCOPE && s.scope !== SCOPE) return; // a response for the scope we just left
+    if (controller.signal.aborted || generation !== pollGeneration || SCOPE !== scope || (scope && s.scope !== scope)) return;
+    if (lastStatus?.scope === s.scope && lastStatus.runId === s.runId &&
+        Number.isFinite(lastStatus.sequence) && Number.isFinite(s.sequence) && s.sequence < lastStatus.sequence) return;
     lastStatus = s;
+    pollInterval = 3000;
     renderRun(s);
-    $('liveDot').className = 'dot ' + (s.run.complete || s.run.finalized ? '' : s.run.stalled ? 'bad' : 'on');
-    $('liveText').textContent = s.run.finalized ? 'finished' : s.run.stalled ? 'no activity for 30 min' : `live · ${new Date().toLocaleTimeString()}`;
-  } catch {
-    $('liveDot').className = 'dot bad'; $('liveText').textContent = 'server unreachable';
+    const terminal = ['completed', 'cancelled', 'failed', 'stopped'].includes(s.run.status);
+    $('liveDot').className = 'dot ' + (terminal ? '' : s.run.stalled ? 'bad' : 'on');
+    $('liveText').textContent = terminal ? s.run.status : s.run.stalled ? 'no progress reported for 30 min' : `live · ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    if (controller.signal.aborted || generation !== pollGeneration) return;
+    pollInterval = Math.min(30000, Math.max(6000, pollInterval * 2));
+    $('liveDot').className = 'dot bad';
+    $('liveText').textContent = 'progress server unreachable · reconnecting';
+  } finally {
+    if (statusController === controller) {
+      statusController = null;
+      schedulePoll();
+    }
   }
 }
 function renderRun(s) {
   const p = s.progress;
-  const pct = p.pctByTime;
-  $('pct').textContent = `${(pct * 100).toFixed(1)}%`;
+  const pct = safePct(p.pctByTime);
+  $('pct').textContent = `${pct.toFixed(1)}%`;
   $('pctNote').textContent = s.modules.some((m) => m.expectedMs) ? 'of the expected read time' : 'by element texts read (no timing history)';
   $('mainBar').className = 'bar' + (s.run.finalized ? ' ok' : '');
-  $('mainBar').firstElementChild.style.width = `${(pct * 100).toFixed(2)}%`;
-  $('modulesLine').textContent = `${p.modulesDone} of ${p.modulesTotal} modules staged` + (p.modulesFailed ? ` · ${p.modulesFailed} failed (retried at the end)` : '');
-  $('paceLine').textContent = p.pace != null ? `pace ${p.pace.toFixed(2)}× the last run` : 'no previous run to compare';
+  $('mainBar').firstElementChild.style.width = `${pct.toFixed(2)}%`;
+  const newCount = p.newlyCaptured ?? 0, reused = p.reused ?? 0, staged = p.alreadyStaged ?? 0;
+  $('modulesLine').textContent = `${p.modulesDone}/${p.modulesTotal} resolved · ${newCount} captured · ${reused} reused · ${staged} resumed` +
+    (p.modulesFailed ? ` · ${p.modulesFailed} failed` : '');
+  $('paceLine').textContent = s.run.mode === 'full' && s.run.pipelineDepth === 1 && Number.isFinite(p.pace)
+    ? `read pace ${p.pace.toFixed(2)}× historical` : 'parallel/version-aware ETA: calibrating';
+  const depth = s.run.pipelineDepth ?? 1;
+  const active = Array.isArray(s.activeModules) ? s.activeModules : s.current ? [s.current] : [];
+  const mode = s.run.mode ?? 'full';
+  $('runMode').textContent = `${mode} · ${s.run.status ?? (s.run.complete ? 'finished' : 'running')}${depth > 1 ? ` · depth ${depth}` : ''}`;
+  $('workerSummary').textContent = `Shared MCP read permits: ${s.run.readLimit ?? 4} total · live occupancy unavailable`;
+  $('pipelineSummaryCounts').textContent = `${active.length} active module(s) · ${p.activeReading ?? 0} reading · ${p.activeOpening ?? 0} opening · ${p.activeClosing ?? 0} closing`;
+  $('activeCount').textContent = String(active.length);
+  $('activeList').innerHTML = active.length
+    ? active.map((a) => {
+      const row = s.modules.find((m) => m.module.toLowerCase() === a.module.toLowerCase());
+      const label = row?.lifecycle ?? a.phase ?? 'active';
+      const elapsed = fmtDur(a.elapsedMs);
+      return `<div class="active-item"><div class="row"><span class="name">${esc(a.module)}</span><span class="chip running">${esc(label)}</span></div>` +
+        `<div class="sub">${esc(elapsed)} elapsed${a.phase ? ` · ${esc(a.phase)}` : ''}${a.phaseCount != null ? ` · ${safeNumber(a.phaseItemsRead)}/${safeNumber(a.phaseCount)} read` : ''}</div>` +
+        `<div class="bar"><i style="width:${safePct(a.pct).toFixed(1)}%"></i></div></div>`;
+    }).join('')
+    : '<p class="muted">No modules currently active</p>';
   const f = s.flows;
   $('flowsBig').textContent = f ? `${(f.actions ?? 0).toLocaleString()} actions` : '–';
   $('flowsSub').textContent = f ? `${(f.nodes ?? 0).toLocaleString()} flow nodes · ${(f.bindings ?? 0).toLocaleString()} bindings · ${f.unknown ?? 0} unknown · ${f.parseErrors ?? 0} parse errors` : 'flows.json is written at finalize';
-  $('eta').textContent = s.run.finalized ? 'done' : p.etaMs == null ? 'unknown' : fmtDur(p.etaMs);
-  $('etaAt').textContent = s.run.finalized ? 'graph.json written' : p.etaAt ? `finishes around ${fmtClock(p.etaAt)}` : p.etaMs == null ? 'first run of these modules — no timing history' : '';
+  $('eta').textContent = s.run.finalized ? 'done' : s.run.complete ? '—' : p.etaMs == null ? 'calibrating' : fmtDur(p.etaMs);
+  $('etaAt').textContent = s.run.finalized ? 'final snapshot published' : p.etaAt ? `estimated finish ${fmtClock(p.etaAt)}` : p.etaMs == null ? 'No comparable runtime history yet' : '';
   $('elapsed').textContent = fmtDur(s.run.elapsedMs);
   $('startedAt').textContent = s.run.startedAt ? `started ${fmtClock(s.run.startedAt)}` : '';
   const done = s.modules.filter((m) => m.state === 'done');
@@ -327,10 +379,13 @@ function renderRun(s) {
   $('edges').textContent = done.reduce((n, m) => n + (m.edges ?? 0), 0).toLocaleString() + ' edges extracted (before merge)';
 
   const b = $('banner');
-  if (s.run.finalized) { b.className = 'banner ok'; b.textContent = `Finished — graph.json written ${fmtClock(s.snapshot.writtenAt)}. Open the Graph explorer to browse it.`; }
-  else if (s.run.noRunLog) { b.className = 'banner'; b.textContent = `No run log found for scope '${s.scope}'. Showing what is on disk (stage / graph.json / flows.json).`; }
-  else if (s.run.stalled) { b.className = 'banner bad'; b.textContent = `No activity for 30 minutes (no log line and no element text written since ${fmtClock(s.run.lastActivityAt)}) — the run may be stuck.`; }
-  else if (s.run.complete) { b.className = 'banner bad'; b.textContent = `Pass ended with ${p.modulesTotal - p.modulesDone} module(s) not staged; a retry pass is needed.`; }
+  if (s.run.finalized) { b.className = 'banner ok'; b.textContent = `Completed — snapshot finalized at ${fmtClock(s.snapshot.writtenAt)}.`; }
+  else if (s.run.status === 'cancelled') { b.className = 'banner'; b.textContent = 'Cancelled by operator; completed and resumed captures remain available for the next run.'; }
+  else if (s.run.status === 'cancelling') { b.className = 'banner'; b.textContent = 'Cancelling: allowing in-flight reads and closes to finish safely.'; }
+  else if (s.run.status === 'stopped' || s.run.status === 'failed') { b.className = 'banner bad'; b.textContent = `${s.run.status}: ${s.run.errorMessage ?? 'run ended without a finalized snapshot'}`; }
+  else if (s.run.noRunLog) { b.className = 'banner'; b.textContent = `No live run observed for scope '${s.scope}'. Previous finalized snapshot may still be available.`; }
+  else if (s.run.stalled) { b.className = 'banner bad'; b.textContent = `No progress events since ${fmtClock(s.run.lastActivityAt)} — check Studio and Service Studio connection.`; }
+  else if (s.run.complete) { b.className = 'banner bad'; b.textContent = 'Run ended without finalization; inspect failures and retry.'; }
   else { b.className = ''; b.textContent = ''; }
 
   // current module
