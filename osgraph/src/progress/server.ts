@@ -388,7 +388,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: "No finalized graph available for this scope." }));
           try {
             const view = graphViews.view(file, url.searchParams.get("view") ?? "overview", url.searchParams);
-            res.setHeader("x-graph-which", options.state.activeScope === scope && options.state.rebuildActive ? "previous" : "current");
+            res.setHeader("x-graph-which", options.state.snapshotIsPrevious(scope) ? "previous" : "current");
             return send(res, 200, JSON.stringify(view));
           } catch {
             return send(res, 400, JSON.stringify({ error: "Graph view unavailable or invalid parameters." }));
@@ -399,7 +399,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
           const file = scopeFiles(options.graphDir, scope).graph;
           if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: `no graph for scope '${scope}' yet` }));
           // Streamed: a large scope's graph.json is tens of MB and must not be buffered.
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "x-graph-which": options.state.activeScope === scope && options.state.rebuildActive ? "previous" : "current" });
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "x-graph-which": options.state.snapshotIsPrevious(scope) ? "previous" : "current" });
           createReadStream(file).pipe(res);
           return;
         }
