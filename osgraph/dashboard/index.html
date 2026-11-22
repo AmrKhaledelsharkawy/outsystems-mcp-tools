@@ -622,10 +622,77 @@ function draw(nodes, edges, physics = true) {
   // Say why, rather than throwing "vis is not defined". The tables and the progress tab are
   // unaffected - only this node-link canvas needs the library.
   if (typeof vis === 'undefined') {
-    $('net').innerHTML =
-      '<div style="padding:24px;line-height:1.6">The node-link view needs <code>vis-network</code>, ' +
-      'which could not be loaded. Every table on this page still works.<br><br>' +
-      'To draw it offline, save <code>vis-network.min.js</code> into the kit\'s <code>dashboard/</code> folder.</div>';
+    // Fully local, dependency-free fallback for offline/security-hardened installations. Draw only
+    // a bounded subset; the server search and focused module detail remain available separately.
+    if (net) { net.destroy(); net = null; }
+    const root = $('net');
+    root.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'sub';
+    note.style.padding = '10px';
+    note.textContent = 'Offline SVG explorer (bounded preview; no external scripts). ' +
+      (nodes.length > 150 ? `Showing 150 of ${nodes.length} nodes. Use search or module selection to narrow the graph.` : 'Select a node for details.');
+    root.appendChild(note);
+    const visible = nodes.slice(0, 150);
+    const ids = new Set(visible.map((n) => n.id));
+    const cols = 8, tileW = 170, tileH = 68;
+    const width = cols * tileW + 30, height = Math.max(430, Math.ceil(visible.length / cols) * tileH + 30);
+    const scroller = document.createElement('div');
+    scroller.style.cssText = 'overflow:auto; max-height:68vh; max-width:100%;';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Dependency graph preview');
+    const positions = new Map();
+    visible.forEach((n, i) => positions.set(n.id, {
+      x: (i % cols) * tileW + tileW / 2 + 15,
+      y: Math.floor(i / cols) * tileH + 45
+    }));
+    for (const e of edges.slice(0, 500)) {
+      if (!ids.has(e.from) || !ids.has(e.to)) continue;
+      const a = positions.get(e.from), b = positions.get(e.to);
+      const line = document.createElementNS(svg.namespaceURI, 'line');
+      for (const [key, val] of Object.entries({
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'currentColor', 'stroke-opacity': '.22'
+      })) line.setAttribute(key, String(val));
+      svg.appendChild(line);
+    }
+    for (const n of visible) {
+      const p = positions.get(n.id);
+      const group = document.createElementNS(svg.namespaceURI, 'g');
+      group.setAttribute('tabindex', '0');
+      group.setAttribute('role', 'button');
+      group.setAttribute('aria-label', String(n.title ?? n.label ?? n.id));
+      group.setAttribute('style', 'cursor:pointer');
+      const rect = document.createElementNS(svg.namespaceURI, 'rect');
+      for (const [key, val] of Object.entries({
+        x: p.x - 72, y: p.y - 18, width: 144, height: 38, rx: 7,
+        fill: n.color ?? '#8894a3', 'fill-opacity': '.16',
+        stroke: n.color ?? '#8894a3', 'stroke-width': '1'
+      })) rect.setAttribute(key, String(val));
+      const label = document.createElementNS(svg.namespaceURI, 'text');
+      label.setAttribute('x', String(p.x));
+      label.setAttribute('y', String(p.y + 4));
+      label.setAttribute('font-size', '10');
+      label.setAttribute('fill', 'currentColor');
+      label.setAttribute('text-anchor', 'middle');
+      label.textContent = String(n.label ?? n.id).slice(0, 26);
+      const title = document.createElementNS(svg.namespaceURI, 'title');
+      title.textContent = String(n.title ?? n.label ?? n.id);
+      group.append(rect, label, title);
+      const choose = () => { if (byId?.has(n.id)) select(n.id); };
+      group.addEventListener('click', choose);
+      group.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+      group.addEventListener('dblclick', () => {
+        const node = byId?.get(n.id);
+        if (node?.kind === 'module' && node.module) { $('gModule').value = node.module; drawModule(node.module); }
+      });
+      svg.appendChild(group);
+    }
+    scroller.appendChild(svg);
+    root.appendChild(scroller);
     return;
   }
   const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
