@@ -71,7 +71,7 @@ export const IDENTITY_UNKNOWN_NOT_LISTED = "NOT_IN_LISTING";
 export type RawModuleTextKind = "dataModel" | "structures";
 
 /** Element kinds that get one file each. Mirrors the rebuild's four element phases. */
-export type RawElementKind = "Screen" | "Block" | "ClientAction" | "ServerAction";
+export type RawElementKind = "Screen" | "Block" | "ClientAction" | "ServerAction" | "RestMethod" | "ConsumedRestMethod";
 
 /** Element kinds whose id is flow-qualified (ADR-0008), so their files live under a flow segment. */
 const FLOW_QUALIFIED: ReadonlySet<RawElementKind> = new Set<RawElementKind>(["Screen", "Block"]);
@@ -166,6 +166,13 @@ export function rawRelativeFile(
   uiFlow: string | undefined
 ): string {
   if (kind === "dataModel" || kind === "structures") return `module/${kind}.txt`;
+  if (kind === "RestMethod" || kind === "ConsumedRestMethod") {
+    // #90: the REST API is the grouping folder: RestAPI/<Api>/<Method>.txt. `name` is `<Api>/<Method>`.
+    const at = name.indexOf("/");
+    const api = at === -1 ? name : name.slice(0, at);
+    const method = at === -1 ? name : name.slice(at + 1);
+    return `RestAPI/${encodeSegment(api)}/${encodeSegment(method)}.txt`;
+  }
   const leaf = `${encodeSegment(name)}.txt`;
   if (!FLOW_QUALIFIED.has(kind)) return `${kind}/${leaf}`;
   const flow = uiFlow !== undefined && uiFlow.length > 0 ? encodeSegment(uiFlow) : NO_FLOW_SEGMENT;

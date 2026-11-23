@@ -230,15 +230,38 @@ listed is forbidden:
 | Layer | May reference |
 |---|---|
 | `UI` | `UI`, `CW`, `SL` |
-| `CW` | `CW`, `SL` |
-| `SL` | `SL`, `BL` |
-| `BL` | `BL`, `CS` |
+| `CW` | `CW`, `SL`, `ST` |
+| `SL` | `SL`, `BL`, `ST` |
+| `API` | `API`, `BL`, `ST`, `LKP` (an `API` -> `CS` edge is a violation) |
+| `BL` | `BL`, `CS`, `IS`, `ST` |
+| `IS` | `IS`, `LKP`, `ST` |
 | `CS` | `CS` |
+| `ST` | `ST`, `LKP` |
 | `LKP` | `LKP` |
 
-A module's layer comes from its name suffix (`_UI`, `_CW`, `_SL`, `_BL`, `_CS`,
-`_LKP`); anything else is tagged `UNKNOWN` and never evaluated. Edit the file to match
-your own conventions.
+A module's layer comes from its name suffix (`_UI`, `_CW`, `_SL`, `_API`, `_BL`, `_IS`,
+`_CS`, `_ST`, `_LKP`); anything else is tagged `UNKNOWN` and never evaluated. Edit the
+file to match your own conventions.
+
+### REST methods (`_API` and `_IS` modules)
+
+A rebuild treats each REST method as an element, like a server action: an exposed method of
+an `_API` module is `osgraph://<Module>/RestMethod/<Api>/<Method>`, a consumed method of an
+`_IS` module is `osgraph://<Module>/ConsumedRestMethod/<Api>/<Method>`. Their texts are
+captured to `raw/<module>/RestAPI/<Api>/<Method>.txt`, the exposed method's calls become
+edges (so `queryImpact` answers "which endpoint breaks if I change X"), and its flow is
+walkable with `getFlow` and searchable with `searchFlows`.
+
+The read (`getIntegrations`, one call per module) is gated on the module suffix only:
+no other layer pays for it. Like every rebuild read it needs the modules **open** in
+Service Studio ([osopener](../osopener/)) and a human-approved session token
+([outsystems-token-manager](../outsystems-token-manager/)). Callbacks (`OnAuthentication`,
+`OnRequest`, `OnBeforeRequest`, `OnAfterResponse`) are captured as `<Api>/<Callback>` elements of
+the same kind. Studio declares each element lookup once per text, so every method text carries the
+text's lookup declarations as context and only its own statements as logic. A consumed method is
+called from inside its `_IS` module (the `IS_*` actions); `queryImpact(dependents)` therefore reaches
+BL callers through those actions. A text that yields no method is reported as a skipped `RestAPI`
+element rather than as an empty success.
 
 ---
 

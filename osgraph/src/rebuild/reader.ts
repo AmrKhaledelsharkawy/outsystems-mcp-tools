@@ -14,6 +14,11 @@ export interface ServiceStudioReader {
   listApps(): Promise<ServiceStudioApp[]>;
   getDataModel(eSpaceName: string): Promise<string>;
   getStructures(eSpaceName: string): Promise<string>;
+  /**
+   * #90: the module's REST integrations (exposed APIs of an `_API` module, consumed APIs of an `_IS`
+   * module) as Model API code. Called for those two suffixes ONLY (ADR-0016 read-cost rule).
+   */
+  getIntegrations(eSpaceName: string): Promise<string>;
   getScreenNames(eSpaceName: string): Promise<ServiceStudioElementName[]>;
   getWebBlockNames(eSpaceName: string): Promise<ServiceStudioElementName[]>;
   getActionNames(eSpaceName: string, objectType: ActionObjectType): Promise<ServiceStudioElementName[]>;

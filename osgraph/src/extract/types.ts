@@ -12,7 +12,11 @@ export type ElementKind =
   | "ClientAction"
   | "Screen"
   | "Block"
-  | "Role";
+  | "Role"
+  /** #90: a method of an exposed REST API (`_API` modules). Id: `<Module>/RestMethod/<Api>/<Method>`. */
+  | "RestMethod"
+  /** #90: a method of a consumed REST API (`_IS` modules). Id: `<Module>/ConsumedRestMethod/<Api>/<Method>`. */
+  | "ConsumedRestMethod";
 
 export type Relation = "references" | "calls" | "embeds" | "requires_role";
 
@@ -34,6 +38,11 @@ export interface FlowNamedText extends NamedText {
   uiFlow: string;
 }
 
+/** One REST method of one (exposed or consumed) REST API; `name` is `<Api>/<Method>`. */
+export interface RestMethodNamedText extends NamedText {
+  consumed: boolean;
+}
+
 export interface ModuleTexts {
   dataModel: string;
   structures: string;
@@ -41,6 +50,8 @@ export interface ModuleTexts {
   blocks: FlowNamedText[];
   clientActions: NamedText[];
   serverActions: NamedText[];
+  /** #90: only present for `_API` / `_IS` modules (read-cost rule, ADR-0016). */
+  restMethods?: RestMethodNamedText[];
 }
 
 export interface ModuleInput {

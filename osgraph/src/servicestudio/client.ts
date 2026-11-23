@@ -353,6 +353,11 @@ export class ServiceStudioClient {
     return this.codeText("getStructures", { eSpaceName, includeJson: "Never" });
   }
 
+  /** #90: REST APIs (exposed / consumed) of the module, as Model API code. Read-only. */
+  getIntegrations(eSpaceName: string): Promise<string> {
+    return this.codeText("getIntegrations", { eSpaceName, includeJson: "Never" });
+  }
+
   getScreenNames(eSpaceName: string): Promise<ServiceStudioElementName[]> {
     return this.names("getScreenNames", { eSpaceName });
   }
