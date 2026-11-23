@@ -12,6 +12,7 @@
  */
 import type { ElementKind } from "../extract/types.js";
 import { isUnknownNodeType } from "./nodeKinds.js";
+import { anchoredRestText } from "../rest/split.js";
 import { parseElementFlows } from "./parse.js";
 import { RawCaptureError, readRawModule, type RawManifestEntry, type RawModuleCapture } from "../rebuild/raw.js";
 import type { Binding, FlowAction, FlowParseError, ModuleFlows } from "./types.js";
@@ -26,6 +27,8 @@ function elementKindFor(entry: RawManifestEntry): ElementKind | undefined {
     case "Block":
     case "ClientAction":
     case "ServerAction":
+    case "RestMethod":
+    case "ConsumedRestMethod":
       return entry.kind;
     default:
       return undefined;
@@ -79,12 +82,15 @@ export function buildModuleFlows(capture: RawModuleCapture): ModuleFlows {
   for (const entry of capture.texts) {
     const kind = elementKindFor(entry);
     if (kind === undefined || entry.name === undefined) continue;
-    const parsed = parseElementFlows(entry.text, {
+    const parsed = parseElementFlows(
+      kind === "RestMethod" || kind === "ConsumedRestMethod" ? anchoredRestText(kind, entry.name, entry.text) : entry.text,
+      {
       module,
       kind,
       name: entry.name,
       ...(entry.uiFlow !== undefined ? { uiFlow: entry.uiFlow } : {})
-    });
+      }
+    );
     actions.push(...parsed.actions);
     bindings.push(...parsed.bindings);
     for (const t of parsed.unknownNodeTypes) unknownNodeTypes.add(t);

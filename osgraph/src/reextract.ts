@@ -22,7 +22,7 @@ import type { LayerRules } from "./layers/rules.js";
 import { readRawModule, RawCaptureError, type RawManifestEntry, type RawModuleCapture } from "./rebuild/raw.js";
 import type { ScopeDefinition } from "./scopes/store.js";
 import { OsgraphToolError } from "./servicestudio/types.js";
-import type { FlowNamedText, NamedText } from "./extract/index.js";
+import type { FlowNamedText, NamedText, RestMethodNamedText } from "./extract/index.js";
 
 export interface ReextractOptions {
   scope: ScopeDefinition;
@@ -71,6 +71,7 @@ function textsFrom(capture: RawModuleCapture): Parameters<typeof extractModule>[
   const blocks: FlowNamedText[] = [];
   const clientActions: NamedText[] = [];
   const serverActions: NamedText[] = [];
+  const restMethods: RestMethodNamedText[] = [];
   let dataModel = "";
   let structures = "";
   const flow = (e: RawManifestEntry & { text: string }): FlowNamedText => ({
@@ -98,11 +99,23 @@ function textsFrom(capture: RawModuleCapture): Parameters<typeof extractModule>[
       case "ServerAction":
         serverActions.push({ name: entry.name ?? "", text: entry.text });
         break;
+      case "RestMethod":
+      case "ConsumedRestMethod":
+        restMethods.push({ name: entry.name ?? "", text: entry.text, consumed: entry.kind === "ConsumedRestMethod" });
+        break;
       default:
         break;
     }
   }
-  return { dataModel, structures, screens, blocks, clientActions, serverActions };
+  return {
+    dataModel,
+    structures,
+    screens,
+    blocks,
+    clientActions,
+    serverActions,
+    ...(restMethods.length > 0 ? { restMethods } : {})
+  };
 }
 
 /**

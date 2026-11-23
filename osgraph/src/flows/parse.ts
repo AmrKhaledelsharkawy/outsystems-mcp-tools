@@ -32,7 +32,7 @@
  *    (live-confirmed 2026-10-17). `portForProperty` is the single place that mapping lives.
  */
 import { buildId, normalizeModuleName } from "../extract/ids.js";
-import { collectionKind, isFlowQualified, normalizeKind } from "../extract/kinds.js";
+import { collectionKind, isFlowQualified, isRestKind, normalizeKind } from "../extract/kinds.js";
 import type { ElementKind } from "../extract/types.js";
 import {
   calleeProperty,
@@ -149,6 +149,9 @@ function actionKindFor(method: string, ownerKind: ElementKind | "module"): FlowA
     case "CreateServerAction":
     case "CreateServiceAction":
       return "ServerAction";
+    // #90: `<api>.CreateAction("Method")` on a REST API integration creates a REST method.
+    case "CreateAction":
+      return ownerKind === "RestMethod" || ownerKind === "ConsumedRestMethod" ? ownerKind : undefined;
     case "CreateDataAction":
       return "DataAction";
     case "CreateAggregate":
@@ -335,7 +338,8 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
   };
 
   const startAction = (name: string, kind: FlowActionKind, varName: string): string => {
-    const moduleLevel = kind === "ServerAction" || kind === "ClientAction";
+    const moduleLevel =
+      kind === "ServerAction" || kind === "ClientAction" || kind === "RestMethod" || kind === "ConsumedRestMethod";
     const actionId = moduleLevel ? elementId : `${elementId}#${name}`;
     if (!builds.has(actionId)) {
       builds.set(actionId, {
@@ -417,7 +421,7 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         if (kind !== undefined && path !== undefined && path.includes("/")) {
           const segments = path.split("/");
           const depModule = normalizeModuleName(segments[0]);
-          const depName = segments[segments.length - 1];
+          const depName = isRestKind(kind) ? segments.slice(1).join("/") : segments[segments.length - 1];
           const depFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
           syms.set(target, { t: "element", ref: makeRef({ module: depModule, kind, uiFlow: depFlow, name: depName }) });
         } else {
@@ -449,6 +453,10 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         }
 
         // --- the element itself (`flow.CreateScreen("Login")`) ---
+        if (method === "CreateIntegration") {
+          syms.set(target, { t: "self" }); // #90: the REST API the method hangs off
+          continue;
+        }
         if (method === "CreateScreen" || method === "CreateBlock" || method === "CreateWebBlock" || method === "CreateWebScreen") {
           syms.set(target, { t: "self" });
           continue;

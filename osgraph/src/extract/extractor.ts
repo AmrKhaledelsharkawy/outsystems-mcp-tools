@@ -9,7 +9,8 @@
  * follows the target kind (entity/structure/screen → references, action → calls, block → embeds,
  * role → requires_role). All edges are direct, name-resolved: no heuristics, no INFERRED.
  */
-import { collectionKind, isFlowQualified, normalizeKind, relationForTargetKind } from "./kinds.js";
+import { collectionKind, isFlowQualified, isRestKind, normalizeKind, relationForTargetKind } from "./kinds.js";
+import { anchoredRestText } from "../rest/split.js";
 import { buildId, externalOpaqueId, normalizeModuleName } from "./ids.js";
 import type {
   ElementKind,
@@ -209,7 +210,7 @@ export function extractText(text: string, ctx: TextContext): TextResult {
         if (path !== undefined && path.includes("/")) {
           const segments = path.split("/");
           const module = normalizeModuleName(segments[0]);
-          const name = segments[segments.length - 1];
+          const name = isRestKind(kind) ? segments.slice(1).join("/") : segments[segments.length - 1];
           const uiFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
           if (!collecting && uiFlow !== undefined && dependencyFlow === undefined) dependencyFlow = uiFlow;
           entry = { t: "elem", kind, name, module, uiFlow, external: module !== ctx.module, globalKey, opaque: false };
@@ -497,6 +498,12 @@ export function extractModule(input: ModuleInput): ExtractedModule {
   }
   for (const item of texts.clientActions) extractElementText(item, "ClientAction", module, flowsByName, out);
   for (const item of texts.serverActions) extractElementText(item, "ServerAction", module, flowsByName, out);
+  // #90: REST methods, present only for `_API` / `_IS` modules. The raw text is anchored in memory so
+  // the generic extractor attributes every reference inside it to the method node.
+  for (const item of texts.restMethods ?? []) {
+    const kind = item.consumed ? "ConsumedRestMethod" : "RestMethod";
+    extractElementText({ name: item.name, text: anchoredRestText(kind, item.name, item.text) }, kind, module, flowsByName, out);
+  }
 
   return finalizeModule(out);
 }

@@ -1,4 +1,4 @@
-import { isFlowQualified } from "./kinds.js";
+import { isFlowQualified, isRestKind } from "./kinds.js";
 import type { ElementKind } from "./types.js";
 
 export const ID_PREFIX = "osgraph://";
@@ -61,6 +61,8 @@ export function parseId(id: string): ParsedId | undefined {
     return { module, kind, uiFlow: rest[0], name: rest[1] };
   }
   if (rest.length === 1) return { module, kind, name: rest[0] };
+  // #90: a REST method's name is `<Api>/<Method>`, so its id has two segments after the kind.
+  if (rest.length === 2 && isRestKind(kind)) return { module, kind, name: `${rest[0]}/${rest[1]}` };
   return undefined;
 }
 
@@ -72,6 +74,8 @@ function isElementKind(value: string): value is ElementKind {
     value === "ClientAction" ||
     value === "Screen" ||
     value === "Block" ||
-    value === "Role"
+    value === "Role" ||
+    value === "RestMethod" ||
+    value === "ConsumedRestMethod"
   );
 }

@@ -52,6 +52,7 @@ import {
 import { buildScopeFlows, writeFlows, type FlowsArtifact } from "../flows/index.js";
 import { dirname } from "node:path";
 import { extractModule, type ExtractedModule, type FlowNamedText, type ModuleInput, type NamedText } from "../extract/index.js";
+import { restMethodName, restModeOf, splitIntegrations } from "../rest/split.js";
 import { buildSnapshot, writeSnapshot, type Snapshot, type SnapshotMeta } from "../graph/index.js";
 import { assignLayer } from "../layers/assign.js";
 import type { LayerRules } from "../layers/rules.js";
@@ -773,7 +774,27 @@ class ModuleWalker {
       plain
     );
 
-    return { dataModel, structures, screens, blocks, clientActions, serverActions };
+    // --- #90: REST methods. ONE `getIntegrations` read, issued for `_API` / `_IS` modules ONLY — every
+    // other layer pays nothing (ADR-0016). It is a whole-module text, so it is a kind-level read: a
+    // failure aborts the rebuild (ADR-0011) instead of leaving an endpoint-less snapshot that looks whole.
+    const restMode = restModeOf(m);
+    if (restMode === undefined) return { dataModel, structures, screens, blocks, clientActions, serverActions };
+    const integrations = await this.moduleText("structures", "RestAPI", "getIntegrations", () => r.getIntegrations(m));
+    const methods = splitIntegrations(integrations, restMode);
+    // Text came back but no method could be read out of it: say so, never an empty-looking success.
+    if (methods.length === 0 && integrations.trim().length > 0) {
+      this.skipped.push({ module: m, kind: "RestAPI", name: "getIntegrations", reason: "NO_ANCHOR" });
+    }
+    const restMethods = methods.map((x) => ({
+      name: restMethodName(x.api, x.method),
+      text: x.text,
+      consumed: x.consumed
+    }));
+    for (const x of restMethods) {
+      const kind = x.consumed ? "ConsumedRestMethod" : "RestMethod";
+      this.raw?.add({ kind, manifestKind: kind, call: "getIntegrations", name: x.name, text: x.text });
+    }
+    return { dataModel, structures, screens, blocks, clientActions, serverActions, restMethods };
   }
 }
 

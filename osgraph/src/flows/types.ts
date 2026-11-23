@@ -24,6 +24,8 @@ export type FlowActionKind =
   | "BlockAction"
   | "ClientAction"
   | "ServerAction"
+  | "RestMethod"
+  | "ConsumedRestMethod"
   | "DataAction"
   | "Aggregate";
 

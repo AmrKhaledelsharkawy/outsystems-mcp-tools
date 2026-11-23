@@ -42,6 +42,7 @@ osgraph/tests/*
 !osgraph/tests/query.ergonomics.test.ts
 !osgraph/tests/raw.test.ts
 !osgraph/tests/readKinds.test.ts
+!osgraph/tests/rest.test.ts
 !osgraph/tests/rebuild.fake.ts
 !osgraph/tests/rebuild.test.ts
 !osgraph/tests/reextract.test.ts
