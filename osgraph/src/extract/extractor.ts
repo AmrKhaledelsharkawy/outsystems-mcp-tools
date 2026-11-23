@@ -9,7 +9,7 @@
  * follows the target kind (entity/structure/screen → references, action → calls, block → embeds,
  * role → requires_role). All edges are direct, name-resolved: no heuristics, no INFERRED.
  */
-import { collectionKind, isFlowQualified, normalizeKind, relationForTargetKind } from "./kinds.js";
+import { collectionKind, isFlowQualified, isRestKind, normalizeKind, relationForTargetKind } from "./kinds.js";
 import { buildId, externalOpaqueId, normalizeModuleName } from "./ids.js";
 import type {
   ElementKind,
@@ -30,6 +30,8 @@ const REFERENCE_RE = /^var (\w+) = eSpace\.References\.Named\("([^"]+)"\);?$/;
 const FLOW_RE = /^var (\w+) = (\w+)\.(?:MobileFlows|WebFlows|UIFlows|Flows)\.Named\("([^"]+)"\);?$/;
 const FLOW_NODE_RE = /^var (\w+) = (\w+)\.Nodes\.OfType<([\w.]+)>\(\)\.Named\("([^"]+)"\);?$/;
 const COLLECTION_RE = /^var (\w+) = (\w+)\.(\w+)\.Named\("([^"]+)"\);?$/;
+const INTEGRATION_RE = /^var (\w+) = (\w+)\.Integrations\.OfType<([\w.]+)>\(\)\.Named\("([^"]+)"\);?$/;
+const REST_ACTION_RE = /^var (\w+) = (\w+)\.Actions\.OfType<([\w.]+)>\(\)\.Named\("([^"]+)"\);?$/;
 const SYSTEM_ROLE_RE = /^var (\w+) = eSpace\.SystemRoles\.OfType<[\w.]*ISystemRole>\(\)\.Named\("([^"]+)"\);?$/;
 const LAMBDA_PARAM_RE = /^\(([\w.]+)\s+(\w+)\)\s*=>/;
 const VAR_DECL_RE = /^var (\w+) = /;
@@ -37,6 +39,8 @@ const CREATE_RE = /^var (\w+) = \w+\.Create\w+(?:<[^>]*>)?\("([^"]+)"\)/;
 
 type VarEntry =
   | { t: "ref"; module: string }
+  /** #90: a REST API integration looked up by name (`eSpace.Integrations.OfType<IRestClient>().Named("Api")`). */
+  | { t: "restApi"; module: string; api: string; consumed: boolean }
   | { t: "flow"; module: string; flow: string | undefined }
   | {
       t: "elem";
@@ -209,7 +213,7 @@ export function extractText(text: string, ctx: TextContext): TextResult {
         if (path !== undefined && path.includes("/")) {
           const segments = path.split("/");
           const module = normalizeModuleName(segments[0]);
-          const name = segments[segments.length - 1];
+          const name = isRestKind(kind) ? segments.slice(1).join("/") : segments[segments.length - 1];
           const uiFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
           if (!collecting && uiFlow !== undefined && dependencyFlow === undefined) dependencyFlow = uiFlow;
           entry = { t: "elem", kind, name, module, uiFlow, external: module !== ctx.module, globalKey, opaque: false };
@@ -262,6 +266,40 @@ export function extractText(text: string, ctx: TextContext): TextResult {
             opaque: false
           };
           vars.set(varName, entry);
+          if (entry.external && !collecting) externals.push(entry);
+          if (current) addEdge(entry, current.id);
+        }
+        continue;
+      }
+
+      // #90: `var api = <mod>.Integrations.OfType<IRestClient>().Named("Api")` then
+      // `var m = api.Actions.OfType<IRestAction>().Named("Method")` - a call of a REST method.
+      const integration = INTEGRATION_RE.exec(line);
+      if (integration) {
+        const module = resolveModule(integration[2]);
+        if (module !== undefined && /IRest(Client|Service)/.test(integration[3])) {
+          vars.set(integration[1], {
+            t: "restApi",
+            module,
+            api: integration[4],
+            consumed: /IRestClient/.test(integration[3])
+          });
+        }
+        continue;
+      }
+      const restAction = REST_ACTION_RE.exec(line);
+      if (restAction) {
+        const apiEntry = vars.get(restAction[2]);
+        if (apiEntry?.t === "restApi") {
+          const entry: Extract<VarEntry, { t: "elem" }> = {
+            t: "elem",
+            kind: apiEntry.consumed ? "ConsumedRestMethod" : "RestMethod",
+            name: `${apiEntry.api}/${restAction[4]}`,
+            module: apiEntry.module,
+            external: apiEntry.module !== ctx.module,
+            opaque: false
+          };
+          vars.set(restAction[1], entry);
           if (entry.external && !collecting) externals.push(entry);
           if (current) addEdge(entry, current.id);
         }
@@ -497,6 +535,12 @@ export function extractModule(input: ModuleInput): ExtractedModule {
   }
   for (const item of texts.clientActions) extractElementText(item, "ClientAction", module, flowsByName, out);
   for (const item of texts.serverActions) extractElementText(item, "ServerAction", module, flowsByName, out);
+  // #90: REST methods, present only for `_API` / `_IS` modules. The raw text is anchored in memory so
+  // the generic extractor attributes every reference inside it to the method node.
+  for (const item of texts.restMethods ?? []) {
+    const kind = item.consumed ? "ConsumedRestMethod" : "RestMethod";
+    extractElementText({ name: item.name, text: item.text }, kind, module, flowsByName, out);
+  }
 
   return finalizeModule(out);
 }

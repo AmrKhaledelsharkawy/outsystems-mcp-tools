@@ -14,16 +14,19 @@ import { listViolations, moduleOfNode, type SnapshotLike } from "../src/layers/v
 const here = dirname(fileURLToPath(import.meta.url));
 const rules = loadLayerRules();
 
-/** OSG-003 allow map, transcribed literally from the ticket's schema block. */
+/** OSG-003 allow map; #90 added API, IS and ST (and ST/IS targets) per the MOD layer map. */
 const OSG003_ALLOW = {
   UI: ["UI", "CW", "SL"],
-  CW: ["CW", "SL"],
-  SL: ["SL", "BL"],
-  BL: ["BL", "CS"],
+  CW: ["CW", "SL", "ST"],
+  SL: ["SL", "BL", "ST"],
+  API: ["API", "BL", "ST", "LKP"],
+  BL: ["BL", "CS", "IS", "ST"],
+  IS: ["IS", "LKP", "ST"],
   CS: ["CS"],
+  ST: ["ST", "LKP"],
   LKP: ["LKP"]
 };
-const LAYERS = ["UI", "CW", "SL", "BL", "CS", "LKP"];
+const LAYERS = ["UI", "CW", "SL", "API", "BL", "IS", "CS", "ST", "LKP"];
 
 describe("loadLayerRules", () => {
   it("default path is the package-root layer-rules.json", () => {
@@ -34,7 +37,7 @@ describe("loadLayerRules", () => {
     expect(rules.schemaVersion).toBe(1);
     expect(rules.source).toBe("MOD Code Review Template v1.0");
     expect(rules.layers).toEqual(LAYERS);
-    expect(rules.layerSuffixPattern).toBe("_(UI|CW|SL|BL|CS|LKP)$");
+    expect(rules.layerSuffixPattern).toBe("_(UI|CW|SL|API|BL|IS|CS|ST|LKP)$");
     expect(rules.unknownLayerTag).toBe("UNKNOWN");
     expect(rules.allow).toEqual(OSG003_ALLOW);
   });
@@ -51,14 +54,14 @@ describe("loadLayerRules", () => {
 
   it("rejects an allow key that is not a declared layer", () => {
     const bad = valid();
-    (bad.allow as Record<string, string[]>).ST = ["LKP"];
-    expect(() => parseLayerRules(bad)).toThrow(/allow key "ST" is not a declared layer/);
+    (bad.allow as Record<string, string[]>).XX = ["LKP"];
+    expect(() => parseLayerRules(bad)).toThrow(/allow key "XX" is not a declared layer/);
   });
 
   it("rejects an allowed target that is not a declared layer", () => {
     const bad = valid();
-    (bad.allow as Record<string, string[]>).BL = ["BL", "CS", "IS"];
-    expect(() => parseLayerRules(bad)).toThrow(/allowed target "IS" of "BL"/);
+    (bad.allow as Record<string, string[]>).BL = ["BL", "CS", "XX"];
+    expect(() => parseLayerRules(bad)).toThrow(/allowed target "XX" of "BL"/);
   });
 
   it("rejects unknown top-level keys (fail-closed)", () => {
@@ -90,8 +93,10 @@ describe("assignLayer", () => {
     ["System", "UNKNOWN"],
     ["MOD_DEMO_DatePicker_Lib", "UNKNOWN"],
     ["MOD_DEMO_Layouts", "UNKNOWN"],
-    ["MOD_X_IS", "UNKNOWN"],
-    ["MOD_X_ST", "UNKNOWN"],
+    ["MOD_X_IS", "IS"],
+    ["MOD_X_ST", "ST"],
+    ["MOD_X_API", "API"],
+    ["MOD_X_api", "UNKNOWN"],
     ["MOD_X_cs", "UNKNOWN"],
     ["MOD_X_CS_", "UNKNOWN"],
     ["", "UNKNOWN"]

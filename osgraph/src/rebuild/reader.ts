@@ -14,6 +14,11 @@ export interface ServiceStudioReader {
   listApps(): Promise<ServiceStudioApp[]>;
   getDataModel(eSpaceName: string): Promise<string>;
   getStructures(eSpaceName: string): Promise<string>;
+  /**
+   * #90: the module's REST integrations (exposed APIs of an `_API` module, consumed APIs of an `_IS`
+   * module) as Model API code. Called for those two suffixes ONLY (ADR-0016 read-cost rule).
+   */
+  getIntegrations(eSpaceName: string): Promise<string>;
   getScreenNames(eSpaceName: string): Promise<ServiceStudioElementName[]>;
   getWebBlockNames(eSpaceName: string): Promise<ServiceStudioElementName[]>;
   getActionNames(eSpaceName: string, objectType: ActionObjectType): Promise<ServiceStudioElementName[]>;
@@ -56,6 +61,9 @@ export interface ServiceStudioReader {
   setCallTrace?(sink: CallTraceSink | undefined): void;
   /** Read permits (`maxConcurrent`), the denominator of the trace's slot utilization. */
   readonly concurrency?: number;
+  /** Read-only observation of the ONE existing global admission gate. No new semaphore or permits. */
+  getPermitStatus?(): { limit: number; active: number; queued: number };
+  setPermitObserver?(listener: ((status: { limit: number; active: number; queued: number }) => void) | undefined): void;
 }
 
 /** What the orchestration needs from the session layer: acquire once, release at the end. */

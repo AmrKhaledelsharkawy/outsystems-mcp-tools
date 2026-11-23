@@ -31,9 +31,28 @@ export function normalizeKind(interfaceName: string): ElementKind | undefined {
     case "Role":
     case "SystemRole":
       return "Role";
+    case "RestMethod":
+      return "RestMethod";
+    case "ConsumedRestMethod":
+      return "ConsumedRestMethod";
     default:
-      return undefined;
+      return restKindOfSignature(bare);
   }
+}
+
+/**
+ * #90, UNVERIFIED against a live Studio: the interface a REST method is referenced through in an
+ * `AddDependency` signature comment. Anything REST-shaped ending in Method/Action is a REST method;
+ * the client (consumed) flavour is told apart by `Client` / `Consumed` in the name.
+ */
+function restKindOfSignature(bare: string): ElementKind | undefined {
+  if (!/rest/i.test(bare) || !/(Method|Action)$/.test(bare)) return undefined;
+  return /client|consumed/i.test(bare) ? "ConsumedRestMethod" : "RestMethod";
+}
+
+/** True for the two REST method kinds, whose element name is `<Api>/<Method>`. */
+export function isRestKind(kind: ElementKind | string): kind is "RestMethod" | "ConsumedRestMethod" {
+  return kind === "RestMethod" || kind === "ConsumedRestMethod";
 }
 
 /** Collection property on an `eSpace`/reference var → element kind (`<ref>.ServerActions.Named("X")`). */
@@ -71,6 +90,8 @@ export function relationForTargetKind(kind: ElementKind): Relation {
       return "references";
     case "ServerAction":
     case "ClientAction":
+    case "RestMethod":
+    case "ConsumedRestMethod":
       return "calls";
     case "Block":
       return "embeds";

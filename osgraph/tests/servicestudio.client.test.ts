@@ -193,6 +193,33 @@ describe("ServiceStudioClient bounded concurrency", () => {
     expect(fake.calls).toHaveLength(10);
   });
 
+  it("exposes actual global permit occupancy and queue size without adding capacity", async () => {
+    const { fake, release } = gatedFake();
+    const client = makeClient(fake, { maxConcurrent: 2 });
+    const seen: Array<{ limit: number; active: number; queued: number }> = [];
+    client.setPermitObserver((v) => seen.push(v));
+    const calls = Array.from({ length: 5 }, (_, i) => client.getDataModel("M" + i));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(client.getPermitStatus()).toEqual({ limit: 2, active: 2, queued: 3 });
+    expect(seen.some((v) => v.active === 2 && v.queued === 3)).toBe(true);
+    release();
+    await Promise.all(calls);
+    expect(client.getPermitStatus()).toEqual({ limit: 2, active: 0, queued: 0 });
+    expect(fake.maxInFlight).toBe(2);
+    client.setPermitObserver(undefined);
+  });
+
+  it("a throwing progress observer cannot corrupt the reader's permit gate", async () => {
+    const { fake, release } = gatedFake();
+    const client = makeClient(fake, { maxConcurrent: 1 });
+    client.setPermitObserver(() => { throw new Error("dashboard failed"); });
+    const calls = [client.getDataModel("A"), client.getDataModel("B")];
+    release();
+    await Promise.all(calls);
+    expect(fake.maxInFlight).toBe(1);
+    expect(client.getPermitStatus()).toEqual({ limit: 1, active: 0, queued: 0 });
+  });
+
   it("honours an explicit maxConcurrent", async () => {
     const { fake, release } = gatedFake();
     const client = makeClient(fake, { maxConcurrent: 2 });

@@ -6,7 +6,8 @@
  * network from driving someone's Service Studio or corrupting a running rebuild's reads.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Script } from "node:vm";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,9 +67,12 @@ const get = async (site: LiveSite, path: string): Promise<{ status: number; body
 };
 
 const post = async (site: LiveSite, path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> => {
-  const res = await fetch(`http://127.0.0.1:${site.port}${path}`, {
+  const url = `http://127.0.0.1:${site.port}`;
+  const csrfResponse = await fetch(`${url}/api/security/csrf`);
+  const csrf = (await csrfResponse.json()) as { token: string };
+  const res = await fetch(`${url}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "origin": url, "x-osgraph-csrf": csrf.token },
     body: JSON.stringify(body)
   });
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
@@ -97,6 +101,17 @@ describe("isLocal", () => {
   });
 });
 
+describe("dashboard script syntax", () => {
+  it("parses every inline script without a browser (catch template literal regressions)", () => {
+    const html = readFileSync(join(process.cwd(), "dashboard", "index.html"), "utf8");
+    const inlineScripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+      .map((match) => match[1] ?? "")
+      .filter((script) => script.trim().length > 0);
+    expect(inlineScripts.length).toBeGreaterThan(0);
+    for (const script of inlineScripts) expect(() => new Script(script)).not.toThrow();
+  });
+});
+
 describe("site routes", () => {
   it("serves the dashboard page at / and /index.html", async () => {
     const site = await serve();
@@ -115,7 +130,12 @@ describe("site routes", () => {
     const body = JSON.parse(res.body) as Record<string, unknown>;
     expect(body["ok"]).toBe(true);
     expect(body["rebuildActive"]).toBe(false);
-    expect(body["scopes"]).toEqual([SCOPE]);
+    expect(body["scopes"]).toBeUndefined();
+    expect(body["pid"]).toBeUndefined();
+    expect(body["graphDir"]).toBeUndefined();
+    expect(body["scopesDir"]).toBeUndefined();
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
   });
 
   it("lists scopes with their module counts", async () => {
@@ -155,6 +175,51 @@ describe("site routes", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("x-graph-which")).toBe("current");
     expect(JSON.parse(res.body)).toEqual({ nodes: [], edges: [] });
+  });
+
+  it("serves bounded overview, one module and server search without sending the full graph", async () => {
+    const site = await serve();
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    const nodes = [
+      { id: "osgraph://MOD_A_BL", kind: "module", module: "MOD_A_BL", label: "MOD_A_BL" },
+      { id: "osgraph://MOD_B_CW", kind: "module", module: "MOD_B_CW", label: "MOD_B_CW" },
+      ...Array.from({ length: 800 }, (_, i) => ({
+        id: `osgraph://MOD_A_BL/S${i}`, kind: "ServerAction", label: `ServerAction_${i}`, module: "MOD_A_BL"
+      }))
+    ];
+    const graph = { nodes, links: [
+      { source: "osgraph://MOD_A_BL", target: "osgraph://MOD_B_CW", relation: "uses" },
+      { source: "osgraph://MOD_A_BL/S0", target: "osgraph://MOD_B_CW", relation: "uses" }
+    ], graph: { osgraph: { modules: MODULES } } };
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), JSON.stringify(graph));
+    const overview = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=overview")).body) as {
+      nodes: { id: string }[]; links: unknown[]; stats: { nodes: number; edges: number }
+    };
+    expect(overview.nodes).toHaveLength(2);
+    expect(overview.stats.nodes).toBe(802);
+    expect(overview.stats.edges).toBe(2);
+    const module = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=module&module=MOD_A_BL")).body) as {
+      nodes: unknown[]; links: unknown[]; limited: boolean
+    };
+    expect(module.nodes.length).toBeLessThanOrEqual(900);
+    expect(module.limited).toBe(true);
+    const search = JSON.parse((await get(site, "/api/graph/view?scope=demo&view=search&q=ServerAction&limit=5")).body) as {
+      results: { label: string }[]; count: number
+    };
+    expect(search.results).toHaveLength(5);
+    expect(search.count).toBe(800);
+    expect((await get(site, "/api/graph/view?scope=demo&view=not-a-view")).status).toBe(400);
+  });
+
+  it("labels prior graph as previous while a scope rebuild is active", async () => {
+    const state = new RunState({ graphDir });
+    state.beginRun(SCOPE, MODULES);
+    const site = await serve({ state });
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), JSON.stringify({ nodes: [], links: [], graph: { osgraph: { modules: MODULES } } }));
+    const res = await get(site, "/api/graph/view?scope=demo&view=overview");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-graph-which")).toBe("previous");
   });
 
   it("404s an unknown path", async () => {
@@ -253,6 +318,77 @@ describe("discovery routes", () => {
   });
 });
 
+describe("progress HTTP security", () => {
+  const runner: DiscoveryRunner = {
+    start: async () => ({ id: "job-1" }),
+    cancel: () => undefined,
+    status: () => ({ done: true }),
+    knownModules: () => ["MOD_A_BL"],
+    save: () => ({ saved: "x.json", count: 1 })
+  };
+
+  it("rejects cross-origin and DNS-rebound discovery POSTs even from loopback", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    const hostileOrigin = await fetch(base + "/api/discover/start", {
+      method: "POST", headers: { "content-type": "application/json", origin: "http://evil.example", "x-osgraph-csrf": token },
+      body: JSON.stringify({ starters: ["MOD_A_BL"] })
+    });
+    expect(hostileOrigin.status).toBe(403);
+    const badHost = await fetch(base + "/api/discover/start", {
+      method: "POST", headers: { "content-type": "application/json", host: "evil.example", origin: "http://evil.example", "x-osgraph-csrf": token },
+      body: JSON.stringify({ starters: ["MOD_A_BL"] })
+    });
+    expect(badHost.status).toBe(403);
+  });
+
+  it("refuses absent/mismatched CSRF and wrong content type", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const common = { method: "POST", body: JSON.stringify({ starters: ["MOD_A_BL"] }) };
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "application/json", origin: base }
+    })).status).toBe(403);
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "application/json", origin: base, "x-osgraph-csrf": "wrong" }
+    })).status).toBe(403);
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    expect((await fetch(base + "/api/discover/start", {
+      ...common, headers: { "content-type": "text/plain", origin: base, "x-osgraph-csrf": token }
+    })).status).toBe(415);
+  });
+
+  it("rejects oversized byte bodies and invalid JSON without changing discovery state", async () => {
+    const site = await serve({ discovery: runner });
+    const base = `http://127.0.0.1:${site.port}`;
+    const token = (await (await fetch(base + "/api/security/csrf")).json() as { token: string }).token;
+    const headers = { "content-type": "application/json", origin: base, "x-osgraph-csrf": token };
+    const tooLarge = await fetch(base + "/api/discover/start", { method: "POST", headers, body: JSON.stringify({ starters: "x".repeat(120_000) }) });
+    expect(tooLarge.status).toBe(413);
+    const invalid = await fetch(base + "/api/discover/start", { method: "POST", headers, body: "{ invalid json" });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("requires a strong viewer secret for opt-in LAN binding", async () => {
+    await expect(startSite({
+      graphDir, scopesDir, host: "0.0.0.0", port: 0, portScan: 1,
+      state: new RunState({ graphDir }), dashboardDir
+    })).rejects.toThrow(/VIEWER_PASSWORD/);
+  });
+
+  it("marks a still-existing graph as previous during a new rebuild", async () => {
+    const state = new RunState({ graphDir });
+    state.beginRun(SCOPE, MODULES);
+    mkdirSync(join(graphDir, SCOPE), { recursive: true });
+    writeFileSync(join(graphDir, SCOPE, "graph.json"), '{"nodes":[],"links":[]}');
+    const site = await serve({ state });
+    const r = await get(site, `/api/graph?scope=${SCOPE}`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("x-graph-which")).toBe("previous");
+  });
+});
+
 describe("binding", () => {
   it("steps past a busy port instead of failing the rebuild", async () => {
     const first = await startSite({
@@ -291,7 +427,7 @@ describe("binding", () => {
 
   it("tells you how to open it up when bound to loopback", async () => {
     const site = await serve();
-    expect(siteBanner(site)).toContain("unset OSGRAPH_PROGRESS_HOST");
+    expect(siteBanner(site)).toContain("OSGRAPH_PROGRESS_HOST=0.0.0.0 and OSGRAPH_PROGRESS_VIEWER_PASSWORD");
   });
 
   // A laptop on Ethernet with WSL installed: the phone line must be the Ethernet address, never WSL's.
@@ -359,6 +495,23 @@ describe("run control routes (/api/run/*)", () => {
     expect((await post(site, "/api/run/cancel", {})).status).toBe(409);
     expect((await post(site, "/api/run/bogus", {})).status).toBe(404);
     expect(JSON.parse((await get(site, "/api/run/control")).body).state).toBe("cancelling");
+  });
+
+  it("from this PC, need the same-origin CSRF token (a foreign page cannot start or cancel the run)", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+    const base = `http://127.0.0.1:${site.port}`;
+    expect((await fetch(`${base}/api/run/start`, { method: "POST" })).status).toBe(403);
+    const token = (await (await fetch(`${base}/api/security/csrf`)).json() as { token: string }).token;
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: "http://evil.example", "x-osgraph-csrf": token } })).status).toBe(403);
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: base, "x-osgraph-csrf": "wrong" } })).status).toBe(403);
+    expect(control.state).toBe("waiting");
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: base, "x-osgraph-csrf": token } })).status).toBe(200);
+    expect(control.state).toBe("running");
   });
 });
 

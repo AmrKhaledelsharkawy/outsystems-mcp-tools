@@ -32,7 +32,7 @@
  *    (live-confirmed 2026-10-17). `portForProperty` is the single place that mapping lives.
  */
 import { buildId, normalizeModuleName } from "../extract/ids.js";
-import { collectionKind, isFlowQualified, normalizeKind } from "../extract/kinds.js";
+import { collectionKind, isFlowQualified, isRestKind, normalizeKind } from "../extract/kinds.js";
 import type { ElementKind } from "../extract/types.js";
 import {
   calleeProperty,
@@ -96,6 +96,9 @@ const FLOW_NODE_RE = /^([A-Za-z_]\w*)\.Nodes\.OfType<([\w.]+)>\(\)\.Named\("((?:
 const NAMED_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)\.Named\("((?:[^"\\]|\\.)*)"\)$/;
 /** `eSpace.SystemRoles.OfType<…ISystemRole>().Named("N")`. */
 const SYSTEM_ROLE_RE = /^([A-Za-z_]\w*)\.SystemRoles\.OfType<[\w.]*ISystemRole>\(\)\.Named\("((?:[^"\\]|\\.)*)"\)$/;
+/** #90: `<recv>.Integrations.OfType<IRestClient>().Named("Api")` and `<api>.Actions.OfType<IRestAction>().Named("M")`. */
+const INTEGRATION_RE = /^([A-Za-z_]\w*)\.Integrations\.OfType<([\w.]+)>\(\)\.Named\("((?:[^"\\]|\\.)*)"\)$/;
+const REST_ACTION_RE = /^([A-Za-z_]\w*)\.Actions\.OfType<[\w.]+>\(\)\.Named\("((?:[^"\\]|\\.)*)"\)$/;
 /** `(Cast)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("key"))`. */
 const ADD_DEPENDENCY_RE = /^\(([\w.]+)\)\s*[A-Za-z_]\w*\.AddDependency\(Services\.ModelServices\.ParseGlobalKey\("([^"]+)"\)\)$/;
 /** `<recv>.EventHandlers.FirstOrDefault(e => e.Event.Name == "X")`. */
@@ -149,6 +152,9 @@ function actionKindFor(method: string, ownerKind: ElementKind | "module"): FlowA
     case "CreateServerAction":
     case "CreateServiceAction":
       return "ServerAction";
+    // #90: `<api>.CreateAction("Method")` on a REST API integration creates a REST method.
+    case "CreateAction":
+      return ownerKind === "RestMethod" || ownerKind === "ConsumedRestMethod" ? ownerKind : undefined;
     case "CreateDataAction":
       return "DataAction";
     case "CreateAggregate":
@@ -166,6 +172,8 @@ type Sym =
   | { t: "element"; ref: FlowRef }
   /** The screen/block/action this text is defining, so its members can be attributed. */
   | { t: "self" }
+  /** #90: a REST API integration looked up by name; its `Actions.OfType<...>().Named("M")` are REST methods. */
+  | { t: "restApi"; module: string; api: string; consumed: boolean }
   /** An action whose flow is being built in this text. */
   | { t: "action"; actionId: string }
   | { t: "node"; actionId: string; nodeId: string }
@@ -335,7 +343,8 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
   };
 
   const startAction = (name: string, kind: FlowActionKind, varName: string): string => {
-    const moduleLevel = kind === "ServerAction" || kind === "ClientAction";
+    const moduleLevel =
+      kind === "ServerAction" || kind === "ClientAction" || kind === "RestMethod" || kind === "ConsumedRestMethod";
     const actionId = moduleLevel ? elementId : `${elementId}#${name}`;
     if (!builds.has(actionId)) {
       builds.set(actionId, {
@@ -409,6 +418,34 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         continue;
       }
 
+      const integration = INTEGRATION_RE.exec(rhs);
+      if (integration) {
+        const module = moduleOf(integration[1]);
+        if (module !== undefined && /IRest(Client|Service)/.test(integration[2])) {
+          syms.set(target, { t: "restApi", module, api: integration[3], consumed: /IRestClient/.test(integration[2]) });
+        } else {
+          syms.set(target, { t: "unknown" });
+        }
+        continue;
+      }
+      const restAction = REST_ACTION_RE.exec(rhs);
+      if (restAction) {
+        const api = syms.get(restAction[1]);
+        if (api?.t === "restApi") {
+          syms.set(target, {
+            t: "element",
+            ref: makeRef({
+              module: api.module,
+              kind: api.consumed ? "ConsumedRestMethod" : "RestMethod",
+              name: `${api.api}/${restAction[3]}`
+            })
+          });
+        } else {
+          syms.set(target, { t: "unknown" });
+        }
+        continue;
+      }
+
       const dependency = ADD_DEPENDENCY_RE.exec(rhs);
       if (dependency) {
         const kind = pendingSignature?.kind ?? normalizeKind(dependency[1]);
@@ -417,7 +454,7 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         if (kind !== undefined && path !== undefined && path.includes("/")) {
           const segments = path.split("/");
           const depModule = normalizeModuleName(segments[0]);
-          const depName = segments[segments.length - 1];
+          const depName = isRestKind(kind) ? segments.slice(1).join("/") : segments[segments.length - 1];
           const depFlow = segments.length >= 3 && isFlowQualified(kind) ? segments[1] : undefined;
           syms.set(target, { t: "element", ref: makeRef({ module: depModule, kind, uiFlow: depFlow, name: depName }) });
         } else {
@@ -442,6 +479,14 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         // --- an action flow on this element, or on the module ---
         const receiverSym = syms.get(receiver);
         const ownerKind: ElementKind | "module" = receiverSym?.t === "espace" ? "module" : ctx.kind;
+        // #90: an API-level callback (`api.CreateOnAfterResponseCallback()`) is the method's own flow
+        // when the element is that callback (`<Api>/OnAfterResponse`); it has no name literal.
+        const callback = /^Create(On\w+)Callback$/.exec(method);
+        if (callback !== null && (ctx.kind === "RestMethod" || ctx.kind === "ConsumedRestMethod")) {
+          if (ctx.name.endsWith(`/${callback[1]}`)) startAction(callback[1], ctx.kind, target);
+          else syms.set(target, { t: "unknown" });
+          continue;
+        }
         const actionKind = actionKindFor(method, ownerKind);
         if (actionKind !== undefined && firstLiteral !== undefined && firstLiteral.length > 0) {
           startAction(firstLiteral, actionKind, target);
@@ -449,6 +494,10 @@ export function parseElementFlows(text: string, ctx: FlowParseContext): ParsedEl
         }
 
         // --- the element itself (`flow.CreateScreen("Login")`) ---
+        if (method === "CreateIntegration") {
+          syms.set(target, { t: "self" }); // #90: the REST API the method hangs off
+          continue;
+        }
         if (method === "CreateScreen" || method === "CreateBlock" || method === "CreateWebBlock" || method === "CreateWebScreen") {
           syms.set(target, { t: "self" });
           continue;

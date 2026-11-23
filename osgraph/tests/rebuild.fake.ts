@@ -38,6 +38,8 @@ export interface FakeModule {
   app: ServiceStudioApp;
   dataModel: string;
   structures: string;
+  /** #90: `getIntegrations` text; only served (and only called) for `_API` / `_IS` modules. */
+  integrations?: string;
   screens: ServiceStudioElementName[];
   blocks: ServiceStudioElementName[];
   clientActions: ServiceStudioElementName[];
@@ -279,6 +281,7 @@ export class FakeReader implements ServiceStudioReader {
   }
   getDataModel(m: string) { return this.serve("getDataModel", m, undefined, (x) => x.dataModel); }
   getStructures(m: string) { return this.serve("getStructures", m, undefined, (x) => x.structures); }
+  getIntegrations(m: string) { return this.serve("getIntegrations", m, undefined, (x) => x.integrations ?? ""); }
   getScreenNames(m: string) { return this.serve("getScreenNames", m, undefined, (x) => x.screens); }
   getWebBlockNames(m: string) { return this.serve("getWebBlockNames", m, undefined, (x) => x.blocks); }
   getActionNames(m: string, objectType: "client" | "server" | "service") {

@@ -16,11 +16,12 @@
  * Security posture, unchanged from the kit and load-bearing: **every mutating route is
  * loopback-only.** Reading the page from a phone is a convenience; starting a job that drives
  * your Service Studio, or writing a scope file, is not something a device across the network gets
- * to do. The bind address defaults to every interface so the page opens from a phone; set
- * `OSGRAPH_PROGRESS_HOST=127.0.0.1` to keep it on this PC (see `SiteConfig.host`).
+ * to do. The bind address defaults to loopback; `OSGRAPH_PROGRESS_HOST=0.0.0.0` plus a viewer
+ * password opens the page to a phone (see `SiteConfig.host`).
  */
 
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
@@ -56,6 +57,8 @@ export interface SiteOptions {
   graphDir: string;
   scopesDir: string;
   host: string;
+  /** Required for LAN bind; HTTP Basic only over a trusted VPN/TLS reverse proxy. */
+  viewerPassword?: string;
   /** First port to try. */
   port: number;
   /** Consecutive ports attempted when one is in use. */
@@ -150,14 +153,134 @@ class FlowsCache {
   }
 }
 
+type GraphNode = { id: string; kind?: string; module?: string; label?: string; [key: string]: unknown };
+type GraphLink = { source: string; target: string; [key: string]: unknown };
+interface ViewGraph { nodes: GraphNode[]; links: GraphLink[]; graph?: { osgraph?: { modules?: string[]; [key: string]: unknown }; [key: string]: unknown } }
+
+/**
+ * One-slot scope graph cache: parsing happens only on an explicit graph-view request, never in
+ * /api/status. Bounded response views prevent full-graph downloads/vis layouts on every scope switch.
+ * Keep the old streaming /api/graph intact for existing API consumers.
+ */
+class GraphViewCache {
+  private cached: { file: string; stamp: number; size: number; data: ViewGraph } | null = null;
+  get(file: string): ViewGraph {
+    const stat = statSync(file);
+    if (stat.size > 100 * 1024 * 1024) throw new Error("graph exceeds the 100 MiB interactive-view limit");
+    if (this.cached && this.cached.file === file && this.cached.stamp === stat.mtimeMs && this.cached.size === stat.size) {
+      return this.cached.data;
+    }
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object") throw new Error("invalid graph JSON");
+    const data = parsed as ViewGraph;
+    if (!Array.isArray(data.nodes) || !Array.isArray(data.links)) throw new Error("invalid graph JSON");
+    this.cached = { file, stamp: stat.mtimeMs, size: stat.size, data };
+    return data;
+  }
+
+  view(file: string, view: string, params: URLSearchParams): Record<string, unknown> {
+    const data = this.get(file);
+    const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
+    const scope = data.graph?.osgraph?.modules ?? [];
+    const stats = {
+      nodes: data.nodes.length, edges: data.links.length,
+      modules: scope.length,
+      elementsInScope: data.nodes.filter((n) => n.kind !== "module" && scope.includes(n.module ?? "") && !n.external && !n.placeholder).length,
+      external: data.nodes.filter((n) => n.external).length,
+      placeholders: data.nodes.filter((n) => n.placeholder).length
+    };
+    if (view === "search") {
+      const q = (params.get("q") ?? "").trim().toLowerCase().slice(0, 160);
+      const requestedLimit = Number(params.get("limit") ?? 60);
+      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(60, Math.floor(requestedLimit))) : 60;
+      if (q.length < 2) return { results: [], count: 0 };
+      const matches = data.nodes.filter((n) => String(n.label ?? "").toLowerCase().includes(q) || n.id.toLowerCase().includes(q));
+      return { results: matches.slice(0, limit).map((n) => ({ id: n.id, label: n.label, kind: n.kind, module: n.module })), count: matches.length };
+    }
+    if (view === "overview") {
+      const modules = data.nodes.filter((n) => n.kind === "module").slice(0, 600);
+      const ids = new Set(modules.map((n) => n.id));
+      const links = data.links.filter((l) => ids.has(l.source) && ids.has(l.target)).slice(0, 2000);
+      return { nodes: modules, links, graph: data.graph, stats, limited: modules.length < data.nodes.filter((n) => n.kind === "module").length };
+    }
+    if (view === "module") {
+      const module = params.get("module") ?? "";
+      if (!module || module.length > 256) throw new Error("invalid module name");
+      const own = data.nodes.filter((n) => n.kind !== "module" && n.module === module).slice(0, 650);
+      const ownIds = new Set(own.map((n) => n.id));
+      const related = data.links.filter((e) => ownIds.has(e.source) || ownIds.has(e.target)).slice(0, 2500);
+      const extras = new Set<string>();
+      for (const e of related) {
+        if (!ownIds.has(e.source)) extras.add(e.source);
+        if (!ownIds.has(e.target)) extras.add(e.target);
+      }
+      const extra = [...extras].slice(0, Math.max(0, 900 - own.length)).map((id) => nodeById.get(id)).filter((n): n is GraphNode => n !== undefined);
+      const nodes = [...own, ...extra];
+      const ids = new Set(nodes.map((n) => n.id));
+      return {
+        nodes, links: related.filter((l) => ids.has(l.source) && ids.has(l.target)),
+        module, limited: own.length < data.nodes.filter((n) => n.kind !== "module" && n.module === module).length || extras.size > extra.length
+      };
+    }
+    throw new Error("unknown graph view");
+  }
+}
+
 /** Starts the site, stepping past busy ports. Resolves with the address it actually got. */
 export async function startSite(options: SiteOptions): Promise<LiveSite> {
   const dashboardDir = options.dashboardDir ?? defaultDashboardDir();
   const flows = new FlowsCache();
+  const graphViews = new GraphViewCache();
   const startedAt = new Date().toISOString();
-
+  const lanBind = options.host === "0.0.0.0" || options.host === "::";
+  const viewerPassword = options.viewerPassword;
+  if (lanBind && (typeof viewerPassword !== "string" || viewerPassword.length < 16)) {
+    throw new Error("LAN progress access requires OSGRAPH_PROGRESS_VIEWER_PASSWORD (16+ characters) and trusted TLS/VPN transport");
+  }
+  const csrfToken = randomBytes(32).toString("base64url");
+  const safeEqual = (a: string, b: string): boolean => {
+    const left = Buffer.from(a, "utf8"), right = Buffer.from(b, "utf8");
+    return left.length === right.length && timingSafeEqual(left, right);
+  };
+  const trustedLoopbackHost = (req: IncomingMessage): boolean => {
+    try {
+      const host = req.headers.host;
+      if (!host || Array.isArray(host)) return false;
+      const name = new URL(`http://${host}`).hostname.toLowerCase();
+      return name === "localhost" || name === "127.0.0.1" || name === "[::1]";
+    } catch { return false; }
+  };
+  const originAllowed = (req: IncomingMessage): boolean => {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (typeof origin !== "string" || typeof host !== "string") return false;
+    try {
+      const src = new URL(origin);
+      const expected = new URL(`http://${host}`);
+      return (src.protocol === "http:" || src.protocol === "https:") &&
+        src.origin === expected.origin;
+    } catch { return false; }
+  };
+  const viewerAuthorized = (req: IncomingMessage): boolean => {
+    if (!lanBind) return true;
+    const header = req.headers.authorization;
+    if (!header?.startsWith("Basic ")) return false;
+    try {
+      const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+      const separator = decoded.indexOf(":");
+      return separator > 0 && decoded.slice(0, separator) === "osgraph" &&
+        safeEqual(decoded.slice(separator + 1), viewerPassword ?? "");
+    } catch { return false; }
+  };
+  const securityHeaders: Record<string, string> = {
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY",
+    "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "cache-control": "no-store"
+  };
   const send = (res: ServerResponse, code: number, body: string | Buffer, type = "application/json; charset=utf-8"): void => {
-    res.writeHead(code, { "content-type": type, "cache-control": "no-store" });
+    res.writeHead(code, { ...securityHeaders, "content-type": type });
     res.end(body);
   };
 
@@ -193,19 +316,28 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
 
   const readBody = async (req: IncomingMessage): Promise<unknown> =>
     new Promise((resolve, reject) => {
-      let body = "";
+      let body = "", bytes = 0, settled = false;
+      const fail = (reason: Error): void => {
+        if (settled) return;
+        settled = true;
+        req.pause();
+        reject(reason);
+      };
       req.on("data", (chunk: Buffer | string) => {
+        if (settled) return;
+        bytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+        if (bytes > MAX_BODY_BYTES) return fail(new Error("body too large"));
         body += String(chunk);
-        if (body.length > MAX_BODY_BYTES) reject(new Error("body too large"));
       });
       req.on("end", () => {
+        if (settled) return;
         try {
-          resolve(body ? JSON.parse(body) : {});
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
+          const parsed = body ? JSON.parse(body) : {};
+          settled = true;
+          resolve(parsed);
+        } catch { fail(new Error("invalid JSON body")); }
       });
-      req.on("error", reject);
+      req.on("error", (err) => fail(err));
     });
 
   const discoveryRoute = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
@@ -224,8 +356,8 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     if (url.pathname === "/api/discover/modules") return send(res, 200, JSON.stringify(discovery.knownModules()));
 
     if (req.method !== "POST") return send(res, 405, JSON.stringify({ error: "POST only" }));
-    // The guard that makes a LAN-visible site safe: viewing is shared, acting is not.
-    if (!isLocal(req)) {
+    // Socket, Host, Origin and unpredictable same-origin CSRF token are all required.
+    if (!isLocal(req) || !trustedLoopbackHost(req)) {
       return send(
         res,
         403,
@@ -233,12 +365,24 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
       );
     }
 
-    const body = (await readBody(req)) as Record<string, unknown>;
+    if (!originAllowed(req)) return send(res, 403, JSON.stringify({ error: "Discovery actions require a same-origin browser request." }));
+    const supplied = req.headers["x-osgraph-csrf"];
+    if (typeof supplied !== "string" || !safeEqual(supplied, csrfToken)) {
+      return send(res, 403, JSON.stringify({ error: "Invalid discovery CSRF token." }));
+    }
+    if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      return send(res, 415, JSON.stringify({ error: "Discovery actions require application/json." }));
+    }
+    const body = await readBody(req);
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return send(res, 400, JSON.stringify({ error: "Discovery request must be a JSON object." }));
+    }
+    const input = body as Record<string, unknown>;
 
     if (url.pathname === "/api/discover/start") {
       // A discovery drives Service Studio, and so does a rebuild. Studio serialises badly enough
       // that letting both run would corrupt the rebuild's reads (ADR-0007).
-      if (options.state.rebuildActive && body["dryRun"] !== true) {
+      if (options.state.rebuildActive && input["dryRun"] !== true) {
         return send(
           res,
           409,
@@ -246,7 +390,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
         );
       }
       try {
-        return send(res, 200, JSON.stringify(await discovery.start(body)));
+        return send(res, 200, JSON.stringify(await discovery.start(input)));
       } catch (err) {
         return send(res, 409, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
@@ -257,7 +401,7 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     }
     if (url.pathname === "/api/discover/save") {
       try {
-        return send(res, 200, JSON.stringify(discovery.save(body)));
+        return send(res, 200, JSON.stringify(discovery.save(input)));
       } catch (err) {
         return send(res, 400, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
@@ -285,6 +429,15 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     }
     if (req.method !== "POST") return send(res, 405, JSON.stringify({ error: "POST only" }));
     if (control === null) return send(res, 409, JSON.stringify({ error: "No osgraph run is attached to this site." }));
+    if (localPeer(req)) {
+      // Same CSRF guard as discovery: a page from another origin open in this PC's browser must not
+      // be able to start or cancel the run. (A remote request needs the custom password header,
+      // which a cross-site page cannot send without a CORS preflight this server never grants.)
+      const supplied = req.headers["x-osgraph-csrf"];
+      if (!originAllowed(req) || typeof supplied !== "string" || !safeEqual(supplied, csrfToken)) {
+        return send(res, 403, JSON.stringify({ error: "Run control requires a same-origin request with the site's CSRF token." }));
+      }
+    }
     if (!localPeer(req)) {
       const header = req.headers["x-osgraph-password"];
       const auth = control.authorize?.(typeof header === "string" ? header : undefined) ?? "disabled";
@@ -314,6 +467,16 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
     void (async (): Promise<void> => {
       const url = new URL(req.url ?? "/", "http://localhost");
       try {
+        if (!viewerAuthorized(req)) {
+          res.setHeader("www-authenticate", 'Basic realm="OSGraph progress", charset="UTF-8"');
+          return send(res, 401, JSON.stringify({ error: "Authentication required." }));
+        }
+        if (url.pathname === "/api/security/csrf") {
+          if (req.method !== "GET" || !isLocal(req) || !trustedLoopbackHost(req)) {
+            return send(res, 403, JSON.stringify({ error: "Local same-origin access only." }));
+          }
+          return send(res, 200, JSON.stringify({ token: csrfToken }));
+        }
         if (url.pathname === "/" || url.pathname === "/index.html") {
           const file = join(dashboardDir, "index.html");
           if (!existsSync(file)) return send(res, 500, `dashboard/index.html not found at ${file}`, "text/plain; charset=utf-8");
@@ -333,15 +496,8 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
             JSON.stringify({
               ok: true,
               server: "osgraph",
-              pid: process.pid,
-              scopesDir: options.scopesDir,
-              graphDir: options.graphDir,
-              host: options.host,
-              port: (server.address() as { port?: number } | null)?.port ?? options.port,
-              scopes: scopeNames(),
-              rebuildActive: options.state.rebuildActive,
-              activeScope: options.state.activeScope,
-              startedAt
+              startedAt,
+              rebuildActive: options.state.rebuildActive
             })
           );
         }
@@ -367,18 +523,38 @@ export async function startSite(options: SiteOptions): Promise<LiveSite> {
         }
         if (url.pathname.startsWith("/api/run/")) return runControlRoute(req, res, url);
         if (url.pathname.startsWith("/api/discover/")) return await discoveryRoute(req, res, url);
+        if (url.pathname === "/api/graph/view") {
+          const scope = scopeOf(url);
+          const file = scopeFiles(options.graphDir, scope).graph;
+          if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: "No finalized graph available for this scope." }));
+          try {
+            const view = graphViews.view(file, url.searchParams.get("view") ?? "overview", url.searchParams);
+            res.setHeader("x-graph-which", options.state.snapshotIsPrevious(scope) ? "previous" : "current");
+            return send(res, 200, JSON.stringify(view));
+          } catch {
+            return send(res, 400, JSON.stringify({ error: "Graph view unavailable or invalid parameters." }));
+          }
+        }
         if (url.pathname === "/api/graph") {
           const scope = scopeOf(url);
           const file = scopeFiles(options.graphDir, scope).graph;
           if (!existsSync(file)) return send(res, 404, JSON.stringify({ error: `no graph for scope '${scope}' yet` }));
           // Streamed: a large scope's graph.json is tens of MB and must not be buffered.
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "x-graph-which": "current" });
+          res.writeHead(200, {
+            ...securityHeaders,
+            "content-type": "application/json",
+            "x-graph-which": options.state.snapshotIsPrevious(scope) ? "previous" : "current"
+          });
           createReadStream(file).pipe(res);
           return;
         }
         return send(res, 404, JSON.stringify({ error: "not found" }));
       } catch (err) {
-        return send(res, 500, JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        const isTooLarge = err instanceof Error && err.message === "body too large";
+        const invalidJson = err instanceof Error && err.message === "invalid JSON body";
+        return send(res, isTooLarge ? 413 : invalidJson ? 400 : 500, JSON.stringify({
+          error: isTooLarge ? "Request body too large." : invalidJson ? "Invalid JSON body." : "Internal progress server error."
+        }));
       }
     })();
   });
@@ -510,7 +686,7 @@ export function siteBanner(site: LiveSite, interfaces?: ReturnType<typeof networ
     lines.push("  controls: always on this PC; from other devices only with the run password set when osgraph run starts");
   } else {
     lines.push(`  this PC: ${site.urls[0] ?? "-"}`);
-    lines.push(`  bound to ${site.host} only; unset OSGRAPH_PROGRESS_HOST (or set it to 0.0.0.0) to open it from a phone`);
+    lines.push(`  bound to ${site.host} only; to open it from a phone set OSGRAPH_PROGRESS_HOST=0.0.0.0 and OSGRAPH_PROGRESS_VIEWER_PASSWORD (16+ characters)`);
   }
   return lines.join("\n");
 }

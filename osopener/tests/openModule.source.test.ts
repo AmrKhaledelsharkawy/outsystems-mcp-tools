@@ -17,6 +17,8 @@ import type { OpenModuleResult } from "../src/types.js";
 
 const MAIN_HWND = 1001;
 const DIALOG_HWND = 2002;
+const SAVE_HWND = 4004;
+const UNKNOWN_HWND = 5005;
 const MODULE = "Demo_Orders_BL";
 const RECENT_ITEM = "DemoOrders_BL@env.example"; // first `_` eaten as an Avalonia access-key mnemonic
 const notFound: HelperResult = { ok: false, error: { code: "UIA_ELEMENT_NOT_FOUND", message: "nope" } };
@@ -48,9 +50,10 @@ function config(): OsopenerConfig {
  * Fake Studio of the live dropdown shape: the shell Toggle opens an in-window menu with "Open from Environment..."
  * and, optionally, a recent-list entry for MODULE; Open from Environment raises a UIA-blind (CEF) dialog.
  */
-function fakeStudio(opts: { recent: boolean; alreadyOpen?: boolean }) {
+function fakeStudio(opts: { recent: boolean; alreadyOpen?: boolean; savePrompt?: boolean; unknownModal?: boolean; cancelOutcome?: "ok" | "fail"; recurringPrompt?: boolean }) {
   let menuOpen = false;
   let dialogOpen = false;
+  let savePrompt = opts.savePrompt === true;
   let opened: string | undefined = opts.alreadyOpen ? MODULE : undefined;
   let typed = "";
   const menuItems = ["Open from Environment...", "Open Files...", ...(opts.recent ? [RECENT_ITEM] : [])];
@@ -61,9 +64,19 @@ function fakeStudio(opts: { recent: boolean; alreadyOpen?: boolean }) {
     "foreground-title": () => ({ ok: true, title: "Editor", hwnd: 3003, isStudio: false }),
     refocus: () => ({ ok: true, restored: true }),
     "studio-dialog": () =>
-      dialogOpen
-        ? { ok: true, title: "Open from Environment", hwnd: DIALOG_HWND, isStudio: true }
-        : { ok: true, title: "Service Studio", hwnd: MAIN_HWND, isStudio: true },
+      savePrompt
+        ? { ok: true, title: "Save changes?", hwnd: SAVE_HWND, isStudio: true }
+        : opts.unknownModal
+          ? { ok: true, title: "Unexpected modal", hwnd: UNKNOWN_HWND, isStudio: true }
+          : dialogOpen
+            ? { ok: true, title: "Open from Environment", hwnd: DIALOG_HWND, isStudio: true }
+            : { ok: true, title: "Service Studio", hwnd: MAIN_HWND, isStudio: true },
+    "cancel-save-prompt": () => {
+      if (!savePrompt) return { ok: false, error: { code: "UNSAVED_CHANGES_DIALOG", message: "no verified save prompt" } };
+      if (opts.cancelOutcome === "fail") return { ok: false, error: { code: "UNSAVED_CHANGES_DIALOG", message: "Cancel button unavailable" } };
+      savePrompt = opts.recurringPrompt === true;
+      return { ok: true, method: "Cancel.Invoke" };
+    },
     "uia-click": (args) => {
       if (args.AutomationId === "^Toggle$") {
         menuOpen = true;
@@ -81,6 +94,9 @@ function fakeStudio(opts: { recent: boolean; alreadyOpen?: boolean }) {
       return notFound;
     },
     "uia-find": (args) => {
+      if (args.Hwnd === SAVE_HWND && args.ControlType === "Button") {
+        return { ok: true, count: 1, matches: [{}] };
+      }
       if (args.ControlType === "MenuItem" && !args.Hwnd) {
         const pool = menuOpen ? menuItems : [];
         const re = typeof args.Name === "string" ? new RegExp(args.Name) : undefined;
@@ -130,7 +146,7 @@ function fakeStudio(opts: { recent: boolean; alreadyOpen?: boolean }) {
     );
   const keys = () =>
     calls.filter((c) => c.command === "send-keys").flatMap((c) => [String(c.args.Keys), ...(c.args.Then ? [String(c.args.Then)] : [])]);
-  return { ctx, calls, recentTouches, keys, opened: () => opened };
+  return { ctx, calls, recentTouches, keys, opened: () => opened, savePrompt: () => savePrompt };
 }
 
 const stepNames = (r: OpenModuleResult) => r.steps.map((s) => s.step);
@@ -184,6 +200,56 @@ describe("openModule source", () => {
     expect(res).toMatchObject({ opened: true, alreadyOpen: true });
     expect(s.calls).toHaveLength(0);
     expect(stepNames(res)).toEqual(["listApps"]);
+  });
+
+  it("fails closed on a save prompt by default and never sends Cancel", async () => {
+    const s = fakeStudio({ recent: true, savePrompt: true });
+    const result = (await openModule.handler({ name: MODULE, source: "environment" }, s.ctx)) as OpenModuleResult;
+    expect(result.error?.code).toBe("UNSAVED_CHANGES_DIALOG");
+    expect(s.calls.some((c) => c.command === "cancel-save-prompt")).toBe(false);
+    expect(s.keys()).toEqual([]);
+    expect(s.savePrompt()).toBe(true);
+  });
+
+  it("opt-in cancels a verified prompt and retries exactly once without losing changes", async () => {
+    const s = fakeStudio({ recent: true, savePrompt: true });
+    const result = (await openModule.handler({ name: MODULE, source: "environment", cancelSavePrompt: true }, s.ctx)) as OpenModuleResult;
+    expect(result).toMatchObject({ opened: true, alreadyOpen: false });
+    expect(result.error).toBeUndefined();
+    expect(s.calls.filter((c) => c.command === "cancel-save-prompt")).toHaveLength(1);
+    expect(result.steps.find((st) => st.step === "cancel-save-prompt")).toMatchObject({ ok: true });
+    expect(s.opened()).toBe(MODULE);
+    expect(s.savePrompt()).toBe(false);
+  });
+
+  it("opt-in refuses an unknown Studio modal rather than closing it", async () => {
+    const s = fakeStudio({ recent: true, unknownModal: true });
+    const result = (await openModule.handler({ name: MODULE, cancelSavePrompt: true }, s.ctx)) as OpenModuleResult;
+    expect(result.opened).toBe(false);
+    expect(result.error?.code).toBe("UNSAVED_CHANGES_DIALOG");
+    expect(result.error?.message).toContain("no verified save prompt");
+    expect(s.calls.filter((c) => c.command === "cancel-save-prompt")).toHaveLength(1);
+    expect(s.keys()).toEqual([]);
+  });
+
+  it("opt-in reports an unavailable Cancel action and does not retry the open", async () => {
+    const s = fakeStudio({ recent: true, savePrompt: true, cancelOutcome: "fail" });
+    const result = (await openModule.handler({ name: MODULE, cancelSavePrompt: true }, s.ctx)) as OpenModuleResult;
+    expect(result.error?.code).toBe("UNSAVED_CHANGES_DIALOG");
+    expect(result.error?.message).toContain("Cancel button unavailable");
+    expect(s.calls.filter((c) => c.command === "cancel-save-prompt")).toHaveLength(1);
+    expect(s.savePrompt()).toBe(true);
+    expect(s.keys()).toEqual([]);
+  });
+
+  it("does not cancel a prompt twice when it reappears after the safe retry", async () => {
+    const s = fakeStudio({ recent: true, savePrompt: true, recurringPrompt: true });
+    const result = (await openModule.handler({ name: MODULE, cancelSavePrompt: true }, s.ctx)) as OpenModuleResult;
+    expect(result.opened).toBe(false);
+    expect(result.error?.code).toBe("UNSAVED_CHANGES_DIALOG");
+    expect(s.calls.filter((c) => c.command === "cancel-save-prompt")).toHaveLength(1);
+    expect(s.savePrompt()).toBe(true);
+    expect(s.keys()).toEqual([]);
   });
 
   it("rejects an unknown source value", async () => {

@@ -164,17 +164,26 @@ no stop command, no orphaned process holding a port.
 For the offline `reextract` command the site is **opt-in** (`--serve`), because that command is a
 one-shot process: a site raised there would die the instant it printed its own URL.
 
-### It opens from your phone by default
+### This PC by default; a phone needs a viewer password
 
-The site binds to every interface (`0.0.0.0`), so a long run can be watched from a phone or another
-PC on the same network. The banner puts the address to type on the phone first:
+The site binds to loopback (`127.0.0.1`) by default. To watch a long run from a phone or another PC
+on the same network, bind to every interface **and** set a viewer password (16+ characters; the
+browser asks for it with HTTP Basic, user `osgraph`):
+
+```
+OSGRAPH_PROGRESS_HOST=0.0.0.0
+OSGRAPH_PROGRESS_VIEWER_PASSWORD=<16+ characters>
+```
+
+A LAN bind without that password refuses to start. The banner then puts the address to type on the
+phone first:
 
 ```
 osgraph live progress site on 0.0.0.0:7473
   phone / other PCs: http://192.168.1.18:7473   (Ethernet 3, same network)
   this PC:           http://127.0.0.1:7473
   also:              http://172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)
-  controls (Start / Pause / Cancel) work only on this PC; other devices can watch
+  controls: always on this PC; from other devices only with the run password set when osgraph run starts
 ```
 
 Real Ethernet / Wi-Fi adapters come first; WSL, Hyper-V, Docker and VPN adapters are listed last and
@@ -182,12 +191,8 @@ marked, and only adapters that are actually up are shown. A laptop on Ethernet a
 reach each other when both are on the same router network (same `192.168.x.y` prefix) and the router
 does not isolate Wi-Fi clients (guest networks usually do).
 
-The page serves your module names, your graph and your live log **with no authentication** to
-anyone on that network. On a shared or untrusted network keep it on this PC:
-
-```
-OSGRAPH_PROGRESS_HOST=127.0.0.1
-```
+**Do not expose Basic authentication over unencrypted public or office-network HTTP:** use a trusted
+VPN or TLS reverse proxy, or stay on loopback.
 
 **Run control from your phone needs a run password.** When `osgraph run` starts with the site on the
 network, it asks at the laptop:
@@ -199,12 +204,14 @@ Set a run password to control this run from your phone (hidden; Enter = control 
 Type one, and the phone's page shows a password box next to Start / Pause / Resume / Cancel; type the
 same password there. Only a salted scrypt hash is kept, in memory, for this run only. The PC itself
 never needs it. Five wrong passwords within a minute lock remote control for a minute. For a
-non-interactive start set `OSGRAPH_CONTROL_PASSWORD` instead of answering the prompt. The site is
-plain HTTP, so the password crosses your network unencrypted: fine on your own Wi-Fi, not on a shared
-one.
+non-interactive start set `OSGRAPH_CONTROL_PASSWORD` instead of answering the prompt.
 
-**Every other mutating route stays loopback-only regardless of the bind address.** Starting a
-discovery or writing a scope file returns `403` to any device but the PC itself.
+**Progress HTTP security.** Run control from this PC, and every discovery POST, require a matching
+same-origin `Origin` and a server-issued CSRF token (the page fetches it from `/api/security/csrf`);
+discovery also needs a loopback socket and Host and `application/json`. Discovery and scope writes
+stay loopback-only regardless of the bind address. No tokens, filesystem paths or process IDs are
+included in `/api/health`. The graph explorer requires a locally vendored
+`dashboard/vis-network.min.js`; the CDN fallback is disabled for security.
 
 ### Turning it off
 
@@ -243,15 +250,38 @@ listed is forbidden:
 | Layer | May reference |
 |---|---|
 | `UI` | `UI`, `CW`, `SL` |
-| `CW` | `CW`, `SL` |
-| `SL` | `SL`, `BL` |
-| `BL` | `BL`, `CS` |
+| `CW` | `CW`, `SL`, `ST` |
+| `SL` | `SL`, `BL`, `ST` |
+| `API` | `API`, `BL`, `ST`, `LKP` (an `API` -> `CS` edge is a violation) |
+| `BL` | `BL`, `CS`, `IS`, `ST` |
+| `IS` | `IS`, `LKP`, `ST` |
 | `CS` | `CS` |
+| `ST` | `ST`, `LKP` |
 | `LKP` | `LKP` |
 
-A module's layer comes from its name suffix (`_UI`, `_CW`, `_SL`, `_BL`, `_CS`,
-`_LKP`); anything else is tagged `UNKNOWN` and never evaluated. Edit the file to match
-your own conventions.
+A module's layer comes from its name suffix (`_UI`, `_CW`, `_SL`, `_API`, `_BL`, `_IS`,
+`_CS`, `_ST`, `_LKP`); anything else is tagged `UNKNOWN` and never evaluated. Edit the
+file to match your own conventions.
+
+### REST methods (`_API` and `_IS` modules)
+
+A rebuild treats each REST method as an element, like a server action: an exposed method of
+an `_API` module is `osgraph://<Module>/RestMethod/<Api>/<Method>`, a consumed method of an
+`_IS` module is `osgraph://<Module>/ConsumedRestMethod/<Api>/<Method>`. Their texts are
+captured to `raw/<module>/RestAPI/<Api>/<Method>.txt`, the exposed method's calls become
+edges (so `queryImpact` answers "which endpoint breaks if I change X"), and its flow is
+walkable with `getFlow` and searchable with `searchFlows`.
+
+The read (`getIntegrations`, one call per module) is gated on the module suffix only:
+no other layer pays for it. Like every rebuild read it needs the modules **open** in
+Service Studio ([osopener](../osopener/)) and a human-approved session token
+([outsystems-token-manager](../outsystems-token-manager/)). Callbacks (`OnAuthentication`,
+`OnRequest`, `OnBeforeRequest`, `OnAfterResponse`) are captured as `<Api>/<Callback>` elements of
+the same kind. Studio declares each element lookup once per text, so every method text carries the
+text's lookup declarations as context and only its own statements as logic. A consumed method is
+called from inside its `_IS` module (the `IS_*` actions); `queryImpact(dependents)` therefore reaches
+BL callers through those actions. A text that yields no method is reported as a skipped `RestAPI`
+element rather than as an empty success.
 
 ---
 
@@ -379,6 +409,13 @@ the same as a full run. The comparison is one function (`decideChange` in `src/r
 stronger change signal can replace it later. Like every `osgraph run` mode this needs osopener and the
 token manager's session token. A failed module skips the re-extract and exits 1.
 
+**Safe Save-dialog recovery for `osgraph run`.** OSGraph explicitly asks osopener to cancel one
+*confirmed* Studio Save dialog using only its exact **Cancel** button, verifies that the prompt
+closed, then retries opening the same module once. This never clicks Save, Don't Save or Discard
+and never closes a modified module tab. Unknown dialogs, a missing Cancel action or a recurring
+prompt stop the run with diagnostics; previous completed captures remain resumable. Standalone
+osopener `openModule` retains fail-closed behavior unless a caller opts in.
+
 **Verifying `--changed` (human, live Service Studio required).** The listed version is trusted only
 after this probe passes: (1) publish a throwaway module and confirm the version `listApps` reports for
 it changes; (2) close and reopen an unchanged module (through *Open from Environment*) and confirm its
@@ -503,8 +540,7 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 
 ## Configuration
 
-| `OSGRAPH_PROGRESS_HOST` | no | `0.0.0.0` | Bind address. Every interface by default so a phone on the same network can watch; `127.0.0.1` keeps it on this PC — see [the site's section](#the-live-progress-site) |
-| `OSGRAPH_CONTROL_PASSWORD` | no | (prompt) | `osgraph run`: the run password that lets a phone use Start / Pause / Resume / Cancel, instead of answering the start-up prompt. Never logged |
+| Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `OSGRAPH_SERVICESTUDIO_URL` | for `rebuild` and `run` | — | The `servicestudio` MCP endpoint. No default: osgraph will not guess a port. Only commands that talk to Studio need it: `run` refuses to start without it (exit 2), the server and `reextract` start without it, and `rebuild` then refuses with `CONFIG_MISSING` (or `CONFIG_INVALID` for a non-http(s) value) when it is called |
 | `OSGRAPH_SERVICESTUDIO_TOKEN_FILE` | no | upward search for `token.txt` | Path to the session-token file. Unset (or naming a missing file): every command — `run`, `rebuild`, `doctor`, discovery — uses the nearest `token.txt` at or above the working directory, by the one rule `doctor` and osopener share, and logs one stderr line naming the file (never its contents). Only when no file is found does osgraph fall back to interactive mode (`createSessionToken`, which raises a human approval dialog). A found file that Studio rejects fails `TOKEN_EXPIRED`; it never falls back to interactive |
@@ -517,7 +553,8 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 | `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
 | `OSGRAPH_PROGRESS_SITE` | no | `on` | `off`/`0`/`false`/`no`/`none` disables the live progress site |
-| `OSGRAPH_PROGRESS_HOST` | no | `0.0.0.0` | Bind address. Every interface by default so a phone on the same network can watch; `127.0.0.1` keeps it on this PC — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. This PC only by default; `0.0.0.0` opens it to a phone and then requires `OSGRAPH_PROGRESS_VIEWER_PASSWORD` (16+ characters) — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_VIEWER_PASSWORD` | when host is `0.0.0.0` | — | 16+ characters; HTTP Basic (user `osgraph`) password for viewing the site from another device. Use only behind a trusted VPN/TLS proxy |
 | `OSGRAPH_CONTROL_PASSWORD` | no | (prompt) | `osgraph run`: the run password that lets a phone use Start / Pause / Resume / Cancel, instead of answering the start-up prompt. Never logged |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
 | `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |

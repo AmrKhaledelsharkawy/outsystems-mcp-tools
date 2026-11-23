@@ -90,6 +90,7 @@ export async function ensureSite(
         graphDir: config.graphDir,
         scopesDir: config.scopesDir,
         host: siteConfig.host,
+        ...(siteConfig.viewerPassword !== undefined ? { viewerPassword: siteConfig.viewerPassword } : {}),
         port: siteConfig.port,
         portScan: SITE_PORT_SCAN,
         state,

@@ -32,6 +32,7 @@ export default defineConfig({
       "tests/query.ergonomics.test.ts",
       "tests/raw.test.ts",
       "tests/readKinds.test.ts",
+      "tests/rest.test.ts",
       "tests/rebuild.test.ts",
       "tests/reextract.test.ts",
       "tests/run.test.ts",

@@ -70,13 +70,15 @@ export interface SiteConfig {
   /** `false` disables the site entirely (`OSGRAPH_PROGRESS_SITE=off`). Headless/CI escape hatch. */
   enabled: boolean;
   /**
-   * Bind address. Defaults to `0.0.0.0` so a long run can be watched from a phone or another PC on
-   * the same network (decided 2026-11-22). Viewing is unauthenticated: anyone on that network can
-   * read module names, the graph and the live log. Acting is not: every route that drives Service
-   * Studio (run Start/Pause/Resume/Cancel, discovery) answers only to the PC running the site.
-   * `OSGRAPH_PROGRESS_HOST=127.0.0.1` keeps the site on this PC only (shared or untrusted networks).
+   * Bind address. Defaults to `127.0.0.1` (this PC only; security default from #83, kept over the
+   * 2026-11-22 phone default when run control merged on 2026-11-24). `OSGRAPH_PROGRESS_HOST=0.0.0.0`
+   * opens it to a phone or another PC and then requires `OSGRAPH_PROGRESS_VIEWER_PASSWORD` (16+
+   * characters, HTTP Basic) to view. Acting from another device additionally needs the run password
+   * set when `osgraph run` starts; discovery and scope writes stay loopback-only.
    */
   host: string;
+  /** When host binds LAN, require an explicit shared secret (used only behind trusted TLS/VPN). */
+  viewerPassword?: string;
   /** First port tried; a busy port is stepped past (see `SITE_PORT_SCAN`). */
   port: number;
   /**
@@ -96,11 +98,12 @@ export const ENV_MAX_CONCURRENCY = "OSGRAPH_MAX_CONCURRENCY";
 export const ENV_SKIP_KINDS = "OSGRAPH_SKIP_KINDS";
 export const ENV_PROGRESS_SITE = "OSGRAPH_PROGRESS_SITE";
 export const ENV_PROGRESS_HOST = "OSGRAPH_PROGRESS_HOST";
+export const ENV_PROGRESS_VIEWER_PASSWORD = "OSGRAPH_PROGRESS_VIEWER_PASSWORD";
 export const ENV_PROGRESS_PORT = "OSGRAPH_PROGRESS_PORT";
 export const ENV_OSOPENER_DIST = "OSGRAPH_OSOPENER_DIST";
 
-/** Every interface by default, so the site opens from a phone — see `SiteConfig.host`. */
-export const DEFAULT_SITE_HOST = "0.0.0.0";
+/** Loopback by default; a phone needs an explicit LAN bind plus a viewer password — see `SiteConfig.host`. */
+export const DEFAULT_SITE_HOST = "127.0.0.1";
 export const DEFAULT_SITE_PORT = 7473;
 /** Consecutive ports tried when the first is taken, so two scopes can be watched at once. */
 export const SITE_PORT_SCAN = 20;
@@ -246,6 +249,7 @@ export function loadConfig(env: Env, options: LoadConfigOptions = {}): OsgraphCo
     site: {
       enabled: !SITE_OFF.has((nonEmpty(env[ENV_PROGRESS_SITE]) ?? "on").toLowerCase()),
       host: nonEmpty(env[ENV_PROGRESS_HOST]) ?? DEFAULT_SITE_HOST,
+      ...(nonEmpty(env[ENV_PROGRESS_VIEWER_PASSWORD]) ? { viewerPassword: nonEmpty(env[ENV_PROGRESS_VIEWER_PASSWORD]) } : {}),
       port: parseSitePort(env[ENV_PROGRESS_PORT]),
       osopenerDist: nonEmpty(env[ENV_OSOPENER_DIST]) ?? join(packageRoot, "..", "osopener", "dist")
     }
