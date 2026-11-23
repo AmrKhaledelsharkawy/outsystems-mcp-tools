@@ -64,8 +64,6 @@ describe("layers: API, IS and ST (#90)", () => {
 });
 
 const EXPOSED = `(OutSystems.Model.IESpace eSpace) => {
-    var mOD_DEMO_Orders_BL = eSpace.References.Named("MOD_DEMO_Orders_BL");
-    var mOD_DEMO_Orders_CS = eSpace.References.Named("MOD_DEMO_Orders_CS");
 
     /*** creating IRestService 'OrdersAPI' ***/
     var ordersAPI = eSpace.CreateIntegration<ServiceStudio.Plugin.RESTService.IRestService>("OrdersAPI");
@@ -75,6 +73,9 @@ const EXPOSED = `(OutSystems.Model.IESpace eSpace) => {
     getOrder.HTTPMethod = ServiceStudio.Plugin.RESTService.Enumerations.HTTPMethod.GET;
     var id = getOrder.CreateInputParameter("Id");
     var startNode = getOrder.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    // Real Studio text declares each lookup ONCE, in the first method that uses it; later methods reuse the var.
+    var mOD_DEMO_Orders_BL = eSpace.References.Named("MOD_DEMO_Orders_BL");
+    var mOD_DEMO_Orders_CS = eSpace.References.Named("MOD_DEMO_Orders_CS");
     var bL_GetOrder2 = mOD_DEMO_Orders_BL.ServerActions.Named("BL_GetOrder");
     var bL_GetOrder = getOrder.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("BL_GetOrder").ConnectedBelow(startNode);
     bL_GetOrder.Action = bL_GetOrder2;
@@ -87,6 +88,11 @@ const EXPOSED = `(OutSystems.Model.IESpace eSpace) => {
     var cS_GetTypeId = createOrder.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("CS_GetTypeId").ConnectedBelow(startNode2);
     cS_GetTypeId.Action = cS_GetTypeId2;
     var endNode2 = createOrder.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>().ConnectedBelow(cS_GetTypeId);
+
+    var onAuthentication = ordersAPI.CreateOnAuthenticationCallback();
+    onAuthentication.Nodes.ToList().ForEach(x => x.Delete());
+    var startNode3 = onAuthentication.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var endNode3 = onAuthentication.CreateNode<OutSystems.Model.Logic.Nodes.IEndNode>().ConnectedBelow(startNode3);
 }`;
 
 const CONSUMED = `(OutSystems.Model.IESpace eSpace) => {
@@ -98,17 +104,32 @@ const CONSUMED = `(OutSystems.Model.IESpace eSpace) => {
     charge.HTTPMethod = ServiceStudio.Plugin.REST.Enumerations.HTTPMethod.POST;
     charge.URLPath = "/charges";
     var amount = charge.CreateInputParameter("Amount");
+
+    var onAfterResponse = paymentsApi.CreateOnAfterResponseCallback();
+    onAfterResponse.Nodes.ToList().ForEach(x => x.Delete());
+    var startNode = onAfterResponse.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+}`;
+
+/** An IS wrapper action: calls the consumed method the way real IS actions do (Integrations.OfType lookups). */
+const IS_ACTION_TEXT = `(OutSystems.Model.IESpace eSpace) => {
+    /*** creating IServerAction 'IS_Charge' ***/
+    var iS_Charge = eSpace.CreateServiceAction("IS_Charge");
+    var startNode = iS_Charge.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var charge = iS_Charge.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("Charge");
+    var paymentsApi = eSpace.Integrations.OfType<ServiceStudio.Plugin.REST.IRestClient>().Named("PaymentsApi");
+    var charge2 = paymentsApi.Actions.OfType<ServiceStudio.Plugin.REST.IRestAction>().Named("Charge");
+    charge.Action = charge2;
+    var amount = charge2.InputParameters.OfType<ServiceStudio.Plugin.REST.IRestActionInput>().Named("Amount");
 }`;
 
 const BL_TEXT = `(OutSystems.Model.IESpace eSpace) => {
-    // IRestClientMethodSignature MOD_DEMO_Payments_IS/PaymentsApi/Charge
-    var charge = (ServiceStudio.Plugin.REST.IRestClientMethodSignature)eSpace.AddDependency(Services.ModelServices.ParseGlobalKey("k-charge"));
-
     /*** creating IServerAction 'BL_GetOrder' ***/
     var bL_GetOrder = eSpace.CreateServerAction("BL_GetOrder");
     var startNode = bL_GetOrder.CreateNode<OutSystems.Model.Logic.Nodes.IStartNode>();
+    var mOD_DEMO_Payments_IS = eSpace.References.Named("MOD_DEMO_Payments_IS");
+    var iS_Charge = mOD_DEMO_Payments_IS.ServiceActions.Named("IS_Charge");
     var pay = bL_GetOrder.CreateNode<OutSystems.Model.Logic.Nodes.IExecuteServerActionNode>("Pay");
-    pay.Action = charge;
+    pay.Action = iS_Charge;
 }`;
 
 const CS_TEXT = `(OutSystems.Model.IESpace eSpace) => {
@@ -133,7 +154,11 @@ function modules(): FakeModule[] {
       serverActions: [{ Name: "CS_GetTypeId", IsReferenced: false }],
       texts: { "ServerAction/CS_GetTypeId": CS_TEXT }
     }),
-    mod("MOD_DEMO_Payments_IS", { integrations: CONSUMED })
+    mod("MOD_DEMO_Payments_IS", {
+      integrations: CONSUMED,
+      serverActions: [{ Name: "IS_Charge", IsReferenced: false }],
+      texts: { "ServerAction/IS_Charge": IS_ACTION_TEXT }
+    })
   ];
 }
 
@@ -148,15 +173,17 @@ describe("splitIntegrations", () => {
     }
   });
 
-  it("returns one text per method, API order then method order, each with the API preamble", () => {
+  it("returns one text per method and callback, text order, each with the whole text's lookups as context", () => {
     const methods = splitIntegrations(EXPOSED, "exposed");
-    expect(methods.map((m) => `${m.api}/${m.method}`)).toEqual(["OrdersAPI/GetOrder", "OrdersAPI/CreateOrder"]);
+    expect(methods.map((m) => `${m.api}/${m.method}`)).toEqual(["OrdersAPI/GetOrder", "OrdersAPI/CreateOrder", "OrdersAPI/OnAuthentication"]);
     expect(methods.every((m) => !m.consumed)).toBe(true);
-    expect(methods[0].text).toContain('eSpace.References.Named("MOD_DEMO_Orders_BL")');
     expect(methods[0].text).toContain("BL_GetOrder");
-    expect(methods[0].text).not.toContain("CS_GetTypeId");
+    expect(methods[0].text).not.toContain(`("CS_GetTypeId")`.concat(".Connected"));
+    // CreateOrder never declares the CS reference itself (GetOrder did): it still gets it as context.
     expect(methods[1].text).toContain("CS_GetTypeId");
-    expect(methods[1].text).not.toContain("GetOrder");
+    expect(methods[1].text).toContain('var mOD_DEMO_Orders_CS = eSpace.References.Named("MOD_DEMO_Orders_CS")');
+    expect(methods[1].text).not.toContain('CreateAction("GetOrder")');
+    expect(methods[2].text).toContain("CreateOnAuthenticationCallback");
   });
 
   it("yields nothing for text with no REST API", () => {
@@ -201,8 +228,12 @@ describe("rebuild with REST (#90)", () => {
     const { dir } = await run();
     const api = readRawModule(dir, "demo", "MOD_DEMO_Orders_API");
     const rest = api.manifest.texts.filter((t) => t.kind === "RestMethod");
-    expect(rest.map((t) => t.file)).toEqual(["RestAPI/OrdersAPI/GetOrder.txt", "RestAPI/OrdersAPI/CreateOrder.txt"]);
-    expect(rest.map((t) => t.name)).toEqual(["OrdersAPI/GetOrder", "OrdersAPI/CreateOrder"]);
+    expect(rest.map((t) => t.file)).toEqual([
+      "RestAPI/OrdersAPI/GetOrder.txt",
+      "RestAPI/OrdersAPI/CreateOrder.txt",
+      "RestAPI/OrdersAPI/OnAuthentication.txt"
+    ]);
+    expect(rest.map((t) => t.name)).toEqual(["OrdersAPI/GetOrder", "OrdersAPI/CreateOrder", "OrdersAPI/OnAuthentication"]);
     const is = readRawModule(dir, "demo", "MOD_DEMO_Payments_IS");
     expect(is.manifest.texts.map((t) => `${t.kind}:${t.file}`)).toContain("ConsumedRestMethod:RestAPI/PaymentsApi/Charge.txt");
     // No other layer's manifest carries a REST entry (manifest check).
@@ -229,6 +260,16 @@ describe("rebuild with REST (#90)", () => {
     ).toBe(true);
   });
 
+  it("a lookup declared by another method is context, not a call: GetOrder has no edge to CS, CreateOrder does", async () => {
+    const { snapshot } = await run();
+    const to = (m: string) =>
+      snapshot.links
+        .filter((l) => l.source === `osgraph://MOD_DEMO_Orders_API/RestMethod/OrdersAPI/${m}`)
+        .map((l) => l.target);
+    expect(to("GetOrder")).not.toContain("osgraph://MOD_DEMO_Orders_CS/ServerAction/CS_GetTypeId");
+    expect(to("CreateOrder")).toContain("osgraph://MOD_DEMO_Orders_CS/ServerAction/CS_GetTypeId");
+  });
+
   it("queryImpact(dependents) from a consumed method reaches its BL caller and the exposed endpoint above it", async () => {
     const { snapshot } = await run();
     const impact = computeImpact(
@@ -237,6 +278,7 @@ describe("rebuild with REST (#90)", () => {
       "dependents"
     );
     const reached = impact.nodes.map((n) => n.id);
+    expect(reached).toContain("osgraph://MOD_DEMO_Payments_IS/ServerAction/IS_Charge");
     expect(reached).toContain("osgraph://MOD_DEMO_Orders_BL/ServerAction/BL_GetOrder");
     expect(reached).toContain("osgraph://MOD_DEMO_Orders_API/RestMethod/OrdersAPI/GetOrder");
   });

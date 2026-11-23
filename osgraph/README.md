@@ -255,10 +255,13 @@ walkable with `getFlow` and searchable with `searchFlows`.
 The read (`getIntegrations`, one call per module) is gated on the module suffix only:
 no other layer pays for it. Like every rebuild read it needs the modules **open** in
 Service Studio ([osopener](../osopener/)) and a human-approved session token
-([outsystems-token-manager](../outsystems-token-manager/)). The shape of the
-`getIntegrations` text is modelled on the Model API recipes and has not been confirmed
-against a live Studio build; a text that yields no method is reported as a skipped
-`RestAPI` element rather than as an empty success.
+([outsystems-token-manager](../outsystems-token-manager/)). Callbacks (`OnAuthentication`,
+`OnRequest`, `OnBeforeRequest`, `OnAfterResponse`) are captured as `<Api>/<Callback>` elements of
+the same kind. Studio declares each element lookup once per text, so every method text carries the
+text's lookup declarations as context and only its own statements as logic. A consumed method is
+called from inside its `_IS` module (the `IS_*` actions); `queryImpact(dependents)` therefore reaches
+BL callers through those actions. A text that yields no method is reported as a skipped `RestAPI`
+element rather than as an empty success.
 
 ---
 

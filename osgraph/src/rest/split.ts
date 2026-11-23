@@ -8,10 +8,15 @@
  * The read is gated on the module-name suffix ONLY (ADR-0016 read-cost rule): `restModeOf` is the single
  * gate, and no other layer ever pays for the call.
  *
- * UNVERIFIED against a live Studio build: the shape of the `getIntegrations` text is modelled on the
- * Model API creation recipes (`eSpace.CreateIntegration<...>("Api")` + `api.CreateAction("Method")`)
- * and on the anchor comments the other `get*` tools emit. A text with no recognisable API or method
- * yields no methods, never a guess.
+ * Shape of the live `getIntegrations` text (Studio 11.55, confirmed on an `_API` and an `_IS` module):
+ * one lambda; per API a creating-anchor comment (IRestService or IRestClient, then the API name), a
+ * `var a = eSpace.CreateIntegration<...>("Api")` line, then per method `var m = a.CreateAction("Method")`
+ * with its parameters and (exposed) its whole flow, then the API-level callbacks
+ * (`a.CreateOnAuthenticationCallback()`, `a.CreateOnAfterResponseCallback()`, ...). Element lookups
+ * (`var x = ...Named("...")`) are declared ONCE per text, in whichever method first used them, and
+ * reused by later methods and APIs, so a method cannot be read from its own slice alone: each method
+ * text carries the lookup declarations of the whole text as context (before its anchor, so they never
+ * create edges by themselves). A text with no recognisable API or method yields no methods.
  */
 
 export type RestMode = "exposed" | "consumed";
@@ -40,6 +45,11 @@ const ANCHOR_RE = /^\s*\/\*\*\* creating (I\w+) '([^']+)' \*\*\*\//;
 const REST_INTERFACE_RE = /rest|integration/i;
 const CREATE_INTEGRATION_RE = /\.CreateIntegration<[^>]*>\(\s*"([^"]+)"\s*\)/;
 const CREATE_ACTION_RE = /\.CreateAction\(\s*"([^"]+)"\s*\)/;
+/** `var x = a.CreateOnAfterResponseCallback();` - an API-level callback flow (OnRequest, OnAuthentication, ...). */
+const CREATE_CALLBACK_RE = /\.Create(On\w+)Callback\(\s*\)/;
+const VAR_RE = /^\s*var (\w+) = /;
+const LOOKUP_RE = /\.Named\(|\.AddDependency\(|\.GetESpace\(\)/;
+const SIGNATURE_RE = /^\s*\/\/\s*I\w+Signature\s/;
 
 interface ApiBlock {
   api: string;
@@ -49,63 +59,99 @@ interface ApiBlock {
 function apiBlocks(lines: string[]): ApiBlock[] {
   const blocks: ApiBlock[] = [];
   let current: ApiBlock | undefined;
-  const header: string[] = [];
   for (const line of lines) {
     const anchor = ANCHOR_RE.exec(line);
     if (anchor) {
-      current = REST_INTERFACE_RE.test(anchor[1]) ? { api: anchor[2], lines: [...header] } : undefined;
+      current = REST_INTERFACE_RE.test(anchor[1]) ? { api: anchor[2], lines: [] } : undefined;
       if (current) blocks.push(current);
       continue;
     }
     const create = CREATE_INTEGRATION_RE.exec(line);
     if (create && current === undefined) {
       // No anchors in the text: a CreateIntegration declaration starts the block.
-      current = { api: create[1], lines: [...header] };
+      current = { api: create[1], lines: [] };
       blocks.push(current);
     }
     if (current) current.lines.push(line);
-    else if (blocks.length === 0) header.push(line);
   }
   return blocks;
 }
 
-/**
- * Splits one `getIntegrations` text into per-method texts. Order is text order (API, then method), so
- * the raw manifest order is deterministic. Duplicate `<Api>/<Method>` pairs keep the first.
- */
-export function splitIntegrations(text: string, mode: RestMode): RestMethodText[] {
-  const out: RestMethodText[] = [];
-  const seen = new Set<string>();
-  for (const block of apiBlocks(text.split(/\r?\n/))) {
-    const starts: Array<{ at: number; method: string }> = [];
-    block.lines.forEach((line, at) => {
-      const m = CREATE_ACTION_RE.exec(line);
-      if (m) starts.push({ at, method: m[1] });
-    });
-    if (starts.length === 0) continue;
-    const preamble = block.lines.slice(0, starts[0].at);
-    starts.forEach((s, i) => {
-      const end = i + 1 < starts.length ? starts[i + 1].at : block.lines.length;
-      const key = restMethodName(block.api, s.method);
-      if (seen.has(key)) return;
-      seen.add(key);
-      out.push({
-        api: block.api,
-        method: s.method,
-        consumed: mode === "consumed",
-        text: [...preamble, ...block.lines.slice(s.at, end)].join("\n")
-      });
-    });
-  }
-  return out;
+function kindFor(consumed: boolean): "RestMethod" | "ConsumedRestMethod" {
+  return consumed ? "ConsumedRestMethod" : "RestMethod";
 }
 
 /**
- * The text an extractor / flow parser is handed for one method: every anchor comment of the raw text is
- * replaced by ONE anchor naming the method's own kind and `<Api>/<Method>`. The raw file stays verbatim;
- * this is applied in memory on both the live and the offline (`reextract`) path, so they cannot differ.
+ * Splits one `getIntegrations` text into per-method texts (a callback is a method named `On...`).
+ * Order is text order (API, then method/callback), so the raw manifest order is deterministic.
+ * Duplicate `<Api>/<Method>` pairs keep the first.
+ *
+ * Each text is: the lambda header, the lookup declarations of the WHOLE text that this method does not
+ * declare itself (with their `// I...Signature` comments), its API's `CreateIntegration` line, the
+ * method's own anchor, and its own statements - all verbatim slices of the original.
  */
-export function anchoredRestText(kind: "RestMethod" | "ConsumedRestMethod", name: string, text: string): string {
-  const kept = text.split(/\r?\n/).filter((l) => !ANCHOR_RE.test(l));
-  return [`/*** creating I${kind} '${name}' ***/`, ...kept].join("\n");
+export function splitIntegrations(text: string, mode: RestMode): RestMethodText[] {
+  const all = text.split(/\r?\n/);
+  const header = all.filter((l) => /^\s*\(.*\)\s*=>\s*\{?\s*$/.test(l)).slice(0, 1);
+  const consumed = mode === "consumed";
+
+  interface Seg {
+    api: string;
+    method: string;
+    integration: string;
+    lines: string[];
+  }
+  const segs: Seg[] = [];
+  const seen = new Set<string>();
+  // Lookup declarations, in text order, with their owning signature comment lines.
+  const lookups: Array<{ name: string; lines: string[]; seg: number }> = [];
+
+  for (const block of apiBlocks(all)) {
+    const integration = block.lines.find((l) => CREATE_INTEGRATION_RE.test(l)) ?? "";
+    let seg: Seg | undefined;
+    let pendingComments: string[] = [];
+    for (const line of block.lines) {
+      const action = CREATE_ACTION_RE.exec(line);
+      const callback = action ? null : CREATE_CALLBACK_RE.exec(line);
+      const method = action ? action[1] : callback ? callback[1] : undefined;
+      if (method !== undefined) {
+        const key = restMethodName(block.api, method);
+        seg = seen.has(key) ? undefined : { api: block.api, method, integration, lines: [] };
+        seen.add(key);
+        if (seg) segs.push(seg);
+      }
+      const v = VAR_RE.exec(line);
+      if (SIGNATURE_RE.test(line)) {
+        pendingComments.push(line);
+      } else if (v && LOOKUP_RE.test(line) && !CREATE_INTEGRATION_RE.test(line)) {
+        lookups.push({ name: v[1], lines: [...pendingComments, line], seg: seg ? segs.length - 1 : -1 });
+        pendingComments = [];
+      } else if (line.trim() !== "") {
+        pendingComments = [];
+      }
+      if (seg) seg.lines.push(line);
+    }
+  }
+
+  return segs.map((seg, index) => {
+    const own = new Set<string>();
+    for (const l of seg.lines) {
+      const v = VAR_RE.exec(l);
+      if (v) own.add(v[1]);
+    }
+    const context = lookups.filter((l) => l.seg !== index && !own.has(l.name)).flatMap((l) => l.lines);
+    const name = restMethodName(seg.api, seg.method);
+    return {
+      api: seg.api,
+      method: seg.method,
+      consumed,
+      text: [
+        ...header,
+        ...context,
+        ...(seg.integration !== "" ? [seg.integration] : []),
+        `/*** creating I${kindFor(consumed)} '${name}' ***/`,
+        ...seg.lines
+      ].join("\n")
+    };
+  });
 }
