@@ -16,6 +16,7 @@ import type { ServiceStudioSession } from "../src/rebuild/reader.js";
 import { stageModule } from "../src/rebuild/rebuild.js";
 import { readStage } from "../src/rebuild/stage.js";
 import { runScope, type RunCommonOptions } from "../src/run/run.js";
+import { RunControl } from "../src/run/control.js";
 import type { ServiceStudioApp } from "../src/servicestudio/types.js";
 import { FakeReader, syntheticWideModule, tokenExpiredError, type FakeModule, type FakeReaderOptions } from "./rebuild.fake.js";
 
@@ -628,6 +629,89 @@ describe("runScope: graceful cancellation (Ctrl+C)", () => {
     expect(result.finalized).toBe(true);
     expect(result.rows.find((r) => r.module === "alpha")?.outcome).toBe("skipped");
     expect(second.events).not.toContain("open:alpha");
+  });
+});
+
+describe("runScope with a RunControl (start gate, pause, cancel)", () => {
+  const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  for (const depth of [1, 2]) {
+    it(`depth ${depth}: waiting touches Studio not at all until Start`, async () => {
+      const s = fakeStudio(mods());
+      const control = new RunControl({ waitForStart: true });
+      let calls = 0;
+      const original = s.reader.listApps.bind(s.reader);
+      s.reader.listApps = async () => {
+        calls++;
+        return original();
+      };
+      const run = runScope({ ...common(tmp(), s, []), maxOpen: 12, pipelineDepth: depth, control });
+      await tick(40);
+      expect(guiEvents(s)).toEqual([]);
+      expect(calls).toBe(0);
+      expect(s.reader.calls).toHaveLength(0);
+      control.start();
+      const result = await run;
+      expect(result.finalized).toBe(true);
+      expect(guiEvents(s).filter((e) => e.startsWith("open:"))).toHaveLength(SCOPE.modules.length);
+    });
+
+    it(`depth ${depth}: Cancel while waiting opens nothing and records every module not-started`, async () => {
+      const s = fakeStudio(mods());
+      const control = new RunControl({ waitForStart: true });
+      const run = runScope({ ...common(tmp(), s, []), maxOpen: 12, pipelineDepth: depth, control });
+      await tick();
+      control.cancel();
+      const result = await run;
+      expect(result.cancelled).toBe(true);
+      expect(result.stoppedEarly).toContain("Every tab this run opened was closed");
+      expect(guiEvents(s)).toEqual([]);
+      expect(result.rows.every((r) => r.outcome === "not-started")).toBe(true);
+    });
+
+    it(`depth ${depth}: Pause holds every open and close until Resume; the run then completes`, async () => {
+      const s = fakeStudio(mods(), { readerOptions: { delayMs: () => 2 } });
+      const control = new RunControl();
+      const logs: string[] = [];
+      // Pause the moment the first module is open.
+      const log = (line: string): void => {
+        logs.push(line);
+        if (line.includes("open alpha ok")) control.pause();
+      };
+      const run = runScope({ ...common(tmp(), s, logs), log, maxOpen: 12, pipelineDepth: depth, control });
+      await tick(120);
+      const frozen = guiEvents(s);
+      // Paused right after alpha's open: no further GUI action started (not even alpha's close).
+      expect(frozen).toEqual(["open:alpha"]);
+      await tick(60);
+      expect(guiEvents(s)).toEqual(frozen);
+      control.resume();
+      const result = await run;
+      expect(result.finalized).toBe(true);
+      expect(s.open.size).toBe(0);
+    });
+  }
+
+  it("pipeline: an open still waiting its GUI turn when Cancel arrives is never started", async () => {
+    const s = fakeStudio(mods(), { readerOptions: { delayMs: ({ module }) => (module === "alpha" ? 5 : 0) } });
+    const control = new RunControl();
+    const logs: string[] = [];
+    // Pause right after alpha opens, so beta's open is queued behind the pause; then cancel.
+    const log = (line: string): void => {
+      logs.push(line);
+      if (line.includes("open alpha ok")) control.pause();
+    };
+    const run = runScope({ ...common(tmp(), s, logs), log, maxOpen: 12, pipelineDepth: 2, control });
+    await tick(60);
+    control.cancel();
+    const result = await run;
+    expect(result.cancelled).toBe(true);
+    expect(s.events).not.toContain("open:beta");
+    expect(result.rows.find((r) => r.module === "alpha")?.outcome).toBe("staged");
+    expect(result.rows.filter((r) => r.outcome === "not-started").map((r) => r.module)).toEqual(["beta", "gamma", "delta"]);
+    expect(s.open.size).toBe(0);
+    // The message is written after the last close, and says what happened to the tabs.
+    expect(result.stoppedEarly).toContain("Every tab this run opened was closed");
   });
 });
 

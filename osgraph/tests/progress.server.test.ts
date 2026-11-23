@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RunState } from "../src/progress/state.js";
-import { type DiscoveryRunner, type LiveSite, isLocal, reachableUrls, siteBanner, startSite } from "../src/progress/server.js";
+import { type DiscoveryRunner, type LiveSite, isLocal, lanAddresses, reachableUrls, siteBanner, startSite } from "../src/progress/server.js";
 import { defineScope } from "../src/scopes/store.js";
 
 let graphDir: string;
@@ -427,6 +427,156 @@ describe("binding", () => {
 
   it("tells you how to open it up when bound to loopback", async () => {
     const site = await serve();
-    expect(siteBanner(site)).toContain("OSGRAPH_PROGRESS_HOST=0.0.0.0");
+    expect(siteBanner(site)).toContain("OSGRAPH_PROGRESS_HOST=0.0.0.0 and OSGRAPH_PROGRESS_VIEWER_PASSWORD");
+  });
+
+  // A laptop on Ethernet with WSL installed: the phone line must be the Ethernet address, never WSL's.
+  const IFACES = {
+    "vEthernet (WSL (Hyper-V firewall))": [{ address: "172.23.32.1", family: "IPv4", internal: false }],
+    "Ethernet 3": [{ address: "192.168.1.18", family: "IPv4", internal: false }],
+    "Wi-Fi 3": [{ address: "169.254.10.2", family: "IPv4", internal: false }],
+    Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    "Ethernet 9": [{ address: "fe80::1", family: "IPv6", internal: false }]
+  } as unknown as ReturnType<typeof import("node:os").networkInterfaces>;
+
+  it("lists real adapters before virtual ones, skipping loopback, link-local and IPv6", () => {
+    expect(lanAddresses(IFACES)).toEqual([
+      { address: "192.168.1.18", adapter: "Ethernet 3", virtual: false },
+      { address: "172.23.32.1", adapter: "vEthernet (WSL (Hyper-V firewall))", virtual: true }
+    ]);
+    expect(reachableUrls("0.0.0.0", 7473, IFACES)).toEqual([
+      "http://127.0.0.1:7473",
+      "http://192.168.1.18:7473",
+      "http://172.23.32.1:7473"
+    ]);
+  });
+
+  it("the banner names the phone address first and marks virtual adapters", () => {
+    const fake = { host: "0.0.0.0", port: 7473, urls: reachableUrls("0.0.0.0", 7473, IFACES) } as unknown as LiveSite;
+    const banner = siteBanner(fake, IFACES);
+    const lines = banner.split("\n");
+    expect(lines[1]).toContain("phone / other PCs: http://192.168.1.18:7473");
+    expect(lines[1]).toContain("Ethernet 3");
+    expect(banner).toContain("this PC:           http://127.0.0.1:7473");
+    expect(banner).toContain("172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)");
+    expect(banner).toContain("from other devices only with the run password");
+  });
+});
+
+describe("run control routes (/api/run/*)", () => {
+  it("answer 409 when no run is attached, and status has no control", async () => {
+    const site = await serve();
+    expect((await post(site, "/api/run/start", {})).status).toBe(409);
+    const status = JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body) as Record<string, unknown>;
+    expect(status.control).toBeUndefined();
+  });
+
+  it("Start / Pause / Resume / Cancel drive the attached control; invalid actions are 409; GET is 405", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+
+    const status = JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body) as { control?: { state: string } };
+    expect(status.control?.state).toBe("waiting");
+    expect((await get(site, "/api/run/start")).status).toBe(405);
+    expect((await post(site, "/api/run/pause", {})).status).toBe(409);
+
+    const started = await post(site, "/api/run/start", {});
+    expect(started.status).toBe(200);
+    expect((started.json.control as { state: string }).state).toBe("running");
+    expect((await post(site, "/api/run/pause", {})).status).toBe(200);
+    expect(control.state).toBe("paused");
+    expect((await post(site, "/api/run/resume", {})).status).toBe(200);
+    expect((await post(site, "/api/run/cancel", {})).status).toBe(200);
+    expect(control.signal.aborted).toBe(true);
+    expect((await post(site, "/api/run/cancel", {})).status).toBe(409);
+    expect((await post(site, "/api/run/bogus", {})).status).toBe(404);
+    expect(JSON.parse((await get(site, "/api/run/control")).body).state).toBe("cancelling");
+  });
+
+  it("from this PC, need the same-origin CSRF token (a foreign page cannot start or cancel the run)", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+    const base = `http://127.0.0.1:${site.port}`;
+    expect((await fetch(`${base}/api/run/start`, { method: "POST" })).status).toBe(403);
+    const token = (await (await fetch(`${base}/api/security/csrf`)).json() as { token: string }).token;
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: "http://evil.example", "x-osgraph-csrf": token } })).status).toBe(403);
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: base, "x-osgraph-csrf": "wrong" } })).status).toBe(403);
+    expect(control.state).toBe("waiting");
+    expect((await fetch(`${base}/api/run/start`, { method: "POST", headers: { origin: base, "x-osgraph-csrf": token } })).status).toBe(200);
+    expect(control.state).toBe("running");
+  });
+});
+
+describe("run control from another device (password)", () => {
+  const remoteSite = async (password: string | undefined) => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    control.setRemotePassword(password);
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    // Every request is treated as coming from another device on the network.
+    const site = await startSite({
+      graphDir,
+      scopesDir,
+      host: "127.0.0.1",
+      port: 0,
+      portScan: 5,
+      state,
+      dashboardDir,
+      isLocalPeer: () => false
+    });
+    sites.push(site);
+    return { site, control };
+  };
+  const postPw = async (site: LiveSite, path: string, pw?: string) =>
+    (
+      await fetch(`http://127.0.0.1:${site.port}${path}`, {
+        method: "POST",
+        headers: pw !== undefined ? { "X-Osgraph-Password": pw } : {}
+      })
+    ).status;
+
+  it("without a run password: watch only (403), status says controlAccess none", async () => {
+    const { site, control } = await remoteSite(undefined);
+    expect(await postPw(site, "/api/run/start", "anything")).toBe(403);
+    expect(control.state).toBe("waiting");
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("none");
+  });
+
+  it("with a run password: right one acts, wrong one is 401, then 429 after repeated guesses", async () => {
+    const { site, control } = await remoteSite("phone-pass");
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("password");
+    expect(await postPw(site, "/api/run/start")).toBe(401);
+    expect(await postPw(site, "/api/run/start", "nope")).toBe(401);
+    expect(control.state).toBe("waiting");
+    expect(await postPw(site, "/api/run/start", "phone-pass")).toBe(200);
+    expect(control.state).toBe("running");
+    expect(await postPw(site, "/api/run/pause", "phone-pass")).toBe(200);
+    // Two wrong guesses so far (no password, "nope"); two more are 401, the fifth locks.
+    for (let i = 0; i < 2; i++) expect(await postPw(site, "/api/run/resume", "nope")).toBe(401);
+    expect(await postPw(site, "/api/run/resume", "nope")).toBe(429);
+    expect(await postPw(site, "/api/run/resume", "phone-pass")).toBe(429);
+    expect(control.state).toBe("paused");
+  });
+
+  it("this PC never needs the password", async () => {
+    const { RunControl } = await import("../src/run/control.js");
+    const state = new RunState({ graphDir });
+    const control = new RunControl({ waitForStart: true });
+    control.setRemotePassword("phone-pass");
+    state.beginRun(SCOPE, MODULES);
+    state.attachControl(control);
+    const site = await serve({ state });
+    expect((await post(site, "/api/run/start", {})).status).toBe(200);
+    expect(JSON.parse((await get(site, `/api/status?scope=${SCOPE}`)).body).controlAccess).toBe("local");
   });
 });

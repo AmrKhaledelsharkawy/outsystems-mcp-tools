@@ -152,8 +152,35 @@ export interface StatusLogLine {
   text: string;
 }
 
+/** `osgraph run`'s start gate / pause / cancel state (`RunControl.snapshot()`). */
+export interface StatusControl {
+  state: "waiting" | "running" | "paused" | "cancelling" | "done";
+  since: string;
+  can: { start: boolean; pause: boolean; resume: boolean; cancel: boolean };
+}
+
+/** What the site needs from a run's control object (kept structural: progress does not import run). */
+export interface RunControlHandle {
+  snapshot(): StatusControl;
+  act(action: "start" | "pause" | "resume" | "cancel"): boolean;
+  /** True when a remote-control password was set at the laptop. */
+  readonly remoteEnabled?: boolean;
+  /** Password check for a non-loopback request. */
+  authorize?(password: string | undefined): "ok" | "denied" | "locked" | "disabled";
+}
+
+/**
+ * Who may press the buttons, as seen by the requester: `local` (this PC), `password` (another device;
+ * a remote password is set), `none` (another device; control is this PC only).
+ */
+export type StatusControlAccess = "local" | "password" | "none";
+
 /** The whole `/api/status` body. */
 export interface Status {
+  /** Present while an `osgraph run` with a control object is attached to the site (active scope only). */
+  control?: StatusControl;
+  /** Present with `control`: whether THIS requester may act, and how. */
+  controlAccess?: StatusControlAccess;
   /** Existing global MCP permit gate, never one pool per module. */
   workers?: { readLimit: number; readActive: number; readQueued: number; readSlotUtilization: number | null;
     queueWaitP95Ms: number | null; retriedCalls: number | null };

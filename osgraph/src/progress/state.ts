@@ -20,7 +20,7 @@ import { statSync } from "node:fs";
 import { resolveScopeArtifactPaths } from "../graph/io.js";
 import { REBUILD_PHASES, type RebuildPerModule, type RebuildPhase, type RebuildProgressEvent, formatProgress } from "../rebuild/rebuild.js";
 import { readAllTimings } from "./timings.js";
-import type { CaptureOutcome, ModuleCost, ModuleLifecycle, RunLifecycle, RunMode, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
+import type { CaptureOutcome, ModuleCost, ModuleLifecycle, RunControlHandle, RunLifecycle, RunMode, Status, StatusCurrent, StatusFlows, StatusLogLine, StatusModuleRow } from "./types.js";
 
 /** Silence longer than this reads as stalled. A fetch phase is legitimately quiet for 20+ minutes. */
 export const STALL_AFTER_MS = 30 * 60_000;
@@ -123,6 +123,18 @@ export class RunState {
   constructor(options: RunStateOptions) {
     this.graphDir = options.graphDir;
     this.now = options.now ?? Date.now;
+  }
+
+  /** The attached run's start/pause/cancel control (`osgraph run`), or null. */
+  private control: RunControlHandle | null = null;
+
+  /** Attaches (or with null detaches) the control the site's Start / Pause / Resume / Cancel drive. */
+  attachControl(control: RunControlHandle | null): void {
+    this.control = control;
+  }
+
+  get runControl(): RunControlHandle | null {
+    return this.control;
   }
 
   /** True while a rebuild is walking Service Studio — what the kit needed a process scan for. */
@@ -553,6 +565,7 @@ export class RunState {
     const activeOpenCount = rows.filter((r) => r.lifecycle === "opening").length;
     const activeCloseCount = rows.filter((r) => r.lifecycle === "closing").length;
     return {
+      ...(isActive && this.control !== null ? { control: this.control.snapshot() } : {}),
       workers: {
         readLimit: isActive ? this.workers.limit : this.readLimit,
         readActive: isActive && !this.complete ? this.workers.active : 0,

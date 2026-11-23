@@ -112,6 +112,17 @@
   @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } .bar > i { transition: none; } }
   @media (max-width: 700px) { header { padding: 12px; } main { padding: 12px; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   [hidden] { display: none !important; }
+  /* run control (osgraph run: Start / Pause / Resume / Cancel) */
+  .ctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; background: var(--panel); border: 1px solid var(--line); }
+  .ctl .state { font-weight: 650; }
+  .ctl .state.waiting { color: var(--warn); }
+  .ctl .state.running { color: var(--ok); }
+  .ctl .state.paused { color: var(--warn); }
+  .ctl .state.cancelling, .ctl .state.done { color: var(--muted); }
+  .ctl .hint { color: var(--muted); font-size: 12px; flex: 1 1 260px; }
+  .ctl .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  @media (max-width: 600px) { .ctl .btns .btn { flex: 1 1 auto; padding: 12px 18px; } #ctlPw { width: 100% !important; } }
+  .btn.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
 </style>
 </head>
 <body>
@@ -122,6 +133,17 @@
 </header>
 
 <main id="runView">
+  <div class="ctl" id="ctl" hidden>
+    <span>Run: <span class="state" id="ctlState">–</span></span>
+    <span class="hint" id="ctlHint"></span>
+    <input id="ctlPw" type="password" placeholder="Run password" autocomplete="current-password" style="width:150px" hidden>
+    <span class="btns">
+      <button class="btn" id="ctlStart" hidden>Start</button>
+      <button class="btn ghost" id="ctlPause" hidden>Pause</button>
+      <button class="btn" id="ctlResume" hidden>Resume</button>
+      <button class="btn danger" id="ctlCancel" hidden>Cancel</button>
+    </span>
+  </div>
   <div id="banner" role="status" aria-live="polite"></div>
   <div class="pipeline-summary" id="pipelineSummary" aria-label="Live run mode and concurrency"><span id="runMode">Run not started</span><span id="workerSummary">Shared reads: unavailable</span><span id="pipelineSummaryCounts">No active modules</span></div>
   <div class="grid kpis">
@@ -334,7 +356,72 @@ async function refresh() {
     }
   }
 }
+const CTL_HINT = {
+  waiting: 'Nothing has touched Service Studio yet. Press Start when you are ready to leave the PC to it.',
+  running: 'Opening and closing modules takes the foreground for about a second each. Pause to use the PC.',
+  paused: 'No module is opened or closed while paused, so nothing takes the foreground. Reads of modules already open continue.',
+  cancelling: 'Opening nothing more. Modules already started finish, drain and close, then the report is written.',
+  done: 'The run has finished.'
+};
+// The remote-control password typed on this device (phone); kept for this tab only.
+const PW_KEY = 'osgraph.runPassword';
+const savedPw = () => { try { return sessionStorage.getItem(PW_KEY) ?? ''; } catch { return ''; } };
+const keepPw = (v) => { try { v ? sessionStorage.setItem(PW_KEY, v) : sessionStorage.removeItem(PW_KEY); } catch { /* private mode */ } };
+let ctlAccess = 'local';
+function renderControl(c, access) {
+  $('ctl').hidden = !c;
+  if (!c) return;
+  ctlAccess = access ?? ctlAccess;
+  const canAct = ctlAccess !== 'none';
+  $('ctlState').textContent = c.state;
+  $('ctlState').className = 'state ' + c.state;
+  $('ctlHint').textContent = !canAct
+    ? 'Watching only: no run password was set at the laptop when this run started, so the buttons work on the laptop only.'
+    : (CTL_HINT[c.state] ?? '');
+  const pw = $('ctlPw');
+  pw.hidden = ctlAccess !== 'password' || c.state === 'done' || c.state === 'cancelling';
+  if (!pw.hidden && document.activeElement !== pw && !pw.value) pw.value = savedPw();
+  $('ctlStart').hidden = !canAct || !c.can.start;
+  $('ctlPause').hidden = !canAct || !c.can.pause;
+  $('ctlResume').hidden = !canAct || !c.can.resume;
+  $('ctlCancel').hidden = !canAct || !c.can.cancel;
+}
+async function control(action) {
+  if (action === 'cancel' && !confirm('Cancel the run? Modules already started finish and close; the rest stay for the next run.')) return;
+  const headers = {};
+  if (ctlAccess === 'password') {
+    const pw = $('ctlPw').value;
+    if (!pw) { alert('Type the run password set at the laptop.'); $('ctlPw').focus(); return; }
+    headers['X-Osgraph-Password'] = pw;
+  }
+  for (const id of ['ctlStart', 'ctlPause', 'ctlResume', 'ctlCancel']) $(id).disabled = true;
+  try {
+    if (ctlAccess === 'local') {
+      if (!csrfToken) {
+        const t = await fetch('/api/security/csrf', { cache: 'no-store' });
+        csrfToken = t.ok ? ((await t.json()).token ?? null) : null;
+      }
+      if (csrfToken) headers['x-osgraph-csrf'] = csrfToken;
+    }
+    const r = await fetch('/api/run/' + action, { method: 'POST', headers });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok && ctlAccess === 'password') keepPw($('ctlPw').value);
+    if (r.status === 401) { keepPw(''); $('ctlPw').value = ''; }
+    if (!r.ok) alert(body.error ?? `${action} failed (${r.status})`);
+    if (body.control) renderControl(body.control);
+  } catch {
+    alert('The run is not reachable.');
+  } finally {
+    for (const id of ['ctlStart', 'ctlPause', 'ctlResume', 'ctlCancel']) $(id).disabled = false;
+    refresh();
+  }
+}
+$('ctlStart').onclick = () => control('start');
+$('ctlPause').onclick = () => control('pause');
+$('ctlResume').onclick = () => control('resume');
+$('ctlCancel').onclick = () => control('cancel');
 function renderRun(s) {
+  renderControl(s.control, s.controlAccess);
   const p = s.progress;
   const pct = safePct(p.pctByTime);
   $('pct').textContent = `${pct.toFixed(1)}%`;

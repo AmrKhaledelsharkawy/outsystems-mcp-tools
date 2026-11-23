@@ -17,6 +17,53 @@ import { describeLoadFailure, loadOsopenerAdapter } from "./osopener/adapter.js"
 import { createServiceStudioClient } from "./servicestudio/token.js";
 import { createSharedSessionFactory, createToolContext } from "./tools/tool.js";
 import { DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_OPEN, formatAge, refreshModule, refreshModules, runScope } from "./run/run.js";
+import { RunControl } from "./run/control.js";
+import { createInterface } from "node:readline";
+
+/** Environment alternative to the prompt (non-interactive starts). Never logged. */
+const ENV_CONTROL_PASSWORD = "OSGRAPH_CONTROL_PASSWORD";
+
+/**
+ * Reads a line from the terminal without echoing it (the remote-control password). Prompt and
+ * newline go to stderr, so `--json` output on stdout stays clean.
+ */
+function promptHidden(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    process.stderr.write(question);
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+    // Swallow readline's echo of the typed characters.
+    (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => undefined;
+    rl.once("line", (line) => {
+      rl.close();
+      process.stderr.write("\n");
+      resolve(line);
+    });
+    rl.once("SIGINT", () => {
+      rl.close();
+      process.stderr.write("\n");
+      resolve("");
+    });
+  });
+}
+
+/**
+ * `--wait`: Enter in the terminal presses Start. Only on an interactive terminal; returns the
+ * function that stops listening (stdin is released so the process can exit).
+ */
+function startOnEnter(control: RunControl, log: (line: string) => void): () => void {
+  if (process.stdin.isTTY !== true) return () => undefined;
+  const onData = (): void => {
+    if (control.start()) log("Start pressed in the terminal.");
+    stop();
+  };
+  const stop = (): void => {
+    process.stdin.off("data", onData);
+    process.stdin.pause();
+  };
+  process.stdin.on("data", onData);
+  process.stdin.resume();
+  return stop;
+}
 
 const EXIT_CONFIG = 2;
 const EXIT_FATAL = 1;
@@ -239,7 +286,8 @@ ${USAGE}`);
   if (refreshMode) {
     const unsupported = [
       ...(options["pipeline-depth"] !== undefined && pipelineDepth !== 1 ? ["--pipeline-depth"] : []),
-      ...(options.trace !== undefined ? ["--trace"] : [])
+      ...(options.trace !== undefined ? ["--trace"] : []),
+      ...(options.wait !== undefined ? ["--wait"] : [])
     ];
     if (unsupported.length > 0) {
       fail(
@@ -252,6 +300,10 @@ ${USAGE}`);
   }
   if (options.trace !== undefined && options.trace !== "true") {
     fail(EXIT_USAGE, `--trace takes no value.\n${USAGE}`);
+    return;
+  }
+  if (options.wait !== undefined && options.wait !== "true") {
+    fail(EXIT_USAGE, `--wait takes no value.\n${USAGE}`);
     return;
   }
   const graphDir = options["graph-dir"] ?? config.graphDir;
@@ -267,18 +319,19 @@ ${USAGE}`);
     `osgraph run --scope ${scopeName}${options.module !== undefined ? ` --module ${options.module}` : ""}`
   );
   const onExit = (): void => studioHold.release();
-  // A full run (`runScope`) cancels gracefully on the first Ctrl+C: no new opens, in-flight modules
-  // finish, drain and close, the report is written. A second Ctrl+C, or any signal in the refresh
-  // modes (which have no cancellation path), exits at once as before.
-  const cancel = new AbortController();
+  // A full run is driven by a RunControl: the site's Start / Pause / Resume / Cancel, Enter in this
+  // terminal (Start, with --wait) and Ctrl+C (Cancel) all act on it. The first Ctrl+C cancels gracefully:
+  // no new opens, in-flight modules finish, drain and close, the report is written. A second Ctrl+C, or
+  // any signal in the refresh modes (which have no cancellation path), exits at once as before.
+  const control = new RunControl({ waitForStart: options.wait === "true" });
+  control.onChange((state, previous) => log(`run control: ${previous} -> ${state}`));
   let graceful = false;
   const onSignal = (): void => {
-    if (graceful && !cancel.signal.aborted) {
+    if (graceful && control.cancel()) {
       log(
         "CANCEL requested: opening no more modules; waiting for the ones in flight to finish, drain and close " +
           "(press Ctrl+C again to exit immediately)."
       );
-      cancel.abort();
       return;
     }
     studioHold.release();
@@ -305,7 +358,7 @@ ${USAGE}`);
         maxOpen,
         maxFailures,
         pipelineDepth,
-        cancelSignal: cancel.signal,
+        control,
         enableGracefulCancel: () => {
           graceful = true;
         }
@@ -325,8 +378,8 @@ interface RunLockedArgs {
   maxOpen: number;
   maxFailures: number;
   pipelineDepth: number;
-  /** Aborted by the first Ctrl+C once `enableGracefulCancel` was called. */
-  cancelSignal: AbortSignal;
+  /** Start gate / pause / cancel for the full run (site buttons, Enter, Ctrl+C). */
+  control: RunControl;
   /** Called right before `runScope`: only the full run has a graceful cancellation path. */
   enableGracefulCancel: () => void;
 }
@@ -413,14 +466,47 @@ async function runRunLocked(
     for (const c of result.otherCaptures) lines.push(`    ${c.module}  captured ${c.capturedAt}  (${formatAge(c.ageMs)} old)`);
   } else {
     args.enableGracefulCancel();
-    const result = await runScope({
-      ...common,
-      maxOpen,
-      maxConsecutiveFailures: maxFailures,
-      pipelineDepth,
-      signal: args.cancelSignal,
-      ...(options.trace === "true" ? { trace: true } : {})
-    });
+    const { control } = args;
+    // Remote control (a phone's Start / Pause / Resume / Cancel) needs a password set here, at the
+    // laptop, for this run only. Asked only when the site is reachable from other devices.
+    if (site.url !== null && site.urls.length > 1) {
+      const fromEnv = process.env[ENV_CONTROL_PASSWORD];
+      let password = fromEnv;
+      if (password === undefined && process.stdin.isTTY === true) {
+        password = await promptHidden(
+          "Set a run password to control this run from your phone (hidden; Enter = control from this PC only): "
+        );
+      }
+      control.setRemotePassword(password);
+      log(
+        control.remoteEnabled
+          ? `remote control: ON. On the phone open ${site.urls[1]} and type the run password to use Start / Pause / Resume / Cancel.`
+          : "remote control: OFF. The buttons work on this PC only; other devices can watch."
+      );
+    }
+    site.state.attachControl(control);
+    const stopEnter = control.state === "waiting" ? startOnEnter(control, log) : () => undefined;
+    if (control.state === "waiting") {
+      log(
+        `READY: ${scope.modules.length} module(s), pipeline depth ${pipelineDepth}. Nothing touches Service Studio until you ` +
+          `press Start${site.url !== null ? ` on ${site.url} (this PC)` : ""} or Enter here.` +
+          (site.urls[1] !== undefined ? ` Watch from a phone: ${site.urls[1]}` : "")
+      );
+    }
+    let result: Awaited<ReturnType<typeof runScope>>;
+    try {
+      result = await runScope({
+        ...common,
+        maxOpen,
+        maxConsecutiveFailures: maxFailures,
+        pipelineDepth,
+        control,
+        ...(options.trace === "true" ? { trace: true } : {})
+      });
+    } finally {
+      stopEnter();
+      control.finish();
+    }
     releaseStudio();
     payload = result;
     const staged = result.rows.filter((r) => r.outcome === "staged").length;

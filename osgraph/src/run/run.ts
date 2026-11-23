@@ -39,6 +39,7 @@ import type { ScopeDefinition } from "../scopes/store.js";
 import { summarizeTrace, type CallTrace, type GuiSpan, type TraceSummary } from "../servicestudio/trace.js";
 import { OsgraphToolError, type ServiceStudioApp } from "../servicestudio/types.js";
 import { decideChange, readCaptureVersion, type ChangeReason } from "./changed.js";
+import type { RunControl } from "./control.js";
 import {
   defaultSleep,
   makeForegroundGate,
@@ -114,12 +115,26 @@ export interface RunScopeOptions extends RunCommonOptions {
    * `not-started`, and returns with `cancelled: true` and the previous graph untouched.
    */
   signal?: AbortSignal;
+  /**
+   * Start gate, pause/resume and cancel (progress-site buttons, Enter, Ctrl+C). In `waiting` the run
+   * touches Studio not at all until Start; `paused` holds every new open/close; its `signal` is used as
+   * `signal` when none is given.
+   */
+  control?: RunControl;
 }
 
-/** The `stoppedEarly` text of a cancelled run. */
+/** The start of every cancelled run's `stoppedEarly`; the tab outcome is appended to it. */
 export const RUN_CANCELLED_MESSAGE =
-  "cancelled (Ctrl+C): no new module was opened; modules already started finished and were staged, and the " +
-  "tabs this run opened were closed. Run the same command again to continue: staged modules are skipped.";
+  "cancelled: no new module was opened; modules already started finished and were staged. " +
+  "Run the same command again to continue: staged modules are skipped.";
+
+/** `RUN_CANCELLED_MESSAGE` plus what became of the tabs this run opened, checked after the last close. */
+function cancelledMessage(opener: OsopenerAdapter): string {
+  const left = opener.ownedModules();
+  return left.length === 0
+    ? `${RUN_CANCELLED_MESSAGE} Every tab this run opened was closed.`
+    : `${RUN_CANCELLED_MESSAGE} Still open, close by hand: ${left.join(", ")}.`;
+}
 
 export interface RunModuleRow {
   module: string;
@@ -395,7 +410,10 @@ function stagedNames(graphDir: string, scope: string): Set<string> {
  * tab it opened — because every later module would fail identically. Everything else is recorded
  * per module and the run continues, up to the circuit breaker.
  */
-export async function runScope(options: RunScopeOptions): Promise<RunScopeResult> {
+export async function runScope(input: RunScopeOptions): Promise<RunScopeResult> {
+  // The control's cancel is the run's cancel signal unless the caller passed its own.
+  const options: RunScopeOptions =
+    input.control !== undefined && input.signal === undefined ? { ...input, signal: input.control.signal } : input;
   const { scope, graphDir, opener } = options;
   const s = setup(options);
   const { log } = s;
@@ -451,6 +469,14 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
   let pipelineIncomplete: string | undefined;
   const tracer = options.trace === true ? startTrace(s) : undefined;
 
+  // Start gate (`--wait`): the site is up and the module list is on it, but nothing has touched
+  // Service Studio. Cancel while waiting falls through to the cancellation path with nothing started.
+  if (options.control?.state === "waiting") {
+    log("WAITING for Start: press Start on the progress site (or Enter here). Service Studio is untouched until then.");
+    await options.control.waitForStart();
+    if (options.signal?.aborted !== true) log("STARTED");
+  }
+
   await s.session.acquire();
   try {
     if (pipelineDepth >= 2) {
@@ -485,11 +511,13 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
         record({ module: mod, outcome: "skipped" });
         continue;
       }
+      // Paused: no GUI action starts until Resume (or Cancel). Nothing is open between modules here.
+      await options.control?.waitUntilActive();
       // Cancelled between modules: the previous module was already staged, drained and closed.
       if (options.signal?.aborted === true) {
         if (stoppedEarly === undefined) {
           stoppedEarly = RUN_CANCELLED_MESSAGE;
-          log(`CANCELLED: ${stoppedEarly}`);
+          log("CANCELLING: opening nothing more");
           options.state?.markCancelling?.();
         }
         record({ module: mod, outcome: "not-started" });
@@ -638,6 +666,8 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
       if (openedHere) {
         options.state?.setModuleLifecycle?.(mod, "closing", { openedHere });
         await s.sleep(s.gapMs);
+        // A close takes the foreground too: while paused it waits (the module is staged already).
+        await options.control?.waitUntilActive();
         const closed = await s.closeAfterDrain(mod);
         row.closed = closed.ok;
         if (closed.error !== undefined) row.closeError = closed.error;
@@ -701,7 +731,10 @@ export async function runScope(options: RunScopeOptions): Promise<RunScopeResult
     }
   }
 
-  const cancelled = options.signal?.aborted === true && stoppedEarly === RUN_CANCELLED_MESSAGE;
+  const cancelled = options.signal?.aborted === true && stoppedEarly?.startsWith(RUN_CANCELLED_MESSAGE) === true;
+  // The tab outcome is only known now, after the last close: never claim "closed" before it happened.
+  if (cancelled && stoppedEarly === RUN_CANCELLED_MESSAGE) stoppedEarly = cancelledMessage(opener);
+  if (cancelled) log(`CANCELLED: ${stoppedEarly}`);
   if (stoppedEarly !== undefined) {
     options.state?.failRun(cancelled ? "RUN_CANCELLED" : "RUN_STOPPED", stoppedEarly);
   } else if (finalized === undefined && failures > 0) {
@@ -872,6 +905,9 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
         const wait = s.gapMs - (Date.now() - lastGuiEnd);
         if (wait > 0) await s.sleep(wait);
       }
+      // Paused (or still waiting for Start): no GUI action begins, so nothing takes the foreground.
+      // Reads of modules already open go on meanwhile; they never pass through here.
+      await options.control?.waitUntilActive();
       options.state?.setGuiState?.(action, module, true);
       try {
         return await fn();
@@ -1079,9 +1115,12 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
     }
     options.state?.setModuleLifecycle?.(mod, "opening");
     const o0 = Date.now();
-    let opened: Awaited<ReturnType<typeof s.openWithRetry>>;
+    let opened: Awaited<ReturnType<typeof s.openWithRetry>> | null;
     try {
-      opened = await gui("open", mod, () => s.openWithRetry(mod));
+      // Re-checked inside the GUI turn: a stop, Cancel or Pause->Cancel that arrived while this open
+      // waited behind the cooldown or a pause must not start it (live 2026-11-22: it did, then had to
+      // be closed unread).
+      opened = await gui("open", mod, () => (abort ? Promise.resolve(null) : s.openWithRetry(mod)));
     } catch (err) {
       const e = errorOf(err);
       log(`${tagOf(mod)} open FAILED ${e.code}: ${e.message}`);
@@ -1091,6 +1130,12 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
         noteFatal(err);
       } else openFailed(mod, e);
       continue;
+    }
+    if (opened === null) {
+      // Not opened at all: the stop arrived first. The module goes back to the queue (not-started).
+      active.delete(lower(mod));
+      queue.unshift(mod);
+      break;
     }
     spanOf(mod).openMs = Date.now() - o0;
     if (!opened.ok) {
@@ -1125,10 +1170,8 @@ async function runPipelined(c: PipelineContext): Promise<PipelineOutcome> {
   // Let everything already started settle (its capture, drain and close) before touching the result.
   while (running.size > 0) await Promise.all([...running]);
   options.signal?.removeEventListener("abort", onCancel);
-  if (cancelled && stoppedEarly === undefined) {
-    stoppedEarly = RUN_CANCELLED_MESSAGE;
-    log(`CANCELLED: ${stoppedEarly}`);
-  }
+  // The final message (with the tab outcome) is set by runScope after the clean-up below has run.
+  if (cancelled && stoppedEarly === undefined) stoppedEarly = RUN_CANCELLED_MESSAGE;
 
   // Aborted: close what this process still owns (a failed close earlier, a refused one now). Best
   // effort and visible; never a tab the process did not open (closeOwned refuses those).

@@ -233,3 +233,11 @@ describe2("requiresServiceStudioAtStart (#7: which CLI commands fail at start wi
     }
   });
 });
+
+describe("progress site bind address", () => {
+  it("defaults to loopback (security default); OSGRAPH_PROGRESS_HOST=0.0.0.0 opens it to the network", () => {
+    const cwd = process.cwd();
+    expect(loadConfig({}, { cwd, existsSync: () => false }).site.host).toBe("127.0.0.1");
+    expect(loadConfig({ OSGRAPH_PROGRESS_HOST: "0.0.0.0" }, { cwd, existsSync: () => false }).site.host).toBe("0.0.0.0");
+  });
+});

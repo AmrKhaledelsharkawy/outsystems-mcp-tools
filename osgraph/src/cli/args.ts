@@ -90,6 +90,8 @@ read needs the human-approved session token the token manager keeps in token.txt
                                     --max-open, which still bounds ALL open tabs, yours included. Full run only:
                                     rejected with --module, --modules and --changed. On the first module failure
                                     the pipeline stops opening (depth 1 moves on to the next module)
+  --wait                            full run only: raise the progress site first and touch Service Studio not
+                                    at all until Start is pressed on the site (or Enter in the terminal)
   --trace                           full run only: write every Service Studio call and every open/close to
                                     <runDir>/calls.jsonl and a trace summary (queue wait, read-slot utilization,
                                     open/close time hidden behind reads vs exposed) to report.json
@@ -100,6 +102,10 @@ read needs the human-approved session token the token manager keeps in token.txt
   A full run is resumable: modules already staged are skipped, so re-run the same command to continue.
   Ctrl+C during a full run cancels gracefully: no new module is opened, modules already started finish,
   drain and close, and the report lists the rest as not-started. A second Ctrl+C exits immediately.
+  The progress site of a full run has Start / Pause / Resume / Cancel. Pause stops every open and close,
+  so nothing takes the foreground, while open modules keep reading. They always work on this PC; at
+  start the run asks for a run password (hidden; Enter = this PC only) that lets a phone use them too.
+  Non-interactive: OSGRAPH_CONTROL_PASSWORD=<password>. Five wrong passwords lock remote control for a minute.
 `;
 
 /** `--flag value` and `--flag=value`, with bare flags mapping to `"true"`. */

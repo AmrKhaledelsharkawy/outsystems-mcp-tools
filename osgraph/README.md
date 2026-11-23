@@ -164,34 +164,54 @@ no stop command, no orphaned process holding a port.
 For the offline `reextract` command the site is **opt-in** (`--serve`), because that command is a
 one-shot process: a site raised there would die the instant it printed its own URL.
 
-### It binds to loopback by default
+### This PC by default; a phone needs a viewer password
 
-The page serves your module names, your graph and your live log **with no authentication**. The
-shipped default is therefore `127.0.0.1`. To read it from your phone:
+The site binds to loopback (`127.0.0.1`) by default. To watch a long run from a phone or another PC
+on the same network, bind to every interface **and** set a viewer password (16+ characters; the
+browser asks for it with HTTP Basic, user `osgraph`):
 
 ```
 OSGRAPH_PROGRESS_HOST=0.0.0.0
-
-
-**Progress HTTP security (local and LAN):** The site binds to loopback by default. Discovery POST
-actions require a loopback socket, a loopback Host, matching same-origin Origin, a server-issued
-CSRF token (retrieved by the page from `/api/security/csrf`) and `application/json`.
-LAN binding (`OSGRAPH_PROGRESS_HOST=0.0.0.0`) now requires
-`OSGRAPH_PROGRESS_VIEWER_PASSWORD` with at least 16 characters; the browser authenticates
-with HTTP Basic user `osgraph`. **Do not expose Basic authentication over unencrypted public
-or office-network HTTP:** use a trusted VPN or TLS reverse proxy, or stay on loopback. Mutations
-remain local-only even when LAN viewing is authorized. No tokens, filesystem paths or process
-IDs are included in `/api/health`. The graph explorer requires a locally vendored
-`dashboard/vis-network.min.js`; the previous CDN fallback is disabled for security.
+OSGRAPH_PROGRESS_VIEWER_PASSWORD=<16+ characters>
 ```
 
-The banner then lists every address the site is genuinely reachable on — only adapters that are
-actually up, so it can never print a stale IP from a disconnected adapter.
+A LAN bind without that password refuses to start. The banner then puts the address to type on the
+phone first:
 
-**Mutating routes stay loopback-only regardless of the bind address.** Viewing the page is a
-convenience worth sharing; starting a discovery that opens modules in your live Service Studio, or
-writing a scope file, is not something a device across the network gets to do. Those return `403`
-to any non-loopback peer.
+```
+osgraph live progress site on 0.0.0.0:7473
+  phone / other PCs: http://192.168.1.18:7473   (Ethernet 3, same network)
+  this PC:           http://127.0.0.1:7473
+  also:              http://172.23.32.1:7473   (vEthernet (WSL (Hyper-V firewall)), virtual: not for a phone)
+  controls: always on this PC; from other devices only with the run password set when osgraph run starts
+```
+
+Real Ethernet / Wi-Fi adapters come first; WSL, Hyper-V, Docker and VPN adapters are listed last and
+marked, and only adapters that are actually up are shown. A laptop on Ethernet and a phone on Wi-Fi
+reach each other when both are on the same router network (same `192.168.x.y` prefix) and the router
+does not isolate Wi-Fi clients (guest networks usually do).
+
+**Do not expose Basic authentication over unencrypted public or office-network HTTP:** use a trusted
+VPN or TLS reverse proxy, or stay on loopback.
+
+**Run control from your phone needs a run password.** When `osgraph run` starts with the site on the
+network, it asks at the laptop:
+
+```
+Set a run password to control this run from your phone (hidden; Enter = control from this PC only):
+```
+
+Type one, and the phone's page shows a password box next to Start / Pause / Resume / Cancel; type the
+same password there. Only a salted scrypt hash is kept, in memory, for this run only. The PC itself
+never needs it. Five wrong passwords within a minute lock remote control for a minute. For a
+non-interactive start set `OSGRAPH_CONTROL_PASSWORD` instead of answering the prompt.
+
+**Progress HTTP security.** Run control from this PC, and every discovery POST, require a matching
+same-origin `Origin` and a server-issued CSRF token (the page fetches it from `/api/security/csrf`);
+discovery also needs a loopback socket and Host and `application/json`. Discovery and scope writes
+stay loopback-only regardless of the bind address. No tokens, filesystem paths or process IDs are
+included in `/api/health`. The graph explorer requires a locally vendored
+`dashboard/vis-network.min.js`; the CDN fallback is disabled for security.
 
 ### Turning it off
 
@@ -533,7 +553,9 @@ Live check (human, local): run the three CLI commands and the matching MCP tools
 | `OSGRAPH_REBUILD_PROGRESS` | no | `1` | Progress on stderr: `1` module+phase lines, `verbose` per element, `off` silent |
 | `OSGRAPH_ID_PREFIX` | no | `osgraph://` | Node id prefix |
 | `OSGRAPH_PROGRESS_SITE` | no | `on` | `off`/`0`/`false`/`no`/`none` disables the live progress site |
-| `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. `0.0.0.0` to read it from another device — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_HOST` | no | `127.0.0.1` | Bind address. This PC only by default; `0.0.0.0` opens it to a phone and then requires `OSGRAPH_PROGRESS_VIEWER_PASSWORD` (16+ characters) — see [the site's section](#the-live-progress-site) |
+| `OSGRAPH_PROGRESS_VIEWER_PASSWORD` | when host is `0.0.0.0` | — | 16+ characters; HTTP Basic (user `osgraph`) password for viewing the site from another device. Use only behind a trusted VPN/TLS proxy |
+| `OSGRAPH_CONTROL_PASSWORD` | no | (prompt) | `osgraph run`: the run password that lets a phone use Start / Pause / Resume / Cancel, instead of answering the start-up prompt. Never logged |
 | `OSGRAPH_PROGRESS_PORT` | no | `7473` | First port tried; a busy one is stepped past (up to 20) |
 | `OSGRAPH_OSOPENER_DIST` | no | `../osopener/dist` | osopener's build, used by module discovery and `osgraph run`. The repo's own layout needs no setting |
 | `OSGRAPH_STUDIO_LOCK` | no | `<tmpdir>/osgraph-studio.lock` | Cross-process Service Studio lock file (ADR-0017). `osgraph run`, MCP `rebuild` and module discovery hold it while they open, read and close tabs; a second contender fails fast with `BUSY` naming the holder. Every osgraph process on the machine must use the same path |
